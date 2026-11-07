@@ -29,7 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 object Palette {
-    val Logo = Color(0xFF2B3A57)
+    val Logo = Color(0xFF14B8A6)
     val Ink = Color(0xFF090D13)
     val Panel = Color(0xFF121822)
     val PanelRaised = Color(0xFF1A2230)

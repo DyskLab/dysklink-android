@@ -44,14 +44,14 @@ fun LogoMark(size: Dp = 40.dp) {
     Box(
         modifier = Modifier
             .size(size)
-            .clip(RoundedCornerShape(size * 0.3f))
+            .clip(RoundedCornerShape(size * 0.24f))
             .background(Palette.Logo),
         contentAlignment = Alignment.Center,
     ) {
         Image(
             painter = painterResource(R.drawable.ic_logo_glyph),
             contentDescription = "DyskLink logo",
-            modifier = Modifier.size(size * 0.78f),
+            modifier = Modifier.size(size),
         )
     }
 }

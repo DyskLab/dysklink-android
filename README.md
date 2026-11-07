@@ -25,7 +25,7 @@ You need both.
 ## Download
 You need Android 8 or later.
 
-1. Download `DyskLink-android-0.1.0.apk` from the
+1. Download `DyskLink-android-0.1.1.apk` from the
    [latest release](https://github.com/DyskLab/dysklink-android/releases/latest) and open it on your phone. Android asks
    you to allow installing from that source.
 2. [Install the Mac app](https://github.com/DyskLab/dysklink-mac#download) and open it on the same network.
