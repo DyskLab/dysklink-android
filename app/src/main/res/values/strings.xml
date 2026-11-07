@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_description">Lets a paired Mac tap, swipe, and type on this phone over local Wi-Fi. It only works when Control from Mac is turned on in DyskLink, and never while the phone is locked. This service does not send screen content through Accessibility. If you turn on automatic copy, it also checks the labels of buttons you tap and of toasts for words like Copy, and sends the clipboard to your Mac. Those labels are not stored or sent.</string>
+</resources>
