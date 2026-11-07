@@ -1,13 +1,38 @@
-# DyskLink for Android
+<p align="center">
+  <img src="docs/icon.png" width="88" alt="DyskLink">
+</p>
 
-Connects your Android phone and Mac over local Wi-Fi, with no cloud and no account.
+<h1 align="center">DyskLink for Android</h1>
+
+<p align="center">Connects your Android phone and Mac over local Wi-Fi, with no cloud and no account.</p>
+
+<p align="center">
+  <a href="https://github.com/DyskLab/dysklink-android/releases/latest"><img src="https://img.shields.io/github/v/release/DyskLab/dysklink-android?include_prereleases" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/DyskLab/dysklink-android" alt="MIT License"></a>
+  <a href="https://www.fanny.dev/dysklab"><img src="https://img.shields.io/badge/part%20of-DyskLab-2DD4A7" alt="Part of DyskLab"></a>
+  <a href="https://buymeacoffee.com/fannydevz"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=000" alt="Buy Me a Coffee"></a>
+</p>
+
+| Looking for your Mac | Pairing |
+| --- | --- |
+| <img src="docs/screenshots/01-home.png" width="280" alt="Looking for your Mac"> | <img src="docs/screenshots/02-pairing.png" width="280" alt="Matching the pairing code"> |
 
 **This is the phone app. The Mac app is [DyskLink for Mac](https://github.com/DyskLab/dysklink-mac).**
 You need both.
 
-[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-fannydevz-ffdd00?logo=buymeacoffee&logoColor=000)](https://buymeacoffee.com/fannydevz)
+> DyskLink is in early development, so expect rough edges.
 
-> DyskLink is in early development. There are no prebuilt downloads yet, so you build it from source.
+## Download
+You need Android 8 or later.
+
+1. Download `DyskLink-android-0.1.0.apk` from the
+   [latest release](https://github.com/DyskLab/dysklink-android/releases/latest) and open it on your phone. Android asks
+   you to allow installing from that source.
+2. [Install the Mac app](https://github.com/DyskLab/dysklink-mac#download) and open it on the same network.
+3. Compare the code on both devices and confirm.
+
+This APK is a debug build signed with a development key, so read [Current security limits](#current-security-limits)
+first. A later release signed with a different key needs you to uninstall this one first, which erases your pairings.
 
 ## Features
 - **Connection:** encrypted pairing, multiple Macs, automatic reconnection, and connectivity reports (carrier,
@@ -110,3 +135,8 @@ service, and the data folder, because changing them would erase existing pairing
 ## Support
 DyskLink is free and open source under the [MIT License](LICENSE). If it helps you, you can
 [buy me a coffee](https://buymeacoffee.com/fannydevz).
+
+## Part of DyskLab
+DyskLink is part of [DyskLab](https://www.fanny.dev/dysklab), alongside
+[DyskFlow](https://github.com/DyskLab/dyskflow), [DyskFiles](https://github.com/DyskLab/dyskfiles), and
+[DyskFocus](https://github.com/DyskLab/dyskfocus).
