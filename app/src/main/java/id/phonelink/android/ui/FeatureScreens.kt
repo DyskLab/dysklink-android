@@ -377,8 +377,9 @@ fun CommandsScreen(
 // File transfer
 
 @Composable
-fun TransferRow(transfer: Transfer) {
-    GlassCard {
+fun TransferRow(transfer: Transfer, onOpen: ((Transfer) -> Unit)? = null) {
+    val canOpen = onOpen != null && !transfer.outgoing && transfer.status == TransferStatus.Done && transfer.uri != null
+    GlassCard(onClick = if (canOpen) ({ onOpen?.invoke(transfer) }) else null) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 transfer.name,
@@ -410,7 +411,7 @@ fun TransferRow(transfer: Transfer) {
         }
         transfer.detail?.let {
             Spacer(Modifier.height(5.dp))
-            Text(it, color = Palette.TextFaint, fontSize = 12.sp)
+            Text(if (canOpen) "$it · Tap to open" else it, color = Palette.TextFaint, fontSize = 12.sp)
         }
     }
 }

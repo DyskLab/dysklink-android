@@ -53,6 +53,7 @@ import id.phonelink.android.core.Peer
 import id.phonelink.android.core.PhoneFeature
 import id.phonelink.android.core.PhoneLinkProtocol
 import id.phonelink.android.core.Transfer
+import id.phonelink.android.service.Updates
 
 data class UiState(
     val localName: String,
@@ -69,6 +70,8 @@ data class UiState(
     val phoneEnabled: Set<PhoneFeature>,
     val phoneActive: Set<PhoneFeature>,
     val screenPeer: String?,
+    val updates: Updates.State = Updates.State(),
+    val appVersion: String = "",
 )
 
 data class UiActions(
@@ -90,6 +93,11 @@ data class UiActions(
     val grantPhoneFeature: (PhoneFeature) -> Unit,
     val startScreen: (peerId: String) -> Unit,
     val stopScreen: () -> Unit,
+    val downloadUpdate: () -> Unit = {},
+    val skipUpdate: () -> Unit = {},
+    val checkUpdates: () -> Unit = {},
+    val setAutoUpdates: (Boolean) -> Unit = {},
+    val openTransfer: (Transfer) -> Unit = {},
 )
 
 @Composable
@@ -119,6 +127,7 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                         onSendFiles = { actions.sendFiles(selected.id) },
                         onToggleClipboard = actions.setClipboardEnabled,
                         onToggleClipboardAuto = actions.setClipboardAuto,
+                        onOpenTransfer = actions.openTransfer,
                         onUnpair = {
                             actions.unpair(selected.id)
                             selectedId = null
@@ -169,6 +178,7 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                 onRemoveManual = actions.removeManual,
                 onAllowBackground = actions.allowBackground,
                 onOpenSettings = actions.openAppSettings,
+                actions = actions,
             )
         }
         if (showManual) {
@@ -196,6 +206,7 @@ private fun HomeScreen(
     onRemoveManual: (ManualTarget) -> Unit,
     onAllowBackground: () -> Unit,
     onOpenSettings: () -> Unit,
+    actions: UiActions,
 ) {
     Column(
         Modifier
@@ -219,6 +230,11 @@ private fun HomeScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
+
+        state.updates.available?.let { release ->
+            UpdateBanner(release.version, actions.downloadUpdate, actions.skipUpdate)
+            Spacer(Modifier.height(20.dp))
+        }
 
         if (state.batteryRestricted) {
             BackgroundCard(onAllowBackground, onOpenSettings)
@@ -291,6 +307,61 @@ private fun HomeScreen(
         }
 
         SecondaryButton("Connect with an IP address", Modifier.fillMaxWidth(), onClick = onManual)
+        Spacer(Modifier.height(24.dp))
+        UpdatesCard(state.updates, state.appVersion, actions)
+    }
+}
+
+@Composable
+private fun UpdateBanner(version: String, onDownload: () -> Unit, onSkip: () -> Unit) {
+    GlassCard {
+        Text("DyskLink $version is available", color = Palette.Mint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Download opens the new APK in your browser. Android asks before it installs, and your pairings stay.",
+            color = Palette.TextSecondary,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+        )
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SecondaryButton("Skip", Modifier.weight(1f), onClick = onSkip)
+            PrimaryButton("Download", Modifier.weight(1f), onClick = onDownload)
+        }
+    }
+}
+
+@Composable
+private fun UpdatesCard(updates: Updates.State, version: String, actions: UiActions) {
+    GlassCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Check for updates", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Once a day, reads the list of releases on GitHub and tells you when a new version is out. Nothing is downloaded until you choose Download.",
+                    color = Palette.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+            }
+            Switch(
+                checked = updates.auto,
+                onCheckedChange = actions.setAutoUpdates,
+                modifier = Modifier.padding(start = 10.dp),
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            updates.status ?: "This is version $version.",
+            color = Palette.TextSecondary,
+            fontSize = 13.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        SecondaryButton(
+            if (updates.isChecking) "Checking…" else "Check now",
+            Modifier.fillMaxWidth(),
+            onClick = { if (!updates.isChecking) actions.checkUpdates() },
+        )
     }
 }
 
@@ -380,6 +451,7 @@ private fun DetailScreen(
     onToggleClipboard: (Boolean) -> Unit,
     onToggleClipboardAuto: (Boolean) -> Unit,
     onUnpair: () -> Unit,
+    onOpenTransfer: (Transfer) -> Unit,
 ) {
     Column(
         Modifier
@@ -425,7 +497,7 @@ private fun DetailScreen(
                 tint = if (isSharingScreen) Palette.Coral else Palette.TextPrimary,
                 onClick = onToggleScreen,
             )
-            transfers.forEach { TransferRow(it) }
+            transfers.forEach { TransferRow(it, onOpenTransfer) }
             Feature.entries.filter { it != Feature.Sharing }.chunked(2).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     row.forEach { item ->

@@ -1,5 +1,13 @@
 package id.phonelink.android
 
+import id.phonelink.android.core.Transfer
+import android.webkit.MimeTypeMap
+import android.provider.DocumentsContract
+import android.os.Environment
+import android.content.ActivityNotFoundException
+import android.app.DownloadManager
+import android.app.AlertDialog
+import id.phonelink.android.service.Updates
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
@@ -80,6 +88,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        Updates.prepare(this)
         PhoneLinkService.start(this)
 
         screenPeer = savedInstanceState?.getString(KEY_SCREEN_PEER)
@@ -106,10 +115,12 @@ class MainActivity : ComponentActivity() {
                     val phoneEnabled by connections.phone.enabled.collectAsStateWithLifecycle()
                     val phoneActive by connections.phone.active.collectAsStateWithLifecycle()
                     val sharingPeer by ScreenCaptureService.activePeer.collectAsStateWithLifecycle()
+                    val updates by Updates.state.collectAsStateWithLifecycle()
                     PhoneLinkApp(
                         state = UiState(
                             localName, peers, prompt, manualTargets, lastError, restricted,
                             transfers, commands, commandResult, clipboardEnabled, clipboardAuto, phoneEnabled, phoneActive, sharingPeer,
+                            updates, Updates.currentVersion,
                         ),
                         actions = UiActions(
                             requestPairing = connections::requestPairing,
@@ -141,6 +152,16 @@ class MainActivity : ComponentActivity() {
                             grantPhoneFeature = ::grantFeature,
                             startScreen = ::askForScreen,
                             stopScreen = { ScreenCaptureService.stop(this) },
+                            downloadUpdate = {
+                                updates.available?.let { release ->
+                                    runCatching { startActivity(Updates.downloadIntent(release)) }
+                                        .onFailure { toast("No browser found to download the update.") }
+                                }
+                            },
+                            skipUpdate = { Updates.skip(this) },
+                            checkUpdates = { lifecycleScope.launch { Updates.check(this@MainActivity, manual = true) } },
+                            setAutoUpdates = { Updates.setAuto(this, it) },
+                            openTransfer = ::openReceived,
                         ),
                     )
                 }
@@ -229,6 +250,51 @@ class MainActivity : ComponentActivity() {
             )
             else -> featurePermissions.launch(PhoneDataImpl.runtimePermissions(feature).toTypedArray())
         }
+    }
+
+    /** Opens a file from the Mac in an app that can show it. */
+    private fun openReceived(transfer: Transfer) {
+        val uri = transfer.uri?.let(Uri::parse) ?: return
+        // The file may have been moved or deleted since it arrived.
+        val exists = runCatching { contentResolver.openFileDescriptor(uri, "r")?.close() != null }.getOrDefault(false)
+        if (!exists) return toast("${transfer.name} was moved or deleted.")
+        val extension = transfer.name.substringAfterLast('.', "").lowercase()
+        val type = contentResolver.getType(uri)?.takeIf { it != "application/octet-stream" }
+            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            ?: "*/*"
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, type)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            startActivity(view)
+        } catch (_: ActivityNotFoundException) {
+            showNoAppFor(transfer)
+        }
+    }
+
+    private fun showNoAppFor(transfer: Transfer) {
+        // Files are saved in Download/DyskLink from Android 10. Older versions keep them in the app's own folder.
+        val inDownloads = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("No app can open this file")
+            .setMessage(
+                if (inDownloads) "${transfer.name} is saved in Download/DyskLink. Install an app that opens this kind of file, or open the folder to share it."
+                else "${transfer.name} is saved in DyskLink's own folder. Install an app that opens this kind of file.",
+            )
+            .setNegativeButton("Close", null)
+        if (inDownloads) dialog.setPositiveButton("Open folder") { _, _ -> openReceivedFolder() }
+        dialog.show()
+    }
+
+    private fun openReceivedFolder() {
+        val folder = DocumentsContract.buildDocumentUri(
+            "com.android.externalstorage.documents", "primary:${Environment.DIRECTORY_DOWNLOADS}/DyskLink",
+        )
+        val attempts = listOf(
+            Intent(Intent.ACTION_VIEW).setDataAndType(folder, DocumentsContract.Document.MIME_TYPE_DIR),
+            Intent(DownloadManager.ACTION_VIEW_DOWNLOADS),
+        )
+        if (attempts.none { runCatching { startActivity(it) }.isSuccess }) toast("No file manager found.")
     }
 
     private fun toast(message: String) {

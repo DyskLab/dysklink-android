@@ -34,10 +34,16 @@ You need Android 8 or later.
 This APK is a debug build signed with a development key, so read [Current security limits](#current-security-limits)
 first. A later release signed with a different key needs you to uninstall this one first, which erases your pairings.
 
+**Updates:** once a day, DyskLink reads the public list of releases on GitHub. When a newer version is out, it sends
+one notification and shows **Download** at the top of the home screen, which opens the new APK in your browser. It
+sends nothing about your phone and never installs anything by itself. You can turn this off or check now under
+**Check for updates** at the bottom of the home screen.
+
 ## Features
 - **Connection:** encrypted pairing, multiple Macs, automatic reconnection, and connectivity reports (carrier,
   network type, signal strength).
-- **Files:** send files both ways.
+- **Files:** send files both ways. Files from the Mac go to Download/DyskLink, and tapping one in the transfer list
+  opens it. On Android 9 and older they stay in the app's own folder.
 - **Clipboard:** copies on the Mac arrive on the phone, and the phone can send its copies back.
 - **Remote control:** touchpad, keyboard, media remote, and presentation remote for the Mac, and Mac commands
   listed in advance on the Mac.

@@ -1,5 +1,6 @@
 package id.phonelink.android.service
 
+import androidx.core.content.FileProvider
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -68,6 +69,7 @@ class DownloadSinks(private val context: Context) : FileSinkFactory {
             },
         ) ?: error("Can't create the file")
         private val output: OutputStream = resolver.openOutputStream(uri) ?: error("Can't open the file")
+        override val openUri: String get() = uri.toString()
 
         override fun write(bytes: ByteArray) = output.write(bytes)
 
@@ -87,6 +89,9 @@ class DownloadSinks(private val context: Context) : FileSinkFactory {
         private val folder = File(context.getExternalFilesDir(null) ?: context.filesDir, "DyskLink").apply { mkdirs() }
         private val partial = File(folder, "$name.part")
         private val output = partial.outputStream()
+        private var saved: File? = null
+        override val openUri: String?
+            get() = saved?.let { FileProvider.getUriForFile(context, "${context.packageName}.files", it).toString() }
 
         override fun write(bytes: ByteArray) = output.write(bytes)
 
@@ -96,6 +101,7 @@ class DownloadSinks(private val context: Context) : FileSinkFactory {
             var index = 1
             while (target.exists()) target = File(folder, "${index++}-$name")
             check(partial.renameTo(target)) { "Can't save the file" }
+            saved = target
             return target.parent ?: "DyskLink"
         }
 

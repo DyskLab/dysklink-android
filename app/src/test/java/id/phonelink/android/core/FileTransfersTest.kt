@@ -23,6 +23,7 @@ class FileTransfersTest {
         override fun write(bytes: ByteArray) = this.bytes.write(bytes)
         override fun commit(): String { committed = true; return "memori" }
         override fun abort() { aborted = true }
+        override val openUri: String? get() = if (committed) "memori://saved" else null
     }
 
     private val sinks = mutableMapOf<String, MemorySink>()
@@ -57,7 +58,10 @@ class FileTransfersTest {
         sender.sendFile("penerima", "foto.jpg", data.size.toLong()) { ByteArrayInputStream(data) }
 
         assertEquals(TransferStatus.Done, waitFinished(sender).single().status)
-        assertEquals(TransferStatus.Done, waitFinished(receiver).single().status)
+        val received = waitFinished(receiver).single()
+        assertEquals(TransferStatus.Done, received.status)
+        assertEquals("memori://saved", received.uri)
+        assertEquals(null, waitFinished(sender).single().uri)
         val sink = sinks.getValue("foto.jpg")
         assertTrue(sink.committed)
         assertContentEquals(data, sink.bytes.toByteArray())

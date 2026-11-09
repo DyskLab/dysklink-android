@@ -88,6 +88,7 @@ class PhoneLinkService : Service() {
             launch { showPairingAlerts(connections) }
             launch { uiVisible.collect { if (it) connections.tryAutoPair() } }
             launch { scanLoop(connections) }
+            launch { Updates.runLoop(this@PhoneLinkService) }
             launch {
                 while (true) {
                     delay(HEARTBEAT_MS)
@@ -168,6 +169,7 @@ class PhoneLinkService : Service() {
         notifications.createNotificationChannel(
             NotificationChannel(SHARING_CHANNEL_ID, "Screen being shared", NotificationManager.IMPORTANCE_LOW),
         )
+        Updates.prepare(this)
     }
 
     private fun openAppIntent(): PendingIntent = PendingIntent.getActivity(

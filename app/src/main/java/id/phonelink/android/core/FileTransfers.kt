@@ -27,6 +27,8 @@ data class Transfer(
     val outgoing: Boolean,
     val status: TransferStatus,
     val detail: String? = null,
+    /** Where a received file can be opened from, once it is saved. */
+    val uri: String? = null,
 )
 
 /** Destination for an incoming file. It only appears at its final location after [commit]. */
@@ -35,6 +37,8 @@ interface FileSink {
     /** Returns a description of the file's location. */
     fun commit(): String
     fun abort()
+    /** A content URI for the saved file, available after [commit]. */
+    val openUri: String? get() = null
 }
 
 fun interface FileSinkFactory {
@@ -172,7 +176,7 @@ class FileTransfers(
             return finish(file.id, TransferStatus.Failed, "Failed to save the file")
         }
         reply(peerId, file.id, true, null)
-        finish(file.id, TransferStatus.Done, location)
+        finish(file.id, TransferStatus.Done, location, item.sink.openUri)
     }
 
     private fun onCancel(peerId: String, file: FileMessage) {
@@ -211,11 +215,11 @@ class FileTransfers(
         _transfers.update { list -> list.map { if (it.id == id) it.copy(transferred = transferred) else it } }
     }
 
-    private fun finish(id: String, status: TransferStatus, detail: String?) {
+    private fun finish(id: String, status: TransferStatus, detail: String?, uri: String? = null) {
         _transfers.update { list ->
             list.map {
                 // The receiver's result must not change a transfer that already failed on this side.
-                if (it.id == id && it.status == TransferStatus.Active) it.copy(status = status, detail = detail) else it
+                if (it.id == id && it.status == TransferStatus.Active) it.copy(status = status, detail = detail, uri = uri) else it
             }
         }
     }
