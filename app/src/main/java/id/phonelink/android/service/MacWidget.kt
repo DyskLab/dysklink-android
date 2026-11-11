@@ -36,7 +36,7 @@ class MacWidget : AppWidgetProvider() {
                     mac == null -> "Open DyskLink to pair"
                     !mac.isConnected -> "Not connected"
                     else -> listOfNotNull(
-                        mac.info?.batteryPercent?.let { "Battery $it%" + if (mac.info.isCharging == true) ", charging" else "" },
+                        mac.info?.batteryPercent?.let { "Battery $it%" + if (mac.info?.isCharging == true) ", charging" else "" },
                         mac.info?.keepAwake?.takeIf { it == "active" }?.let { "Keep Awake on" },
                     ).joinToString(" · ").ifEmpty { "Connected" }
                 },

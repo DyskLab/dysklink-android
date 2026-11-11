@@ -49,7 +49,21 @@ class PhoneLinkService : Service() {
         }
     }
 
+    /** The pairing key lives in Android Keystore and is only used to sign TLS handshakes. */
+    private fun pairingKeyProtection() =
+        android.security.keystore.KeyProtection.Builder(android.security.keystore.KeyProperties.PURPOSE_SIGN)
+            .setDigests(
+                android.security.keystore.KeyProperties.DIGEST_NONE,
+                android.security.keystore.KeyProperties.DIGEST_SHA256,
+                android.security.keystore.KeyProperties.DIGEST_SHA384,
+                android.security.keystore.KeyProperties.DIGEST_SHA512,
+            )
+            .build()
+
     override fun onCreate() {
+        id.phonelink.android.core.CoreLog.sink = { level, tag, message, error ->
+            if (level == id.phonelink.android.core.CoreLog.Level.WARN) android.util.Log.w(tag, message, error) else android.util.Log.i(tag, message)
+        }
         super.onCreate()
         createChannels()
         ServiceCompat.startForeground(
@@ -72,6 +86,7 @@ class PhoneLinkService : Service() {
                 actions = deviceActions,
                 fileSinks = DownloadSinks(this@PhoneLinkService),
                 phoneData = PhoneDataImpl(this@PhoneLinkService),
+                keyStoreProtection = pairingKeyProtection(),
             )
             manager.value = connections
             launch(Dispatchers.Main) { connections.clipboardAuto.collect { DyskAccessibilityService.refreshCopyDetection() } }

@@ -1,6 +1,5 @@
 package id.phonelink.android.core
 
-import android.util.Log
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.UUID
@@ -99,10 +98,12 @@ class ConnectionManager(
     private val actions: DeviceActions,
     fileSinks: FileSinkFactory,
     phoneData: PhoneData,
+    /** How the platform keystore protects the pairing key, such as Android Keystore's KeyProtection. Null keeps it in a file. */
+    keyStoreProtection: java.security.KeyStore.ProtectionParameter? = null,
 ) {
     private val lock = Any()
-    private val identity = LocalIdentity.loadOrCreate(directory).also {
-        Log.i("PhoneLink", "IDENTITY keystore=${it.isHardwareBacked}")
+    private val identity = LocalIdentity.loadOrCreate(directory, keyStoreProtection).also {
+        CoreLog.i("PhoneLink", "IDENTITY keystore=${it.isHardwareBacked}")
     }
     private val sslContext = identity.sslContext()
 
@@ -235,7 +236,7 @@ class ConnectionManager(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Exception) {
-                    Log.w(TAG, "Failed to connect to $host:$port", error)
+                    CoreLog.w(TAG, "Failed to connect to $host:$port", error)
                     if (key.startsWith("manual:")) {
                         _lastError.value = "Can't connect to $host:$port"
                     }
@@ -258,7 +259,7 @@ class ConnectionManager(
                     PeerConnection.connect(sslContext, PhoneLinkProtocol.USB_HOST, PhoneLinkProtocol.USB_PORT)
                 }.getOrNull()
                 if (connection != null) {
-                    Log.i(TAG, "USB connection")
+                    CoreLog.i(TAG, "USB connection")
                     runConnection(connection, PhoneLinkProtocol.USB_HOST)
                 }
                 delay(USB_RETRY_MS)
@@ -271,9 +272,9 @@ class ConnectionManager(
         if (synchronized(lock) { host in activeHosts }) return
         scope.launch(Dispatchers.IO) {
             val connection = runCatching { PeerConnection.connect(sslContext, host, port) }
-                .onFailure { Log.w(TAG, "Failed to check $host:$port", it) }
+                .onFailure { CoreLog.w(TAG, "Failed to check $host:$port", it) }
                 .getOrNull() ?: return@launch
-            Log.i(TAG, "Scan found $host")
+            CoreLog.i(TAG, "Scan found $host")
             runConnection(connection, host)
         }
     }
@@ -285,7 +286,7 @@ class ConnectionManager(
         if (!_phonesEnabled.value || server != null) return
         val socket = runCatching { java.net.ServerSocket(PhoneLinkProtocol.PHONE_PORT) }
             .recoverCatching { java.net.ServerSocket(0) }
-            .onFailure { Log.w(TAG, "Can't listen for phones", it) }
+            .onFailure { CoreLog.w(TAG, "Can't listen for phones", it) }
             .getOrNull() ?: return
         server = socket
         _serverPort.value = socket.localPort
@@ -295,7 +296,7 @@ class ConnectionManager(
                 launch {
                     val host = raw.inetAddress.hostAddress ?: ""
                     val connection = runCatching { PeerConnection.accept(raw, sslContext) }
-                        .onFailure { Log.w(TAG, "A phone failed to connect", it) }
+                        .onFailure { CoreLog.w(TAG, "A phone failed to connect", it) }
                         .getOrNull() ?: return@launch
                     runConnection(connection, host)
                 }
@@ -350,7 +351,7 @@ class ConnectionManager(
             connections[id] = connection
             connectionHosts[id] = host
             activeHosts.add(host)
-            Log.i(TAG, "Connected to $host")
+            CoreLog.i(TAG, "Connected to $host")
             connection.send(Envelope(MessageType.HELLO, hello = localHello(records.containsKey(id))))
         }
         try {

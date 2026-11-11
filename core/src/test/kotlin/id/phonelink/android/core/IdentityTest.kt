@@ -11,8 +11,8 @@ class IdentityTest {
     @Test
     fun fileIdentityKeepsItsIdAndMakesTls() {
         val folder = Files.createTempDirectory("dysk-id").toFile()
-        val first = LocalIdentity.loadOrCreate(folder, useKeystore = false)
-        val again = LocalIdentity.loadOrCreate(folder, useKeystore = false)
+        val first = LocalIdentity.loadOrCreate(folder, protection = null)
+        val again = LocalIdentity.loadOrCreate(folder, protection = null)
         assertEquals(first.deviceId, again.deviceId)
         assertFalse(first.isHardwareBacked)
         assertTrue(first.deviceId.matches(Regex("[0-9a-f]{64}")))
@@ -20,7 +20,7 @@ class IdentityTest {
         val engine = first.sslContext().createSSLEngine()
         engine.useClientMode = true
         engine.beginHandshake()
-        val other = LocalIdentity.loadOrCreate(Files.createTempDirectory("dysk-id2").toFile(), useKeystore = false)
+        val other = LocalIdentity.loadOrCreate(Files.createTempDirectory("dysk-id2").toFile(), protection = null)
         assertNotEquals(first.deviceId, other.deviceId)
     }
 }

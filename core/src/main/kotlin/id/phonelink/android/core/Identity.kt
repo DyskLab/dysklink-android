@@ -66,7 +66,12 @@ class LocalIdentity private constructor(
         /** Its own alias, so a key from an older install can't clash. */
         private const val KEYSTORE_ALIAS = "dysklink-identity"
 
-        fun loadOrCreate(directory: File, useKeystore: Boolean = keystoreAvailable()): LocalIdentity {
+        /**
+         * [protection] comes from the platform, such as Android Keystore's KeyProtection; with it the key is kept in
+         * Android Keystore when that exists. Without it, as in tests and on desktops for now, the key stays in a file.
+         */
+        fun loadOrCreate(directory: File, protection: KeyStore.ProtectionParameter? = null): LocalIdentity {
+            val useKeystore = protection != null && keystoreAvailable()
             val storeFile = File(directory, "identity.p12")
             val passwordFile = File(directory, "identity.key")
             if (useKeystore) {
@@ -81,7 +86,7 @@ class LocalIdentity private constructor(
             val existing = fileIdentity(storeFile, passwordFile) ?: create(storeFile, passwordFile)
             if (!useKeystore) return existing
             // The same key and certificate move into Keystore, so the device ID and pairings stay.
-            return runCatching { moveToKeystore(existing) }
+            return runCatching { moveToKeystore(existing, protection!!) }
                 .onSuccess { storeFile.delete(); passwordFile.delete() }
                 .getOrElse { existing }
         }
@@ -97,16 +102,8 @@ class LocalIdentity private constructor(
             return LocalIdentity(key, chain, isHardwareBacked = true)
         }
 
-        private fun moveToKeystore(identity: LocalIdentity): LocalIdentity {
+        private fun moveToKeystore(identity: LocalIdentity, protection: KeyStore.ProtectionParameter): LocalIdentity {
             val store = KeyStore.getInstance(ANDROID_STORE).apply { load(null) }
-            val protection = android.security.keystore.KeyProtection.Builder(android.security.keystore.KeyProperties.PURPOSE_SIGN)
-                .setDigests(
-                    android.security.keystore.KeyProperties.DIGEST_NONE,
-                    android.security.keystore.KeyProperties.DIGEST_SHA256,
-                    android.security.keystore.KeyProperties.DIGEST_SHA384,
-                    android.security.keystore.KeyProperties.DIGEST_SHA512,
-                )
-                .build()
             store.setEntry(KEYSTORE_ALIAS, KeyStore.PrivateKeyEntry(identity.privateKey, identity.chain), protection)
             val moved = fromKeystore() ?: error("The key didn't reach Keystore")
             check(moved.deviceId == identity.deviceId) { "Keystore gave back a different certificate" }
