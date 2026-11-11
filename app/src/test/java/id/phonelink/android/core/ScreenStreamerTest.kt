@@ -26,7 +26,7 @@ class ScreenStreamerTest {
     }
 
     private fun streamer(send: (Envelope) -> Boolean = { sent.add(it) }, closed: () -> Unit = {}) =
-        ScreenStreamer(scope, send, { syncs.incrementAndGet() }, closed)
+        ScreenStreamer(scope, send, { syncs.incrementAndGet() }, onClosed = closed)
 
     @Test
     fun keyFramesCarryConfigAndOrderIsKept() {
@@ -118,5 +118,46 @@ class ScreenStreamerTest {
         stream.onConfig(config)
         stream.onFrame(byteArrayOf(1), key = true)
         assertTrue(closed.await(3, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun quietCloseKeepsSharingAlive() {
+        var stopped = false
+        streamer(closed = { stopped = true }).close(notify = false)
+        assertTrue(!stopped, "Turning the phone must not stop sharing")
+    }
+
+    @Test
+    fun lostConnectionWaitsAndResyncs() {
+        val online = java.util.concurrent.atomic.AtomicBoolean(true)
+        val resyncs = AtomicInteger()
+        var stopped = false
+        val stream = ScreenStreamer(
+            scope,
+            { envelope -> if (online.get()) sent.add(envelope) else false },
+            { syncs.incrementAndGet() },
+            resync = { if (online.get()) { resyncs.incrementAndGet(); true } else false },
+            onClosed = { stopped = true },
+        )
+        stream.onConfig(config)
+        stream.onFrame(byteArrayOf(1), key = true)
+        waitFor(1)
+        online.set(false)
+        stream.onFrame(byteArrayOf(2), key = false)
+        Thread.sleep(100)
+        assertTrue(!stopped, "A dropped connection must not stop sharing right away")
+        online.set(true)
+        // Frames keep coming; after a second the receiver is told again and a key frame is asked for.
+        val deadline = System.currentTimeMillis() + 3_000
+        while (resyncs.get() == 0 && System.currentTimeMillis() < deadline) {
+            stream.onFrame(byteArrayOf(3), key = true)
+            Thread.sleep(100)
+        }
+        assertEquals(1, resyncs.get())
+        assertTrue(syncs.get() >= 1)
+        stream.onFrame(byteArrayOf(4), key = true)
+        waitFor(2)
+        assertContentEquals(config + byteArrayOf(4), bytes(sent.last()))
+        assertTrue(!stopped)
     }
 }

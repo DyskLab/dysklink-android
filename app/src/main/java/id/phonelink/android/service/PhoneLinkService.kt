@@ -37,6 +37,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 /** Keeps the connection alive even when the app UI is closed. */
 class PhoneLinkService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var photoSyncer: PhotoSyncer? = null
     private val rescan = Channel<Unit>(Channel.CONFLATED)
     private var wifiLock: WifiManager.WifiLock? = null
     @Volatile private var discovery: NsdDiscovery? = null
@@ -58,6 +59,7 @@ class PhoneLinkService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0,
         )
         acquireWifiLock()
+        ChargeReminder.start(this)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
 
         // Creating keys and reading files is slow, so it can't run on the main thread.
@@ -84,7 +86,31 @@ class PhoneLinkService : Service() {
                 connections::removeDiscovered,
             ).also { it.start() }
 
+            // Other phones: listen, and say so on the network while phone connections are on.
+            launch {
+                connections.phonesEnabled.collect { on -> if (on) connections.startServer() }
+            }
+            launch(Dispatchers.Main) {
+                connections.serverPort.collect { port -> discovery?.advertise(device.name, connections.localDeviceId, port) }
+            }
+
+            FocusDnd.load(this@PhoneLinkService)
+            launch(Dispatchers.Main) {
+                combine(connections.notch, FocusDnd.enabled) { notch, _ -> notch }
+                    .collect { FocusDnd.sync(this@PhoneLinkService, it) }
+            }
             launch { showStatus(connections) }
+            launch(Dispatchers.Main) {
+                connections.peers.collect {
+                    MacWidget.render(this@PhoneLinkService, it)
+                    Widgets.renderAll(this@PhoneLinkService)
+                }
+            }
+            launch(Dispatchers.Main) { connections.notch.collect { Widgets.renderAll(this@PhoneLinkService) } }
+            connections.startUsb()
+            connections.cameraSink = { peer, envelope -> CameraStreamService.handle(this@PhoneLinkService, peer, envelope) }
+            connections.audioSink = { peer, envelope -> AudioShare.handle(this@PhoneLinkService, peer, envelope) }
+            photoSyncer = PhotoSyncer(this@PhoneLinkService, connections, scope).also { syncer -> launch(Dispatchers.Main) { syncer.start() } }
             launch { showPairingAlerts(connections) }
             launch { uiVisible.collect { if (it) connections.tryAutoPair() } }
             launch { scanLoop(connections) }
@@ -147,8 +173,10 @@ class PhoneLinkService : Service() {
     override fun onDestroy() {
         getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
         wifiLock?.release()
+        ChargeReminder.stop(this)
         discovery?.stop()
         watchers?.stop()
+        photoSyncer?.stop()
         manager.value?.shutdown()
         manager.value = null
         scope.cancel()
@@ -198,7 +226,10 @@ class PhoneLinkService : Service() {
         Notification.Builder(this, PAIRING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo_glyph)
             .setContentTitle("Pair with ${prompt.peerName}")
-            .setContentText("Code ${prompt.code}. Tap to confirm.")
+            .setContentText(
+                if (prompt.showsCode) "Type code ${prompt.code} on ${prompt.peerName}."
+                else "Tap to enter the code shown on ${prompt.peerName}.",
+            )
             .setContentIntent(openAppIntent())
             .setAutoCancel(true)
             .build()

@@ -15,9 +15,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import java.io.File
 
+@Serializable
 enum class TransferStatus { Active, Done, Failed }
 
+@Serializable
 data class Transfer(
     val id: String,
     val peerId: String,
@@ -29,6 +34,8 @@ data class Transfer(
     val detail: String? = null,
     /** Where a received file can be opened from, once it is saved. */
     val uri: String? = null,
+    /** When the transfer started, in epoch milliseconds. 0 for history saved before this was kept. */
+    val time: Long = 0,
 )
 
 /** Destination for an incoming file. It only appears at its final location after [commit]. */
@@ -59,6 +66,8 @@ object FileNames {
 class FileTransfers(
     private val scope: CoroutineScope,
     private val sinks: FileSinkFactory,
+    /** Finished transfers are kept here, so received files can still be opened after the app is closed. */
+    private val historyFile: File? = null,
     /** Returns false if the message can't be sent. */
     private val send: (peerId: String, envelope: Envelope) -> Boolean,
 ) {
@@ -73,15 +82,37 @@ class FileTransfers(
     /** A large selection from the Mac waits its turn instead of all sending at once. */
     private val uploads = Semaphore(MAX_UPLOADS)
 
-    private val _transfers = MutableStateFlow<List<Transfer>>(emptyList())
+    private val _transfers = MutableStateFlow(loadHistory())
     val transfers: StateFlow<List<Transfer>> = _transfers.asStateFlow()
 
-    fun sendFile(peerId: String, name: String, size: Long, open: () -> InputStream) {
+    private fun loadHistory(): List<Transfer> {
+        val file = historyFile ?: return emptyList()
+        return runCatching { protocolJson.decodeFromString(ListSerializer(Transfer.serializer()), file.readText()) }
+            .getOrNull().orEmpty().filter { it.status != TransferStatus.Active }.take(MAX_HISTORY)
+    }
+
+    private fun saveHistory() {
+        val file = historyFile ?: return
+        val finished = _transfers.value.filter { it.status != TransferStatus.Active }
+        runCatching { file.writeText(protocolJson.encodeToString(ListSerializer(Transfer.serializer()), finished)) }
+    }
+
+    /** Removes the finished transfers from the list. The files themselves stay where they are. */
+    fun clearHistory() {
+        _transfers.update { list -> list.filter { it.status == TransferStatus.Active } }
+        saveHistory()
+    }
+
+    private val finishedCallbacks = java.util.concurrent.ConcurrentHashMap<String, (Boolean) -> Unit>()
+
+    /** [onFinished] is told once whether the receiver saved the file. */
+    fun sendFile(peerId: String, name: String, size: Long, kind: String? = null, onFinished: ((Boolean) -> Unit)? = null, open: () -> InputStream) {
         val id = UUID.randomUUID().toString()
         val clean = FileNames.sanitize(name)
+        if (onFinished != null) finishedCallbacks[id] = onFinished
         add(Transfer(id, peerId, clean, size, 0, outgoing = true, status = TransferStatus.Active))
         scope.launch(Dispatchers.IO) {
-            val failure = runCatching { uploads.withPermit { upload(id, peerId, clean, size, open) } }
+            val failure = runCatching { uploads.withPermit { upload(id, peerId, clean, size, kind, open) } }
                 .fold(onSuccess = { it }, onFailure = { it.message ?: "Failed to read the file" })
             if (failure != null) {
                 send(peerId, Envelope(MessageType.FILE_CANCEL, file = FileMessage(id)))
@@ -91,8 +122,8 @@ class FileTransfers(
     }
 
     /** Returns a failure message, or null if all data was sent. */
-    private fun upload(id: String, peerId: String, name: String, size: Long, open: () -> InputStream): String? {
-        val offer = FileMessage(id, name = name, size = size)
+    private fun upload(id: String, peerId: String, name: String, size: Long, kind: String?, open: () -> InputStream): String? {
+        val offer = FileMessage(id, name = name, size = size, kind = kind)
         if (!send(peerId, Envelope(MessageType.FILE_OFFER, file = offer))) return "Connection lost"
         val digest = MessageDigest.getInstance("SHA-256")
         var total = 0L
@@ -208,7 +239,14 @@ class FileTransfers(
     }
 
     private fun add(transfer: Transfer) {
-        _transfers.update { (listOf(transfer) + it).take(MAX_HISTORY) }
+        val stamped = if (transfer.time > 0) transfer else transfer.copy(time = System.currentTimeMillis())
+        _transfers.update { (listOf(stamped) + it).take(MAX_HISTORY) }
+    }
+
+    /** Removes one finished transfer from the list. The file itself stays where it is. */
+    fun remove(id: String) {
+        _transfers.update { list -> list.filterNot { it.id == id && it.status != TransferStatus.Active } }
+        saveHistory()
     }
 
     private fun progress(id: String, transferred: Long) {
@@ -222,11 +260,13 @@ class FileTransfers(
                 if (it.id == id && it.status == TransferStatus.Active) it.copy(status = status, detail = detail, uri = uri) else it
             }
         }
+        saveHistory()
+        if (status != TransferStatus.Active) finishedCallbacks.remove(id)?.invoke(status == TransferStatus.Done)
     }
 
     private companion object {
         private const val MAX_UPLOADS = 2
         const val CHUNK_BYTES = 192 * 1024
-        const val MAX_HISTORY = 20
+        const val MAX_HISTORY = 500
     }
 }

@@ -36,9 +36,13 @@ import id.phonelink.android.core.ConnectionManager
 import id.phonelink.android.core.PhoneFeature
 import id.phonelink.android.service.DeviceActionsImpl
 import id.phonelink.android.service.LocalDevice
+import id.phonelink.android.service.PhoneApps
 import id.phonelink.android.service.PhoneDataImpl
 import id.phonelink.android.service.DyskAccessibilityService
+import id.phonelink.android.service.FocusDnd
+import id.phonelink.android.service.ChargeReminder
 import id.phonelink.android.service.PhoneLinkService
+import id.phonelink.android.service.PrayerWeatherStore
 import id.phonelink.android.service.ScreenCaptureService
 import id.phonelink.android.ui.Palette
 import id.phonelink.android.ui.PhoneLinkApp
@@ -54,6 +58,10 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val batteryRestricted = mutableStateOf(false)
+    private val dndAccess = mutableStateOf(false)
+    private val prayerRequest = mutableStateOf(0)
+    /** A feature name and when it was asked for, so the same one can be opened twice. */
+    private val featureRequest = mutableStateOf<Pair<String, Long>?>(null)
     private val deviceActions by lazy { DeviceActionsImpl(this) }
     private var pickFilesFor: String? = null
 
@@ -94,6 +102,8 @@ class MainActivity : ComponentActivity() {
         screenPeer = savedInstanceState?.getString(KEY_SCREEN_PEER)
         handleShare(intent)
         handleScreenRequest(intent)
+        handleCameraRequest(intent)
+        handleOpen(intent)
         val localName = LocalDevice(this).name
         setContent {
             PhoneLinkTheme {
@@ -116,15 +126,30 @@ class MainActivity : ComponentActivity() {
                     val phoneActive by connections.phone.active.collectAsStateWithLifecycle()
                     val sharingPeer by ScreenCaptureService.activePeer.collectAsStateWithLifecycle()
                     val updates by Updates.state.collectAsStateWithLifecycle()
+                    val notch by connections.notch.collectAsStateWithLifecycle()
+                    val ringingMacs by connections.ringingMacs.collectAsStateWithLifecycle()
+                    val focusDnd by FocusDnd.enabled.collectAsStateWithLifecycle()
+                    val charge by ChargeReminder.settings.collectAsStateWithLifecycle()
+                    val chargeSessions by ChargeReminder.sessions.collectAsStateWithLifecycle()
+                    val phonesEnabled by connections.phonesEnabled.collectAsStateWithLifecycle()
                     PhoneLinkApp(
                         state = UiState(
                             localName, peers, prompt, manualTargets, lastError, restricted,
                             transfers, commands, commandResult, clipboardEnabled, clipboardAuto, phoneEnabled, phoneActive, sharingPeer,
                             updates, Updates.currentVersion,
+                            notch = notch,
+                            ringingMacs = ringingMacs,
+                            focusDnd = focusDnd,
+                            dndAccess = dndAccess.value,
+                            charge = charge,
+                            chargeSessions = chargeSessions,
+                            prayerRequest = prayerRequest.value,
+                            featureRequest = featureRequest.value,
+                            phonesEnabled = phonesEnabled,
                         ),
                         actions = UiActions(
                             requestPairing = connections::requestPairing,
-                            acceptPairing = connections::acceptPairing,
+                            submitCode = connections::submitCode,
                             rejectPairing = connections::rejectPairing,
                             unpair = connections::unpair,
                             addManual = connections::addManual,
@@ -136,6 +161,29 @@ class MainActivity : ComponentActivity() {
                                 filePicker.launch(arrayOf("*/*"))
                             },
                             sendInput = connections::sendInput,
+                            sendLocalFile = { peerId, file, kind ->
+                                connections.fileTransfers.sendFile(peerId, file.name, file.length(), kind) { file.inputStream() }
+                            },
+                            setPhonesEnabled = connections::setPhonesEnabled,
+                            wakeMac = connections::wakeMac,
+                            macAction = { peer, action -> connections.sendMacAction(action, peer) },
+                            terminalLink = id.phonelink.android.ui.TerminalLink(connections.terminalEvents, connections::sendTerminal),
+                            startCamera = ::startCamera,
+                            startPhoneSound = ::startPhoneSound,
+                            macScreenLink = id.phonelink.android.ui.MacScreenLink(
+                                setSink = { connections.macScreenSink = it },
+                                start = { peer, display -> connections.startMacScreen(peer, display) },
+                                extend = connections::extendMacScreen,
+                                stop = connections::stopMacScreen,
+                                sync = connections::syncMacScreen,
+                                pointer = connections::sendMacPointer,
+                                input = connections::sendInput,
+                            ),
+                            sendClipboardText = { text ->
+                                connections.shareClipboard(text, force = true) { ok ->
+                                    runOnUiThread { toast(if (ok) "Text sent to your devices' clipboard" else "Couldn't send the text. It may be too long.") }
+                                }
+                            },
                             sendMedia = connections::sendMedia,
                             runCommand = connections::runCommand,
                             setClipboardEnabled = connections::setClipboardEnabled,
@@ -162,6 +210,23 @@ class MainActivity : ComponentActivity() {
                             checkUpdates = { lifecycleScope.launch { Updates.check(this@MainActivity, manual = true) } },
                             setAutoUpdates = { Updates.setAuto(this, it) },
                             openTransfer = ::openReceived,
+                            notchAction = connections::sendNotchAction,
+                            ringMac = connections::ringMac,
+                            clearTransfers = connections.fileTransfers::clearHistory,
+                            removeTransfer = { connections.fileTransfers.remove(it.id) },
+                            shareTransfer = ::shareReceived,
+                            openReceivedFolder = ::openReceivedFolder,
+                            setCharge = { ChargeReminder.update(this, it) },
+                            clearCharge = { ChargeReminder.clearHistory(this) },
+                            setFocusDnd = { FocusDnd.setEnabled(this, it) },
+                            openExactAlarms = {
+                                runCatching { startActivity(PrayerWeatherStore.exactAlarmSettings(this)) }
+                                    .onFailure { openAppSettings() }
+                            },
+                            openDndSettings = {
+                                runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
+                                    .onFailure { openAppSettings() }
+                            },
                         ),
                     )
                 }
@@ -173,6 +238,18 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         handleShare(intent)
         handleScreenRequest(intent)
+        handleCameraRequest(intent)
+        handleOpen(intent)
+    }
+
+    private fun handleOpen(intent: Intent?) {
+        val open = intent?.getStringExtra(EXTRA_OPEN) ?: return
+        intent.removeExtra(EXTRA_OPEN)
+        when {
+            open == OPEN_PRAYER -> prayerRequest.value += 1
+            // From a widget: a feature of the connected Mac.
+            open.startsWith(OPEN_FEATURE_PREFIX) -> featureRequest.value = open.removePrefix(OPEN_FEATURE_PREFIX) to System.nanoTime()
+        }
     }
 
     /** Android only allows clipboard reads while the app has focus. */
@@ -195,7 +272,7 @@ class MainActivity : ComponentActivity() {
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
-            val peerId = connections.peers.value.firstOrNull { it.isPaired && it.isConnected }?.id
+            val peerId = connections.peers.value.let { all -> all.firstOrNull { it.isMac && it.isPaired && it.isConnected } ?: all.firstOrNull { it.isPaired && it.isConnected } }?.id
             when {
                 peerId == null -> toast("No Mac connected")
                 uris.isNotEmpty() -> sendUris(connections, peerId, uris)
@@ -225,6 +302,64 @@ class MainActivity : ComponentActivity() {
         outState.putString(KEY_SCREEN_PEER, screenPeer)
     }
 
+    private var cameraPeer: String? = null
+    private var cameraFront = false
+
+    private var soundPeer: String? = null
+
+    private val soundConsent =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val peerId = soundPeer
+            val data = result.data
+            if (result.resultCode == RESULT_OK && peerId != null && data != null) {
+                id.phonelink.android.service.PhoneSoundService.start(this, result.resultCode, data, peerId)
+            }
+        }
+
+    private val soundPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) askForSound() else toast("DyskLink needs the microphone permission to record the phone's sound. Android uses it for app sound too; the microphone itself isn't recorded.")
+        }
+
+    /** Android needs the audio permission and its recording dialog. Only called after a tap on the phone. */
+    fun startPhoneSound(peerId: String) {
+        soundPeer = peerId
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) askForSound()
+        else soundPermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
+    private fun askForSound() {
+        soundConsent.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
+    }
+
+    private val cameraPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val peerId = cameraPeer ?: return@registerForActivityResult
+            if (granted) id.phonelink.android.service.CameraStreamService.start(this, peerId, cameraFront)
+            else toast("DyskLink needs the camera permission to share the camera")
+        }
+
+    /** Starts the camera for a Mac, asking for the permission first if needed. Only called after a tap on the phone. */
+    fun startCamera(peerId: String, front: Boolean) {
+        cameraPeer = peerId
+        cameraFront = front
+        if (checkSelfPermission(Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            id.phonelink.android.service.CameraStreamService.start(this, peerId, front)
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    /** Comes from the Mac's camera request notification, which the user tapped. */
+    private fun handleCameraRequest(intent: Intent?) {
+        val peerId = intent?.getStringExtra(EXTRA_CAMERA_PEER) ?: return
+        intent.removeExtra(EXTRA_CAMERA_PEER)
+        lifecycleScope.launch {
+            val connections = PhoneLinkService.connectionManager.filterNotNull().first()
+            if (connections.peers.value.any { it.id == peerId && it.isPaired && it.isMac }) startCamera(peerId, false)
+        }
+    }
+
     /** Comes from the Mac request notification. Only opens the Android dialog and records nothing. */
     private fun handleScreenRequest(intent: Intent?) {
         val peerId = intent?.getStringExtra(EXTRA_SCREEN_PEER) ?: return
@@ -237,12 +372,28 @@ class MainActivity : ComponentActivity() {
 
     private fun askForScreen(peerId: String) {
         screenPeer = peerId
+        // The phone's sound goes with the screen, which needs the audio permission before Android's recording dialog.
+        if (id.phonelink.android.service.AudioShare.wantsSoundWithScreen(this) &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            screenSoundPermission.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            launchScreenConsent()
+        }
+    }
+
+    /** Without the permission the screen still goes, only silent. */
+    private val screenSoundPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { launchScreenConsent() }
+
+    private fun launchScreenConsent() {
         screenConsent.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
     }
 
     private fun grantFeature(feature: PhoneFeature) {
         when {
             feature == PhoneFeature.Control -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            feature == PhoneFeature.ScreenTime -> startActivity(PhoneApps.usageAccessIntent(this))
             feature == PhoneFeature.Notifications ->
                 startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             feature == PhoneFeature.Files && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> startActivity(
@@ -270,6 +421,19 @@ class MainActivity : ComponentActivity() {
         } catch (_: ActivityNotFoundException) {
             showNoAppFor(transfer)
         }
+    }
+
+    private fun shareReceived(transfer: Transfer) {
+        val uri = transfer.uri?.let(Uri::parse) ?: return
+        val exists = runCatching { contentResolver.openFileDescriptor(uri, "r")?.close() != null }.getOrDefault(false)
+        if (!exists) return toast("${transfer.name} was moved or deleted.")
+        val extension = transfer.name.substringAfterLast('.', "").lowercase()
+        val type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "*/*"
+        val send = Intent(Intent.ACTION_SEND)
+            .setType(type)
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(send, transfer.name))
     }
 
     private fun showNoAppFor(transfer: Transfer) {
@@ -310,6 +474,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         val power = getSystemService(PowerManager::class.java)
         batteryRestricted.value = !power.isIgnoringBatteryOptimizations(packageName)
+        dndAccess.value = FocusDnd.hasAccess(this)
         // The user may have just returned from a permission page in Settings.
         PhoneLinkService.connectionManager.value?.phone?.refresh()
     }
@@ -332,6 +497,10 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_SCREEN_PEER = "id.phonelink.android.SCREEN_PEER"
+        const val EXTRA_CAMERA_PEER = "id.phonelink.android.CAMERA_PEER"
+        const val EXTRA_OPEN = "id.phonelink.android.OPEN"
+        const val OPEN_PRAYER = "prayer"
+        const val OPEN_FEATURE_PREFIX = "feature:"
         private const val KEY_SCREEN_PEER = "screenPeer"
     }
 }

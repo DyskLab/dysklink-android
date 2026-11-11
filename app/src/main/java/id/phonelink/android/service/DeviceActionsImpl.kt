@@ -46,6 +46,10 @@ class DeviceActionsImpl(private val context: Context) : DeviceActions {
         }
     }
 
+    override fun ring(from: String) = PhoneRinger.start(context, from)
+
+    override fun stopRinging() = PhoneRinger.stop(context)
+
     private fun mediaKey(code: Int) {
         val now = SystemClock.uptimeMillis()
         audio.dispatchMediaKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0))

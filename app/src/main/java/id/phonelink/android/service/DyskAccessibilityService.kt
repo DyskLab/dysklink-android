@@ -29,6 +29,9 @@ import id.phonelink.android.core.StrokeQueue
 class DyskAccessibilityService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val strokes = StrokeQueue()
+    private val multi = id.phonelink.android.core.MultiTouch()
+    private var multiStrokes = HashMap<Int, GestureDescription.StrokeDescription>()
+    private val multiTick = Runnable { pumpMulti() }
     private var stroke: GestureDescription.StrokeDescription? = null
     private val releaseStroke = Runnable {
         strokes.release()
@@ -101,7 +104,11 @@ class DyskAccessibilityService : AccessibilityService() {
             return
         }
         when (event.kind) {
-            "down", "drag", "up" -> touch(event)
+            "down", "drag", "up" -> {
+                if (multi.isActive) { multi.releaseAll(); pumpMulti() }
+                touch(event)
+            }
+            "tdown", "tmove", "tup" -> multiTouch(event)
             "text" -> insertText(event.text.orEmpty())
             "key" -> pressKey(event.key.orEmpty())
         }
@@ -129,6 +136,76 @@ class DyskAccessibilityService : AccessibilityService() {
         main.removeCallbacks(releaseStroke)
         if (event.kind != "up") main.postDelayed(releaseStroke, STROKE_TIMEOUT_MS)
         pump()
+    }
+
+    private fun multiTouch(event: ControlEvent) {
+        val x = event.x ?: return
+        val y = event.y ?: return
+        val finger = event.key?.toIntOrNull() ?: return
+        if (strokes.isActive) strokes.release()
+        when (event.kind) {
+            "tdown" -> multi.down(finger, x, y)
+            "tmove" -> multi.move(finger, x, y)
+            "tup" -> multi.up(finger, x, y)
+        }
+        // A lost connection must not leave fingers on the screen.
+        main.removeCallbacks(releaseMulti)
+        main.postDelayed(releaseMulti, MULTI_TIMEOUT_MS)
+        pumpMulti()
+    }
+
+    private val releaseMulti = Runnable {
+        multi.releaseAll()
+        pumpMulti()
+    }
+
+    private fun pumpMulti() {
+        main.removeCallbacks(multiTick)
+        val step = multi.next(SystemClock.uptimeMillis())
+        if (step == null) {
+            if (multi.isActive) main.postDelayed(multiTick, id.phonelink.android.core.MultiTouch.KEEP_ALIVE_MS)
+            return
+        }
+        val generation = multi.generation
+        val (width, height) = screenSize()
+        val builder = GestureDescription.Builder()
+        val next = HashMap<Int, GestureDescription.StrokeDescription>()
+        val dispatched = runCatching {
+            for (finger in step.fingers) {
+                val path = Path()
+                finger.points.forEachIndexed { index, (x, y) ->
+                    val px = (x * width).coerceAtMost(width - 1f)
+                    val py = (y * height).coerceAtMost(height - 1f)
+                    if (index == 0) path.moveTo(px, py) else path.lineTo(px, py)
+                }
+                val previous = multiStrokes[finger.finger]
+                val stroke = if (finger.first || previous == null) {
+                    GestureDescription.StrokeDescription(path, 0, step.duration, !finger.last)
+                } else {
+                    previous.continueStroke(path, 0, step.duration, !finger.last)
+                }
+                if (!finger.last) next[finger.finger] = stroke
+                builder.addStroke(stroke)
+            }
+            multiStrokes = next
+            dispatchGesture(builder.build(), object : GestureResultCallback() {
+                override fun onCompleted(description: GestureDescription?) {
+                    if (generation != multi.generation) return
+                    multi.completed()
+                    pumpMulti()
+                }
+                override fun onCancelled(description: GestureDescription?) {
+                    if (generation != multi.generation) return
+                    multiStrokes = HashMap()
+                    multi.cancelled()
+                    pumpMulti()
+                }
+            }, main)
+        }.getOrDefault(false)
+        if (!dispatched) {
+            multiStrokes = HashMap()
+            multi.cancelled()
+        }
     }
 
     private fun pump() {
@@ -235,6 +312,8 @@ class DyskAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val STROKE_TIMEOUT_MS = 10_000L
+        /** The Mac repeats held game keys every 1.5 seconds; silence for longer means it's gone. */
+        private const val MULTI_TIMEOUT_MS = 5_000L
         private const val COPY_READ_DELAY_MS = 350L
         private const val COPY_EVENT_TIMEOUT_MS = 50L
         private const val IDLE_EVENT_TIMEOUT_MS = 500L

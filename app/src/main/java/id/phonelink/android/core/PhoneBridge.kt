@@ -21,7 +21,12 @@ enum class PhoneFeature(val id: String) {
     Files("files"),
     Screen("screen"),
     Control("control"),
+    ScreenTime("screentime"),
+    Gallery("gallery"),
 }
+
+/** A gallery file ready to send. */
+class GalleryFile(val name: String, val size: Long, val open: () -> java.io.InputStream)
 
 /** Access to phone data. Separate from [PhoneBridge] so its access rules can be tested without Android. */
 interface PhoneData {
@@ -39,6 +44,11 @@ interface PhoneData {
     fun syncScreen(peerId: String)
     fun stopScreen(peerId: String)
     fun control(event: ControlEvent)
+    /** Today's screen time, or null when it can't be read. */
+    fun screenTime(): UsageReport? = null
+    /** Photos and videos, newest first, with thumbnails. */
+    fun gallery(offset: Int, limit: Int): List<GalleryItem> = emptyList()
+    fun galleryFile(id: Long): GalleryFile? = null
 }
 
 /**
@@ -120,6 +130,18 @@ class PhoneBridge(
                     send(peerId, Envelope(MessageType.CONTACTS, contacts = page, more = more))
                 }
             }
+            MessageType.USAGE_LIST -> if (isActive(PhoneFeature.ScreenTime)) {
+                data.screenTime()?.let { send(peerId, Envelope(MessageType.USAGE, usage = it)) }
+            }
+            MessageType.GALLERY_LIST -> listGallery(peerId, (envelope.offset ?: 0).coerceAtLeast(0))
+            MessageType.GALLERY_GET -> if (isActive(PhoneFeature.Gallery)) {
+                val file = envelope.galleryId?.let(data::galleryFile)
+                if (file == null) {
+                    send(peerId, Envelope(MessageType.GALLERY, gallery = emptyList(), error = "That photo is gone"))
+                } else {
+                    files.sendFile(peerId, file.name, file.size, GALLERY_KIND) { file.open() }
+                }
+            }
             MessageType.FS_LIST -> listFiles(peerId, envelope.path.orEmpty(), envelope.hidden == true)
             MessageType.FS_GET -> getFile(peerId, envelope.path.orEmpty())
             MessageType.SCREEN_REQUEST -> if (isActive(PhoneFeature.Screen)) data.requestScreen(peerId)
@@ -152,6 +174,18 @@ class PhoneBridge(
             return reply(emptyList(), false, it.message ?: "Can't open the folder")
         }
         sendPages(entries, FsEntry.serializer()) { page, more -> reply(page, more, null) }
+    }
+
+    private fun listGallery(peerId: String, offset: Int) {
+        if (!isActive(PhoneFeature.Gallery)) {
+            return send(peerId, Envelope(MessageType.GALLERY, gallery = emptyList(), offset = offset, galleryEnd = true, error = "Gallery is turned off on the phone"))
+        }
+        val items = runCatching { data.gallery(offset, GALLERY_PAGE) }.getOrDefault(emptyList())
+        val end = items.size < GALLERY_PAGE
+        if (items.isEmpty()) return send(peerId, Envelope(MessageType.GALLERY, gallery = emptyList(), offset = offset, galleryEnd = true))
+        sendPages(items, GalleryItem.serializer()) { page, more ->
+            send(peerId, Envelope(MessageType.GALLERY, gallery = page, offset = offset, more = more, galleryEnd = end && !more))
+        }
     }
 
     private fun getFile(peerId: String, path: String) {
@@ -236,10 +270,14 @@ class PhoneBridge(
         private const val MAX_SMS_CHARS = 2_000
         /** Well under the 1 MiB frame limit, because other message fields share the same frame. */
         internal const val PAGE_BYTES = 512 * 1024
+        /** Photos per request; their thumbnails are split over frames by [sendPages]. */
+        const val GALLERY_PAGE = 60
+        const val GALLERY_KIND = "gallery"
 
         private val types = setOf(
             MessageType.NOTIFICATION_DISMISS, MessageType.SMS_LIST, MessageType.SMS_SEND,
-            MessageType.CONTACTS_LIST, MessageType.FS_LIST, MessageType.FS_GET,
+            MessageType.CONTACTS_LIST, MessageType.FS_LIST, MessageType.FS_GET, MessageType.USAGE_LIST,
+            MessageType.GALLERY_LIST, MessageType.GALLERY_GET,
             MessageType.SCREEN_REQUEST, MessageType.SCREEN_SYNC, MessageType.SCREEN_STOP, MessageType.CONTROL,
         )
 
@@ -284,6 +322,26 @@ class FsBrowser(root: File) {
         val file = resolve(path)
         if (!file.isFile) throw IOException("Not a file")
         return file
+    }
+
+    fun folder(path: String): File {
+        val folder = resolve(path)
+        if (!folder.isDirectory) throw IOException("Not a folder")
+        return folder
+    }
+
+    /** A new file for an upload in [folderPath]. Never replaces a file: a taken name gets " (2)" and so on. */
+    fun newFile(folderPath: String, name: String): File {
+        val folder = folder(folderPath)
+        val clean = name.replace(Regex("[\\u0000-\\u001f/\\\\:]"), "_").trim().trimStart('.').take(180)
+        if (clean.isEmpty()) throw IOException("Bad name")
+        val stem = clean.substringBeforeLast('.', clean)
+        val ext = clean.substringAfterLast('.', "").let { if (it.isEmpty() || it == clean) "" else ".$it" }
+        var candidate = File(folder, clean)
+        var n = 2
+        while (candidate.exists() || File(candidate.path + ".part").exists()) candidate = File(folder, "$stem ($n)$ext").also { n++ }
+        if (!isInside(candidate.canonicalFile)) throw IOException("Location not allowed")
+        return candidate
     }
 
     private fun resolve(path: String): File {

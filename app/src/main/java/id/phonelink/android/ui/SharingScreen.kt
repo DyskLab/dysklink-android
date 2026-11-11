@@ -29,6 +29,8 @@ private val PhoneFeature.title: String
         PhoneFeature.Files -> "Files"
         PhoneFeature.Screen -> "Screen requests"
         PhoneFeature.Control -> "Control from Mac"
+        PhoneFeature.ScreenTime -> "Screen time"
+        PhoneFeature.Gallery -> "Gallery"
     }
 
 private val PhoneFeature.description: String
@@ -44,6 +46,10 @@ private val PhoneFeature.description: String
             "The Mac may request the phone screen. You still have to approve the Android dialog every time, and you can stop from the notification."
         PhoneFeature.Control ->
             "The Mac can tap, swipe, and type on the phone. It doesn't work while the phone is locked and never types into password fields. Needs Accessibility permission."
+        PhoneFeature.ScreenTime ->
+            "The Mac shows how long you used the phone today and which apps you used most, with their names and icons. Needs Usage access."
+        PhoneFeature.Gallery ->
+            "The Mac can browse your photos and videos, newest first, and open or save them. Photos are only copied when you open or save one."
     }
 
 @Composable

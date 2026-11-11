@@ -11,7 +11,7 @@ import java.util.concurrent.Executors
 /** Looks for Macs advertising the PhoneLink service on the local network. */
 class NsdDiscovery(
     context: Context,
-    private val onFound: (name: String, host: String, port: Int) -> Unit,
+    private val onFound: (name: String, host: String, port: Int, attributes: Map<String, String>) -> Unit,
     private val onLost: (name: String) -> Unit,
 ) {
     private val manager = context.getSystemService(NsdManager::class.java)
@@ -41,7 +41,33 @@ class NsdDiscovery(
         manager.discoverServices(PhoneLinkProtocol.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
+    private var advertised: NsdManager.RegistrationListener? = null
+
+    /** Lets other phones find this one. Passing null stops it. */
+    fun advertise(name: String, deviceId: String, port: Int?) {
+        advertised?.let { runCatching { manager.unregisterService(it) } }
+        advertised = null
+        if (port == null) return
+        val info = NsdServiceInfo().apply {
+            serviceName = name
+            serviceType = PhoneLinkProtocol.SERVICE_TYPE
+            setPort(port)
+            setAttribute("id", deviceId)
+            setAttribute("platform", "android")
+        }
+        val listener = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(info: NsdServiceInfo) = Log.i(TAG, "Advertised as ${info.serviceName}").let { }
+            override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) = Log.w(TAG, "Advertising failed: $errorCode").let { }
+            override fun onServiceUnregistered(info: NsdServiceInfo) = Unit
+            override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) = Unit
+        }
+        runCatching { manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener) }
+            .onSuccess { advertised = listener }
+            .onFailure { Log.w(TAG, "Can't advertise", it) }
+    }
+
     fun stop() {
+        advertise("", "", null)
         if (started) {
             started = false
             runCatching { manager.stopServiceDiscovery(listener) }
@@ -66,7 +92,8 @@ class NsdDiscovery(
                         info.host
                     }
                     Log.i(TAG, "Address of ${info.serviceName}: ${host?.hostAddress}:${info.port}")
-                    host?.hostAddress?.let { onFound(info.serviceName, it, info.port) }
+                    val attributes = info.attributes.orEmpty().mapValues { (_, value) -> value?.toString(Charsets.UTF_8).orEmpty() }
+                    host?.hostAddress?.let { onFound(info.serviceName, it, info.port, attributes) }
                     done.countDown()
                 }
             }

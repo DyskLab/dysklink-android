@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="accessibility_description">Lets a paired Mac tap, swipe, and type on this phone over local Wi-Fi. It only works when Control from Mac is turned on in DyskLink, and never while the phone is locked. This service does not send screen content through Accessibility. If you turn on automatic copy, it also checks the labels of buttons you tap and of toasts for words like Copy, and sends the clipboard to your Mac. Those labels are not stored or sent.</string>
+    <string name="widget_description">Your Mac\'s battery, with buttons to send the clipboard and lock the Mac.</string>
+    <string name="prayer_widget_description">The next prayer time and today\'s weather for your city.</string>
+    <string name="widget_note_description">The quick note shared with the Mac notch.</string>
+    <string name="widget_todo_description">Todo list from the Mac notch. Tap a task to tick it.</string>
+    <string name="widget_focus_description">Pomodoro and water from the Mac notch.</string>
+    <string name="widget_media_description">What plays on the Mac, with play, pause, and skip.</string>
+    <string name="widget_devices_description">Battery of this phone, your Macs, and other phones.</string>
+    <string name="widget_shortcuts_description">Up to four buttons you choose.</string>
 </resources>

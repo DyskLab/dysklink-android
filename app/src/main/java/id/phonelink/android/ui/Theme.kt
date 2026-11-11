@@ -141,7 +141,7 @@ fun PrimaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Un
             .padding(horizontal = 24.dp, vertical = 14.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, color = Palette.Ink, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        Text(text, color = Palette.Ink, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, softWrap = false)
     }
 }
 
@@ -161,6 +161,6 @@ fun SecondaryButton(
             .padding(horizontal = 24.dp, vertical = 14.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, color = tint, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        Text(text, color = tint, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, softWrap = false)
     }
 }

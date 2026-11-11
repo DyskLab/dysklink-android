@@ -1,5 +1,14 @@
 package id.phonelink.android.ui
 
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import id.phonelink.android.core.AirMouse
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -33,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,6 +69,16 @@ enum class Feature(val title: String) {
     Media("Media remote"),
     Presentation("Presentation remote"),
     Commands("Mac commands"),
+    Terminal("Terminal"),
+    MacScreen("Mac screen"),
+    SecondDisplay("Second display"),
+    Sound("Sound sharing"),
+    Camera("Camera to Mac"),
+    Notch("Todo, water & Pomodoro"),
+    Deck("Stream Deck"),
+    Scan("Scan barcodes to Mac"),
+    DocScan("Scan documents to Mac"),
+    Dictation("Voice typing to Mac"),
     Sharing("Phone data for Mac"),
 }
 
@@ -301,6 +321,9 @@ fun MediaScreen(onBack: () -> Unit, send: (String) -> Unit) {
 @Composable
 fun PresentationScreen(onBack: () -> Unit, send: (InputEvent) -> Unit) {
     val key = { name: String -> send(InputEvent("key", key = name)) }
+    val context = LocalContext.current
+    val sensors = remember { context.getSystemService(SensorManager::class.java) }
+    val gyroscope = remember { sensors?.getDefaultSensor(Sensor.TYPE_GYROSCOPE) }
     FeatureScaffold(Feature.Presentation.title, onBack) {
         Box(
             Modifier
@@ -314,12 +337,111 @@ fun PresentationScreen(onBack: () -> Unit, send: (InputEvent) -> Unit) {
             Text("Next slide", color = Palette.Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(12.dp))
+        if (sensors != null && gyroscope != null) {
+            val prefs = remember { context.getSharedPreferences("air_mouse", android.content.Context.MODE_PRIVATE) }
+            var speed by remember { mutableStateOf(prefs.getFloat("speed", 1f)) }
+            AirPointerPad(sensors, gyroscope, speed, Modifier.fillMaxWidth().weight(0.8f), send)
+            Spacer(Modifier.height(8.dp))
+            // How far the pointer goes for the same turn of the phone.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Pointer speed", color = Palette.TextSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                listOf("Slow" to 0.6f, "Normal" to 1f, "Fast" to 1.6f).forEach { (label, value) ->
+                    val chosen = speed == value
+                    Text(
+                        label,
+                        color = if (chosen) Palette.Ink else Palette.TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (chosen) Palette.Mint else Color.White.copy(alpha = 0.08f))
+                            .clickable {
+                                speed = value
+                                prefs.edit().putFloat("speed", value).apply()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
         PadButton("Previous slide", Modifier.fillMaxWidth(), height = 76) { key("left") }
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             PadButton("Start", Modifier.weight(1f)) { key("f5") }
             PadButton("Black screen", Modifier.weight(1f)) { key("b") }
             PadButton("End", Modifier.weight(1f)) { key("escape") }
+        }
+    }
+}
+
+/** Air mouse: while held, the Mac's pointer follows the phone's turns. A quick tap clicks. */
+@Composable
+private fun AirPointerPad(sensors: SensorManager, gyroscope: Sensor, speed: Float, modifier: Modifier, send: (InputEvent) -> Unit) {
+    val haptics = LocalHapticFeedback.current
+    var holding by remember { mutableStateOf(false) }
+    val mouse = remember(speed) { AirMouse(AirMouse.GAIN * speed) }
+    val moved = remember { floatArrayOf(0f) }
+    DisposableEffect(sensors, gyroscope, mouse) {
+        var lastNanos = 0L
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                when (event.sensor.type) {
+                    Sensor.TYPE_GRAVITY -> mouse.onGravity(event.values[0], event.values[1], event.values[2])
+                    Sensor.TYPE_GYROSCOPE -> {
+                        val seconds = if (lastNanos == 0L) 0f else (event.timestamp - lastNanos) / 1e9f
+                        lastNanos = event.timestamp
+                        if (!holding) return
+                        mouse.onRotation(event.values[0], event.values[1], event.values[2], seconds)
+                        mouse.take(android.os.SystemClock.uptimeMillis())?.let { (dx, dy) ->
+                            moved[0] += kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                            send(InputEvent("move", dx = dx, dy = dy))
+                        }
+                    }
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) = Unit
+        }
+        sensors.registerListener(listener, gyroscope, SensorManager.SENSOR_DELAY_GAME)
+        sensors.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let { sensors.registerListener(listener, it, SensorManager.SENSOR_DELAY_GAME) }
+        onDispose { sensors.unregisterListener(listener) }
+    }
+    Box(
+        modifier
+            .clip(RoundedCornerShape(24.dp))
+            .background(if (holding) Palette.Violet else Palette.Violet.copy(alpha = 0.25f))
+            .pointerInput(mouse) {
+                awaitEachGesture {
+                    awaitFirstDown()
+                    val downAt = android.os.SystemClock.uptimeMillis()
+                    mouse.reset()
+                    moved[0] = 0f
+                    holding = true
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    do {
+                        val event = awaitPointerEvent()
+                    } while (event.changes.any { it.pressed })
+                    holding = false
+                    mouse.reset()
+                    val quick = android.os.SystemClock.uptimeMillis() - downAt < AirMouse.TAP_MS
+                    if (quick && moved[0] < AirMouse.TAP_MOVE) send(InputEvent("click"))
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                if (holding) "Pointing" else "Hold to point",
+                color = if (holding) Palette.Ink else Palette.TextPrimary,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                if (holding) "Turn the phone to move the pointer" else "Tap to click",
+                color = if (holding) Palette.Ink.copy(alpha = 0.7f) else Palette.TextSecondary,
+                fontSize = 13.sp,
+            )
         }
     }
 }
@@ -376,42 +498,3 @@ fun CommandsScreen(
 
 // File transfer
 
-@Composable
-fun TransferRow(transfer: Transfer, onOpen: ((Transfer) -> Unit)? = null) {
-    val canOpen = onOpen != null && !transfer.outgoing && transfer.status == TransferStatus.Done && transfer.uri != null
-    GlassCard(onClick = if (canOpen) ({ onOpen?.invoke(transfer) }) else null) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                transfer.name,
-                color = Palette.TextPrimary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                when (transfer.status) {
-                    TransferStatus.Active -> if (transfer.outgoing) "Sending" else "Receiving"
-                    TransferStatus.Done -> "Done"
-                    TransferStatus.Failed -> "Failed"
-                },
-                color = when (transfer.status) {
-                    TransferStatus.Active -> Palette.TextSecondary
-                    TransferStatus.Done -> Palette.Mint
-                    TransferStatus.Failed -> Palette.Coral
-                },
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 10.dp),
-            )
-        }
-        if (transfer.status == TransferStatus.Active) {
-            Spacer(Modifier.height(10.dp))
-            StorageBar(free = transfer.size - transfer.transferred, total = transfer.size)
-        }
-        transfer.detail?.let {
-            Spacer(Modifier.height(5.dp))
-            Text(if (canOpen) "$it · Tap to open" else it, color = Palette.TextFaint, fontSize = 12.sp)
-        }
-    }
-}

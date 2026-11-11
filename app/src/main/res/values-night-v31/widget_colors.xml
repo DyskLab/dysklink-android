@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Widget colors. Android 12+ uses the wallpaper colors (Material You). -->
+<resources>
+    <color name="w_bg">@android:color/system_neutral1_900</color>
+    <color name="w_card">@android:color/system_neutral1_800</color>
+    <color name="w_text">@android:color/system_neutral1_50</color>
+    <color name="w_sub">@android:color/system_neutral2_300</color>
+    <color name="w_accent">@android:color/system_accent1_200</color>
+    <color name="w_on_accent">@android:color/system_accent1_800</color>
+</resources>

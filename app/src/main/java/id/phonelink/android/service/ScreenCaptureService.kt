@@ -57,6 +57,7 @@ class ScreenCaptureService : Service() {
     private var streamer: ScreenStreamer? = null
     private var size = ScreenInfo(0, 0)
     private var failure: String? = null
+    private var sound: PlaybackPump? = null
 
     private val projectionCallback = object : MediaProjection.Callback() {
         // Called when the user stops recording from the system, such as the status bar.
@@ -101,6 +102,11 @@ class ScreenCaptureService : Service() {
             current = this
             active.value = peer
             sendStarted()
+            if (AudioShare.soundWithScreen(this)) {
+                val pump = PlaybackPump(peer)
+                val problem = pump.start(capture)
+                if (problem == null) sound = pump else Log.w(TAG, "Screen goes without sound: $problem")
+            }
         } catch (error: Exception) {
             Log.e(TAG, "Failed to start recording", error)
             failure = error.message ?: "Failed to start screen recording"
@@ -130,7 +136,9 @@ class ScreenCaptureService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        val stream = ScreenStreamer(scope, ::send, ::requestKeyFrame) { handler.post { stopSelf() } }
+        val stream = ScreenStreamer(scope, ::send, ::requestKeyFrame, resync = { send(Envelope(MessageType.SCREEN_STARTED, screen = size)) }) {
+            handler.post { stopSelf() }
+        }
         codec.setCallback(EncoderOutput(stream), handler)
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         surface = codec.createInputSurface()
@@ -207,7 +215,8 @@ class ScreenCaptureService : Service() {
     }
 
     private fun releaseEncoder() {
-        streamer?.close()
+        // Quietly: a new encoder replaces this one when the phone turns, and sharing goes on.
+        streamer?.close(notify = false)
         streamer = null
         runCatching { encoder?.stop() }
         runCatching { encoder?.release() }
@@ -239,8 +248,10 @@ class ScreenCaptureService : Service() {
         // The Mac is told even if recording fails before it starts.
         peerId?.let { peer ->
             val message = Envelope(MessageType.SCREEN_STOPPED, error = failure)
-            PhoneLinkService.connectionManager.value?.sendDirect(peer, message)
+            PhoneLinkService.connectionManager.value?.post(peer, message)
         }
+        sound?.stop()
+        sound = null
         peerId = null
         val release = {
             runCatching { display?.release() }

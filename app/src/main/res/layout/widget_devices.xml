@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/w_root"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/w_surface"
+    android:orientation="vertical" android:padding="14dp"><LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/w_title" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:textColor="@color/w_accent" android:textSize="12sp" android:textStyle="bold" android:letterSpacing="0.08" android:maxLines="1" />
+        <TextView android:id="@+id/w_action" android:layout_width="wrap_content" android:layout_height="28dp" android:paddingHorizontal="12dp"
+            android:background="@drawable/w_accent_pill" android:gravity="center" android:textColor="@color/w_on_accent" android:textSize="12sp" android:textStyle="bold" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/w_dev0" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:minHeight="30dp"
+        android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/w_dev_name0" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:maxLines="1" android:ellipsize="end" android:textColor="@color/w_text" android:textSize="14sp" />
+        <ProgressBar android:id="@+id/w_dev_bar0" style="@android:style/Widget.ProgressBar.Horizontal" android:layout_width="64dp" android:layout_height="6dp"
+            android:layout_marginHorizontal="8dp" android:max="100" android:progressTint="@color/w_accent" android:progressBackgroundTint="@color/w_card" />
+        <TextView android:id="@+id/w_dev_value0" android:layout_width="52dp" android:layout_height="wrap_content" android:gravity="end"
+            android:maxLines="1" android:textColor="@color/w_text" android:textSize="14sp" android:textStyle="bold" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/w_dev1" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:minHeight="30dp"
+        android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/w_dev_name1" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:maxLines="1" android:ellipsize="end" android:textColor="@color/w_text" android:textSize="14sp" />
+        <ProgressBar android:id="@+id/w_dev_bar1" style="@android:style/Widget.ProgressBar.Horizontal" android:layout_width="64dp" android:layout_height="6dp"
+            android:layout_marginHorizontal="8dp" android:max="100" android:progressTint="@color/w_accent" android:progressBackgroundTint="@color/w_card" />
+        <TextView android:id="@+id/w_dev_value1" android:layout_width="52dp" android:layout_height="wrap_content" android:gravity="end"
+            android:maxLines="1" android:textColor="@color/w_text" android:textSize="14sp" android:textStyle="bold" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/w_dev2" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:minHeight="30dp"
+        android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/w_dev_name2" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:maxLines="1" android:ellipsize="end" android:textColor="@color/w_text" android:textSize="14sp" />
+        <ProgressBar android:id="@+id/w_dev_bar2" style="@android:style/Widget.ProgressBar.Horizontal" android:layout_width="64dp" android:layout_height="6dp"
+            android:layout_marginHorizontal="8dp" android:max="100" android:progressTint="@color/w_accent" android:progressBackgroundTint="@color/w_card" />
+        <TextView android:id="@+id/w_dev_value2" android:layout_width="52dp" android:layout_height="wrap_content" android:gravity="end"
+            android:maxLines="1" android:textColor="@color/w_text" android:textSize="14sp" android:textStyle="bold" />
+    </LinearLayout>
+    <LinearLayout android:id="@+id/w_dev3" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:minHeight="30dp"
+        android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/w_dev_name3" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:maxLines="1" android:ellipsize="end" android:textColor="@color/w_text" android:textSize="14sp" />
+        <ProgressBar android:id="@+id/w_dev_bar3" style="@android:style/Widget.ProgressBar.Horizontal" android:layout_width="64dp" android:layout_height="6dp"
+            android:layout_marginHorizontal="8dp" android:max="100" android:progressTint="@color/w_accent" android:progressBackgroundTint="@color/w_card" />
+        <TextView android:id="@+id/w_dev_value3" android:layout_width="52dp" android:layout_height="wrap_content" android:gravity="end"
+            android:maxLines="1" android:textColor="@color/w_text" android:textSize="14sp" android:textStyle="bold" />
+    </LinearLayout>
+</LinearLayout>

@@ -22,6 +22,17 @@ object ControlRules {
                 ControlEvent(event.kind, x = x.coerceIn(0f, 1f), y = y.coerceIn(0f, 1f))
             }
         }
+        // Game keys: several fingers, each named by `key` from 0 to 9.
+        "tdown", "tmove", "tup" -> {
+            val x = event.x
+            val y = event.y
+            val finger = event.key?.toIntOrNull()
+            if (x == null || y == null || !x.isFinite() || !y.isFinite() || finger == null || finger !in 0 until MultiTouch.MAX_FINGERS) {
+                null
+            } else {
+                ControlEvent(event.kind, x = x.coerceIn(0f, 1f), y = y.coerceIn(0f, 1f), key = finger.toString())
+            }
+        }
         "text" -> event.text?.takeIf { it.isNotEmpty() }?.let { ControlEvent("text", text = it.take(MAX_TEXT)) }
         "key" -> event.key?.takeIf { it in keys }?.let { ControlEvent("key", key = it) }
         else -> null
@@ -155,6 +166,9 @@ class ScreenStreamer(
     scope: CoroutineScope,
     private val send: (Envelope) -> Boolean,
     private val requestKeyFrame: () -> Unit,
+    private val frameType: String = MessageType.SCREEN_FRAME,
+    /** Tells the receiver again that video is coming, after the connection came back. Null stops on the first failure. */
+    private val resync: (() -> Boolean)? = null,
     private val onClosed: () -> Unit,
 ) {
     private class Frame(val data: ByteArray, val key: Boolean)
@@ -166,11 +180,26 @@ class ScreenStreamer(
 
     init {
         scope.launch(Dispatchers.IO) {
+            var lostAt = 0L
+            var lastTry = 0L
             for (frame in queue) {
+                if (lostAt != 0L) {
+                    // Waiting for the connection: frames are dropped, and the receiver is told again once it's back.
+                    val now = System.currentTimeMillis()
+                    if (now - lostAt > RECONNECT_WAIT_MS) { close(); break }
+                    if (now - lastTry < RESYNC_INTERVAL_MS) continue
+                    lastTry = now
+                    if (resync?.invoke() != true) continue
+                    lostAt = 0L
+                    waitingForKey = true
+                    requestKeyFrame()
+                    continue
+                }
                 val encoded = Base64.getEncoder().encodeToString(frame.data)
-                if (!send(Envelope(MessageType.SCREEN_FRAME, video = encoded, keyFrame = frame.key.takeIf { it }))) {
-                    close()
-                    break
+                if (!send(Envelope(frameType, video = encoded, keyFrame = frame.key.takeIf { it }))) {
+                    if (resync == null) { close(); break }
+                    lostAt = System.currentTimeMillis()
+                    lastTry = lostAt
                 }
             }
         }
@@ -193,15 +222,19 @@ class ScreenStreamer(
         waitingForKey = false
     }
 
-    fun close() {
+    /** [notify] false closes without stopping the sharing, for when a new encoder takes over. */
+    fun close(notify: Boolean = true) {
         if (closed.compareAndSet(false, true)) {
             queue.close()
-            onClosed()
+            if (notify) onClosed()
         }
     }
 
     internal companion object {
         const val QUEUE_SIZE = 6
+        /** How long sharing waits for a dropped connection, such as a switch between USB and Wi-Fi. */
+        const val RECONNECT_WAIT_MS = 20_000L
+        const val RESYNC_INTERVAL_MS = 1_000L
         /** Base64 adds a third to the size, and the result must fit in a 1 MiB frame. */
         const val MAX_RAW_BYTES = 760 * 1024
     }

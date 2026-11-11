@@ -32,6 +32,7 @@ import id.phonelink.android.core.PhoneBridge
 import id.phonelink.android.core.PhoneData
 import id.phonelink.android.core.PhoneFeature
 import id.phonelink.android.core.SmsItem
+import id.phonelink.android.core.UsageReport
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -52,6 +53,8 @@ class PhoneDataImpl(context: Context) : PhoneData {
         // The Mac can only ask. The Android dialog still appears every session.
         PhoneFeature.Screen -> true
         PhoneFeature.Control -> DyskAccessibilityService.isRunning
+        PhoneFeature.ScreenTime -> PhoneApps.hasUsageAccess(context)
+        PhoneFeature.Gallery -> PhotoSync.canRead(context)
         else -> hasPermissions(feature)
     }
 
@@ -178,6 +181,12 @@ class PhoneDataImpl(context: Context) : PhoneData {
 
     override fun control(event: ControlEvent) = DyskAccessibilityService.handle(event)
 
+    override fun screenTime(): UsageReport? = ScreenTime.today(context)
+
+    override fun gallery(offset: Int, limit: Int): List<id.phonelink.android.core.GalleryItem> = Gallery.page(context, offset, limit)
+
+    override fun galleryFile(id: Long): id.phonelink.android.core.GalleryFile? = Gallery.file(context, id)
+
     companion object {
         private const val MAX_SMS_BODY = 4_000
         private const val SEND_TIMEOUT_MS = 60_000L
@@ -189,7 +198,12 @@ class PhoneDataImpl(context: Context) : PhoneData {
             PhoneFeature.Calls -> listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG)
             PhoneFeature.Contacts -> listOf(Manifest.permission.READ_CONTACTS)
             PhoneFeature.Files -> listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-            PhoneFeature.Screen, PhoneFeature.Control -> emptyList()
+            PhoneFeature.Screen, PhoneFeature.Control, PhoneFeature.ScreenTime -> emptyList()
+            PhoneFeature.Gallery -> if (Build.VERSION.SDK_INT >= 33) {
+                listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+            } else {
+                listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
         }
     }
 }
@@ -251,6 +265,11 @@ class DyskNotificationListener : NotificationListenerService() {
                 text = text,
                 time = sbn.postTime,
                 silent = (notification.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0).takeIf { it },
+                pkg = sbn.packageName,
+                icon = NotificationImages.appIcon(context, sbn.packageName),
+                avatar = NotificationImages.avatar(context, notification),
+                picture = NotificationImages.picture(context, notification),
+                color = notification.color.takeIf { it != Notification.COLOR_DEFAULT && it != 0 }?.and(0xFFFFFF),
             )
         }
 

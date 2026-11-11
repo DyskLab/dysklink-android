@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/w_root"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/w_surface"
+    android:orientation="horizontal" android:gravity="center_vertical" android:padding="10dp"><TextView android:id="@+id/w_sc0" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:layout_marginHorizontal="3dp" android:background="@drawable/w_chip" android:gravity="center" android:maxLines="2" android:ellipsize="end"
+            android:paddingHorizontal="6dp" android:textColor="@color/w_text" android:textSize="13sp" android:textStyle="bold" /><TextView android:id="@+id/w_sc1" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:layout_marginHorizontal="3dp" android:background="@drawable/w_chip" android:gravity="center" android:maxLines="2" android:ellipsize="end"
+            android:paddingHorizontal="6dp" android:textColor="@color/w_text" android:textSize="13sp" android:textStyle="bold" /><TextView android:id="@+id/w_sc2" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:layout_marginHorizontal="3dp" android:background="@drawable/w_chip" android:gravity="center" android:maxLines="2" android:ellipsize="end"
+            android:paddingHorizontal="6dp" android:textColor="@color/w_text" android:textSize="13sp" android:textStyle="bold" /><TextView android:id="@+id/w_sc3" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:layout_marginHorizontal="3dp" android:background="@drawable/w_chip" android:gravity="center" android:maxLines="2" android:ellipsize="end"
+            android:paddingHorizontal="6dp" android:textColor="@color/w_text" android:textSize="13sp" android:textStyle="bold" />
+</LinearLayout>

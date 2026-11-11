@@ -80,43 +80,6 @@ fun LaptopGlyph(color: Color, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun BatteryRing(percent: Int?, charging: Boolean, size: Dp = 158.dp) {
-    val color = percent?.let(Palette::battery) ?: Palette.TextFaint
-    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(size)) {
-            val width = this.size.width * 0.08f
-            val inset = width / 2
-            val arcSize = Size(this.size.width - width, this.size.height - width)
-            drawArc(
-                Color.White.copy(alpha = 0.07f), 0f, 360f, false,
-                topLeft = Offset(inset, inset), size = arcSize, style = Stroke(width),
-            )
-            drawArc(
-                color, -90f, 360f * (percent ?: 0) / 100f, false,
-                topLeft = Offset(inset, inset), size = arcSize,
-                style = Stroke(width, cap = StrokeCap.Round),
-            )
-        }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    percent?.toString() ?: "-",
-                    color = Palette.TextPrimary,
-                    fontSize = 42.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (percent != null) Text("%", color = Palette.TextSecondary, fontSize = 18.sp)
-            }
-            Text(
-                if (charging) "⚡ Charging" else "Battery",
-                color = Palette.TextSecondary,
-                fontSize = 12.sp,
-            )
-        }
-    }
-}
-
-@Composable
 fun Radar(modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "radar")
     val progress by transition.animateFloat(
