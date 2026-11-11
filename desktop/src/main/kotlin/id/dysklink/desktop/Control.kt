@@ -15,11 +15,16 @@ import java.util.concurrent.ArrayBlockingQueue
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
-/** The touchpad, keyboard, and shortcuts from the phone, through java.awt.Robot. */
-class PcInput(private val pasteText: (String) -> Unit) {
+/**
+ * The touchpad, keyboard, and shortcuts from the phone. Pointer, special keys, and shortcuts go through
+ * java.awt.Robot by virtual key; text goes the way [Typing] picks, so it's right on any keyboard layout.
+ * [pasteText] pastes text and puts the clipboard back, and is false when it couldn't.
+ */
+class PcInput(private val pasteText: (String) -> Boolean) {
+    private val desktop = Typing.desktop()
+
     /** Wayland doesn't let apps move the pointer or type into other apps, so Robot only reaches X11 windows there. */
-    val isWayland = !Platform.isWindows && !Platform.isMac &&
-        (System.getenv("XDG_SESSION_TYPE") == "wayland" || System.getenv("WAYLAND_DISPLAY") != null)
+    val isWayland = desktop == Desktop.WAYLAND
 
     private val robot: Robot? by lazy {
         if (GraphicsEnvironment.isHeadless()) null
@@ -28,11 +33,38 @@ class PcInput(private val pasteText: (String) -> Unit) {
 
     val isAvailable: Boolean get() = !isWayland && robot != null
 
+    private val windowsTyper by lazy { WindowsUnicodeTyper() }
+    private val xdotool by lazy { XdotoolTyper() }
+    private val x11Typer by lazy { X11RemapTyper() }
+
+    /** What text is typed with; a way that fails is dropped, and the next one is used from then on. */
+    private val tools: TypingTools by lazy {
+        TypingTools(
+            desktop = desktop,
+            unicodeInput = desktop == Desktop.WINDOWS && windowsTyper.isAvailable,
+            xdotool = desktop == Desktop.X11 && xdotool.isAvailable,
+            x11Remap = desktop == Desktop.X11 && !xdotool.isAvailable && x11Typer.isAvailable,
+            clipboard = true,
+            robot = robot != null,
+        ).also {
+            CoreLog.i("DyskLink", "Typing with $it")
+            if (desktop == Desktop.WAYLAND) CoreLog.w("DyskLink", "Wayland: text from the phone can't be typed into other apps")
+        }
+    }
+    @Volatile private var currentTools: TypingTools? = null
+
+    /** Shown under the switch when text can only be pasted here, which some apps (terminals) don't take with Ctrl+V. */
+    val typingNote: String? get() = when {
+        desktop != Desktop.X11 || robot == null -> null
+        tools.xdotool || tools.x11Remap -> null
+        else -> "Text from the phone is pasted here. Install xdotool to have it typed instead."
+    }
+
     private var scrollRest = 0f
     private var moveRestX = 0f
     private var moveRestY = 0f
 
-    /** Pastes what was just put on the clipboard, for text Robot can't type. */
+    /** Presses Ctrl+V by virtual key, so it's Paste on any layout, for text just put on the clipboard. */
     fun pasteNow() {
         val robot = robot ?: return
         tap(robot, KeyEvent.VK_V, listOf(KeyEvent.VK_CONTROL))
@@ -75,12 +107,42 @@ class PcInput(private val pasteText: (String) -> Unit) {
         modifiers.asReversed().forEach(robot::keyRelease)
     }
 
-    /** Plain characters are typed key by key; anything else (accents, emoji, other scripts) is pasted. */
+    @Synchronized
     private fun type(robot: Robot, text: String) {
-        val keys = text.map { Keys.forChar(it) }
-        val plain = keys.filterNotNull()
-        if (plain.size == keys.size) plain.forEach { (key, shift) -> tap(robot, key, if (shift) listOf(KeyEvent.VK_SHIFT) else emptyList()) }
-        else pasteText(text)
+        var steps = Typing.plan(text, currentTools ?: tools)
+        while (steps.isNotEmpty()) {
+            val step = steps.first()
+            steps = steps.drop(1)
+            when (step) {
+                is TypeStep.Key -> Keys.named[step.name]?.let { tap(robot, it, emptyList()) }
+                is TypeStep.Text -> if (!typeWith(robot, step)) {
+                    // That way failed: it's not used again, and the rest of the text goes the next way.
+                    val fewer = (currentTools ?: tools).without(step.method)
+                    currentTools = fewer
+                    CoreLog.w("DyskLink", "Typing with ${step.method} failed; now $fewer")
+                    val rest = step.text + steps.joinToString("") {
+                        when (it) {
+                            is TypeStep.Text -> it.text
+                            is TypeStep.Key -> if (it.name == "return") "\n" else "\t"
+                        }
+                    }
+                    steps = Typing.plan(rest, fewer)
+                }
+            }
+        }
+    }
+
+    private fun typeWith(robot: Robot, step: TypeStep.Text): Boolean = when (step.method) {
+        TypeMethod.UNICODE_INPUT -> windowsTyper.type(step.text)
+        TypeMethod.XDOTOOL -> xdotool.type(step.text)
+        TypeMethod.X11_REMAP -> x11Typer.type(step.text)
+        TypeMethod.PASTE -> pasteText(step.text)
+        TypeMethod.US_KEYS -> {
+            step.text.forEach { c ->
+                Keys.forChar(c)?.let { (key, shift) -> tap(robot, key, if (shift) listOf(KeyEvent.VK_SHIFT) else emptyList()) }
+            }
+            true
+        }
     }
 }
 

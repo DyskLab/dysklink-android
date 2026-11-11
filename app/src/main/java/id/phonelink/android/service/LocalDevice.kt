@@ -30,6 +30,7 @@ class LocalDevice(private val context: Context) {
         protocolVersion = PhoneLinkProtocol.VERSION,
         paired = paired,
         appVersion = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull(),
+        caps = PhoneLinkProtocol.CAPS,
     )
 
     fun info(): DeviceInfo {

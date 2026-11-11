@@ -1,6 +1,5 @@
 package id.phonelink.android.core
 
-import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -18,7 +17,7 @@ class ScreenStreamerTest {
     private val sent = CopyOnWriteArrayList<Envelope>()
     private val syncs = AtomicInteger()
 
-    private fun bytes(envelope: Envelope) = Base64.getDecoder().decode(envelope.video)
+    private fun bytes(envelope: Envelope) = envelope.payload()!!
 
     private fun waitFor(count: Int) {
         val deadline = System.currentTimeMillis() + 3_000
@@ -86,7 +85,7 @@ class ScreenStreamerTest {
         release.countDown()
         waitFor(ScreenStreamer.QUEUE_SIZE + 1)
         Thread.sleep(100)
-        assertTrue(sent.none { it.video != null && bytes(it).contentEquals(byteArrayOf(2)) })
+        assertTrue(sent.none { it.payload()?.contentEquals(byteArrayOf(2)) == true })
 
         stream.onFrame(byteArrayOf(7), key = true)
         stream.onFrame(byteArrayOf(8), key = false)

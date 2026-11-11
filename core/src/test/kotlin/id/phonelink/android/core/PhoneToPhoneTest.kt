@@ -9,6 +9,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,7 +20,8 @@ class PhoneToPhoneTest {
     private val scopes = mutableListOf<CoroutineScope>()
     private val managers = mutableListOf<ConnectionManager>()
 
-    private inner class Phone(name: String, battery: Int) {
+    /** [caps] null acts like an app before binary frames (1.1.x): its hello lists nothing. */
+    private inner class Phone(name: String, battery: Int, caps: List<String>? = null) {
         val dir: File = Files.createTempDirectory("dysk-$name").toFile()
         val clipboard = CopyOnWriteArrayList<String>()
         val rings = CopyOnWriteArrayList<String>()
@@ -28,7 +30,7 @@ class PhoneToPhoneTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO).also { scopes += it }
         val manager = ConnectionManager(
             dir, scope,
-            localHello = { paired -> Hello(name, "android", "Test $name", PhoneLinkProtocol.VERSION, paired) },
+            localHello = { paired -> Hello(name, "android", "Test $name", PhoneLinkProtocol.VERSION, paired, caps = caps) },
             localInfo = { DeviceInfo(batteryPercent = battery) },
             isUiVisible = { false },
             actions = object : DeviceActions {
@@ -151,5 +153,48 @@ class PhoneToPhoneTest {
         b.manager.setPhonesEnabled(false)
         waitUntil("Still connected") { a.peer(b)?.isConnected == false }
         b.manager.setPhonesEnabled(true)
+    }
+
+    private fun pair(a: Phone, b: Phone) {
+        waitUntil("They didn't connect") { a.peer(b)?.isConnected == true && b.peer(a)?.isConnected == true }
+        a.manager.requestPairing(b.id)
+        waitUntil("No code on ${b.id}") { b.manager.prompt.value?.showsCode == true && a.manager.prompt.value != null }
+        a.manager.submitCode(b.manager.prompt.value!!.code)
+        waitUntil("Didn't pair") { a.peer(b)?.isPaired == true && b.peer(a)?.isPaired == true }
+    }
+
+    private fun sendFile(from: Phone, to: Phone, name: String, bytes: ByteArray) {
+        from.manager.fileTransfers.sendFile(to.id, name, bytes.size.toLong()) { bytes.inputStream() }
+        waitUntil("$name didn't arrive", seconds = 20) { File(to.received, name).let { it.exists() && it.length() == bytes.size.toLong() } }
+        assertTrue(File(to.received, name).readBytes().contentEquals(bytes), "$name differs")
+    }
+
+    @Test
+    fun binaryFramesBetweenNewAppsAndJsonWithOldOnes() {
+        val new = Phone("Baru", 50, PhoneLinkProtocol.CAPS)
+        val newer = Phone("Baru2", 60, PhoneLinkProtocol.CAPS)
+        val old = Phone("Lama", 70)
+        newer.manager.startServer()
+        old.manager.startServer()
+        waitUntil("Not listening") { newer.manager.serverPort.value != null && old.manager.serverPort.value != null }
+        new.manager.addManual("127.0.0.1", newer.manager.serverPort.value!!)
+        new.manager.addManual("127.0.0.1", old.manager.serverPort.value!!)
+        pair(new, newer)
+        pair(new, old)
+
+        // Both listed bin1: binary both ways. With the old app: JSON both ways.
+        waitUntil("No binary between new apps") { new.manager.binaryTo(newer.id) && newer.manager.binaryTo(new.id) }
+        assertFalse(new.manager.binaryTo(old.id))
+        assertFalse(old.manager.binaryTo(new.id))
+
+        // Files (several chunks, odd size) arrive whole and pass the SHA-256 check either way.
+        val bytes = Random(4).nextBytes(300_001)
+        sendFile(new, newer, "biner.bin", bytes)
+        sendFile(newer, new, "biner-balik.bin", bytes)
+        sendFile(new, old, "json.bin", bytes)
+        sendFile(old, new, "json-balik.bin", bytes)
+        sendFile(new, newer, "kosong.bin", ByteArray(0))
+
+        assertTrue(new.peer(newer)!!.isConnected && new.peer(old)!!.isConnected)
     }
 }

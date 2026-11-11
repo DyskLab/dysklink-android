@@ -38,7 +38,9 @@ class ComputerHubTest {
         }
     }
 
-    private inner class Pc(dir: File = Files.createTempDirectory("dysk-pc").toFile(), var control: Boolean = true, pingMs: Long = 25_000L) {
+    /** [caps] null acts like 1.1.x, before binary frames; the real desktop app sends [PhoneLinkProtocol.CAPS]. */
+    private inner class Pc(dir: File = Files.createTempDirectory("dysk-pc").toFile(), var control: Boolean = true, pingMs: Long = 25_000L,
+                           caps: List<String>? = null) {
         val inputs = CopyOnWriteArrayList<String>()
         val media = CopyOnWriteArrayList<String>()
         val sound = CopyOnWriteArrayList<String>()
@@ -49,7 +51,7 @@ class ComputerHubTest {
         val received = File(dir, "received").apply { mkdirs() }
         val hub = ComputerHub(
             dir, scope(),
-            localHello = { paired -> Hello("Test PC", "windows", "Windows 11", PhoneLinkProtocol.VERSION, paired, "1.0.0") },
+            localHello = { paired -> Hello("Test PC", "windows", "Windows 11", PhoneLinkProtocol.VERSION, paired, "1.0.0", caps) },
             events = object : HubEvents {
                 override fun clipboard(text: String, from: String): Boolean { clipboard += text; return true }
                 override fun ring(on: Boolean, from: String) { rings += on }
@@ -68,14 +70,14 @@ class ComputerHubTest {
         ).also { it.start(); closers += it::shutdown }
     }
 
-    private inner class Phone {
+    private inner class Phone(caps: List<String>? = null) {
         val dir: File = Files.createTempDirectory("dysk-phone").toFile()
         val clipboard = CopyOnWriteArrayList<String>()
         val rings = CopyOnWriteArrayList<String>()
         val received = File(dir, "received").apply { mkdirs() }
         val manager = ConnectionManager(
             dir, scope(),
-            localHello = { paired -> Hello("Pixel", "android", "Pixel 9", PhoneLinkProtocol.VERSION, paired) },
+            localHello = { paired -> Hello("Pixel", "android", "Pixel 9", PhoneLinkProtocol.VERSION, paired, caps = caps) },
             localInfo = { DeviceInfo(batteryPercent = 64) },
             isUiVisible = { true },
             actions = object : DeviceActions {
@@ -198,8 +200,9 @@ class ComputerHubTest {
 
     @Test
     fun thePhoneControlsThePcAndPlaysItsSoundThere() {
-        val pc = Pc()
-        val phone = Phone()
+        // Both with binary frames, as the current apps are.
+        val pc = Pc(caps = PhoneLinkProtocol.CAPS)
+        val phone = Phone(PhoneLinkProtocol.CAPS)
         paired(pc, phone)
         val id = pc.hub.deviceId
         val phoneId = phone.manager.localDeviceId
@@ -221,8 +224,11 @@ class ComputerHubTest {
         var stopAsked = false
         phone.manager.audioSink = { _, envelope -> if (envelope.type == MessageType.AUDIO_STOP) stopAsked = true }
         phone.manager.post(id, Envelope(MessageType.AUDIO_STARTED, audioRate = 48_000, audioChannels = 2))
+        waitUntil("No binary frames") { phone.manager.binaryTo(id) }
+        // One raw chunk (a binary frame) and one in base64 (JSON, as an older phone sends): both play.
+        phone.manager.post(id, Envelope(MessageType.AUDIO_FRAME, raw = ByteArray(7680)))
         phone.manager.post(id, Envelope(MessageType.AUDIO_FRAME, audio = java.util.Base64.getEncoder().encodeToString(ByteArray(7680))))
-        waitUntil("Sound didn't reach the PC") { pc.sound.toList() == listOf("start 48000/2", "chunk 7680") }
+        waitUntil("Sound didn't reach the PC") { pc.sound.toList() == listOf("start 48000/2", "chunk 7680", "chunk 7680") }
         pc.hub.stopPhoneSound()
         waitUntil("The phone wasn't asked to stop") { stopAsked }
         assertEquals("end", pc.sound.last())
@@ -237,7 +243,8 @@ class ComputerHubTest {
 
     @Test
     fun twoPcsPairBySyncingAndShareOnlyTheClipboardFilesAndRinging() {
-        val windows = Pc()
+        // Windows has binary frames, Linux acts like 1.1.x: everything between them stays JSON.
+        val windows = Pc(caps = PhoneLinkProtocol.CAPS)
         val linux = Pc()
         windows.hub.setComputersEnabled(true)
         linux.hub.setComputersEnabled(true)
@@ -273,6 +280,9 @@ class ComputerHubTest {
         val file = File.createTempFile("laporan", ".txt").apply { writeText("isi") }
         windows.hub.sendFile(linux.hub.deviceId, file)
         waitUntil("The file didn't arrive") { File(linux.received, file.name).exists() }
+        windows.hub.sendClipboardImage(png)
+        waitUntil("The picture didn't arrive on Linux") { linux.images.isNotEmpty() }
+        assertTrue(linux.images.first().contentEquals(png), "The picture changed on the way")
         windows.hub.ring(linux.hub.deviceId, true)
         waitUntil("Linux didn't ring") { true in linux.rings }
 
@@ -291,7 +301,8 @@ class ComputerHubTest {
 
     /** A device speaking the protocol by hand, with the identity kept in [dir], so tests can send what real apps never do. */
     private inner class Raw(dir: File, port: Int) {
-        val connection = PeerConnection.connect(LocalIdentity.loadOrCreate(dir).sslContext(), "127.0.0.1", port)
+        val identity = LocalIdentity.loadOrCreate(dir)
+        val connection = PeerConnection.connect(identity.sslContext(), "127.0.0.1", port)
         val received = java.util.concurrent.LinkedBlockingQueue<Envelope>()
         @Volatile var closed = false
 
@@ -303,8 +314,8 @@ class ComputerHubTest {
             }.apply { isDaemon = true }.start()
         }
 
-        fun hello(platform: String, paired: Boolean) =
-            connection.send(Envelope(MessageType.HELLO, hello = Hello("Raw", platform, "Raw", PhoneLinkProtocol.VERSION, paired)))
+        fun hello(platform: String, paired: Boolean, version: Int = PhoneLinkProtocol.VERSION) =
+            connection.send(Envelope(MessageType.HELLO, hello = Hello("Raw", platform, "Raw", version, paired)))
 
         fun expect(type: String, seconds: Int = 5): Envelope {
             val until = System.currentTimeMillis() + seconds * 1000L
@@ -353,16 +364,20 @@ class ComputerHubTest {
         val guesser = Raw(Files.createTempDirectory("dysk-guess").toFile(), pc.hub.boundPort)
         guesser.hello("android", paired = false)
         waitUntil("The guesser didn't connect") { pc.hub.phones.value.any { it.isConnected } }
-        guesser.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        val typer = Pake.Typer()
+        guesser.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = typer.request))
         waitUntil("No code was shown") { pc.hub.pairing.value != null }
         val code = pc.hub.pairing.value!!.code
-        fun guess() = guesser.connection.send(Envelope(MessageType.PAIR_ACCEPT, key = "not-the-proof"))
+        assertTrue(typer.received(guesser.expect(MessageType.PAIR_PAKE).pake))
+        val channel = Pake.channel(guesser.identity.deviceId, pc.hub.deviceId)
+        val wrong = if (code == "000000") "111111" else "000000"
+        fun guess() = guesser.connection.send(Envelope(MessageType.PAIR_ACCEPT, pake = typer.answer(wrong, channel)))
 
         guess()
-        guesser.expect(MessageType.PAIR_REJECT)
+        assertEquals(Pairing.WRONG_CODE, guesser.expect(MessageType.PAIR_REJECT).error)
         assertEquals(1, pc.hub.pairing.value?.attempts)
         // Asking again doesn't make a new code or forget the wrong try.
-        guesser.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        guesser.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = typer.request))
         guesser.connection.send(Envelope(MessageType.PING))
         guesser.expect(MessageType.PONG)
         assertEquals(code, pc.hub.pairing.value?.code)
@@ -372,7 +387,7 @@ class ComputerHubTest {
         waitUntil("Five wrong codes didn't close the code") { pc.hub.pairing.value == null }
         while (guesser.expect(MessageType.PAIR_REJECT).error == Pairing.WRONG_CODE) continue
         // Locked: asking again is refused, with no code shown.
-        guesser.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        guesser.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = Pake.Typer().request))
         val refusal = guesser.expect(MessageType.PAIR_REJECT)
         assertTrue(refusal.error.orEmpty().startsWith("Too many wrong codes"), "Got ${refusal.error}")
         assertNull(pc.hub.pairing.value)
@@ -381,9 +396,41 @@ class ComputerHubTest {
         val another = Raw(Files.createTempDirectory("dysk-guess2").toFile(), pc.hub.boundPort)
         another.hello("android", paired = false)
         waitUntil("The second guesser didn't connect") { pc.hub.phones.value.count { it.isConnected } == 2 }
-        another.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        another.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = Pake.Typer().request))
         another.expect(MessageType.PAIR_REJECT)
         assertNull(pc.hub.pairing.value)
+    }
+
+    @Test
+    fun olderAppsMustUpdateBeforePairing() {
+        val pc = Pc()
+        // A request without CPace gets no code, only "update-required", and the PC says why.
+        val old = Raw(Files.createTempDirectory("dysk-old").toFile(), pc.hub.boundPort)
+        old.hello("android", paired = false, version = 2)
+        waitUntil("The old phone didn't connect") { pc.hub.phones.value.any { it.isConnected } }
+        old.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        assertEquals(Pairing.UPDATE_REQUIRED, old.expect(MessageType.PAIR_REJECT).error)
+        waitUntil("The PC didn't say to update") { pc.hub.pairing.value?.outdated == true }
+        assertEquals("", pc.hub.pairing.value!!.code)
+        assertEquals("Update DyskLink on Raw to pair.", pc.hub.pairing.value!!.error)
+        // The old key is refused outright, even for a right code: there's no code to check it against.
+        old.connection.send(Envelope(MessageType.PAIR_ACCEPT, key = "anything"))
+        old.connection.send(Envelope(MessageType.PING))
+        old.expect(MessageType.PONG)
+        assertFalse(pc.hub.phones.value.single().isPaired)
+        pc.hub.rejectPairing()
+        waitUntil("The notice didn't close") { pc.hub.pairing.value == null }
+
+        // A new app whose request is fine, but which then sends only the old key: refused, and no try counted.
+        val mixed = Raw(Files.createTempDirectory("dysk-mixed").toFile(), pc.hub.boundPort)
+        mixed.hello("android", paired = false)
+        waitUntil("The second phone didn't connect") { pc.hub.phones.value.count { it.isConnected } == 2 }
+        mixed.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = Pake.Typer().request))
+        mixed.expect(MessageType.PAIR_PAKE)
+        mixed.connection.send(Envelope(MessageType.PAIR_ACCEPT, key = "legacy"))
+        assertEquals(Pairing.UPDATE_REQUIRED, mixed.expect(MessageType.PAIR_REJECT).error)
+        waitUntil("The code stayed open") { pc.hub.pairing.value == null }
+        assertTrue(pc.hub.phones.value.none { it.isPaired })
     }
 
     @Test
@@ -398,7 +445,8 @@ class ComputerHubTest {
     @Test
     fun aPcPairsAndSyncsWithTheMacApp() {
         val port = System.getenv("DYSKLINK_IT_MAC_PORT")?.toIntOrNull() ?: return
-        val pc = Pc()
+        // Binary frames, like the real desktop app; pc-sync-test.sh checks the Mac used them.
+        val pc = Pc(caps = PhoneLinkProtocol.CAPS)
         pc.hub.setComputersEnabled(true)
         pc.hub.dialComputer("127.0.0.1", port)
         waitUntil("The Mac didn't connect", 20) { pc.hub.phones.value.any { it.isConnected && it.platform == "macos" } }
@@ -418,5 +466,30 @@ class ComputerHubTest {
         pc.hub.ring(mac.id, true)
         Thread.sleep(3000)
         println("PC_SYNC_DONE ${file.name}")
+    }
+
+    @Test
+    fun twoPcsWithBinaryFramesShareFilesAndPictures() {
+        val windows = Pc(caps = PhoneLinkProtocol.CAPS)
+        val linux = Pc(caps = PhoneLinkProtocol.CAPS)
+        windows.hub.setComputersEnabled(true)
+        linux.hub.setComputersEnabled(true)
+        windows.hub.dialComputer("127.0.0.1", linux.hub.boundPort)
+        waitUntil("The PCs didn't connect") { windows.hub.phones.value.any { it.id == linux.hub.deviceId && it.isConnected } }
+        windows.hub.requestPairing(linux.hub.deviceId)
+        waitUntil("Linux didn't show a code") { linux.hub.pairing.value?.code?.length == 6 }
+        windows.hub.submitCode(linux.hub.pairing.value!!.code)
+        waitUntil("Pairing didn't finish") { windows.hub.phones.value.any { it.id == linux.hub.deviceId && it.isPaired } }
+        // Pictures in binary chunks (several, odd size) both ways, and a file.
+        val png = ByteArray(200_001) { (it % 241).toByte() }
+        linux.hub.sendClipboardImage(png)
+        windows.hub.sendClipboardImage(png.reversedArray())
+        waitUntil("The pictures didn't arrive") { windows.images.isNotEmpty() && linux.images.isNotEmpty() }
+        assertTrue(windows.images.first().contentEquals(png))
+        assertTrue(linux.images.first().contentEquals(png.reversedArray()))
+        val file = File.createTempFile("biner", ".bin").apply { writeBytes(ByteArray(150_000) { (it * 13).toByte() }) }
+        windows.hub.sendFile(linux.hub.deviceId, file)
+        waitUntil("The file didn't arrive") { File(linux.received, file.name).let { it.exists() && it.length() == file.length() } }
+        assertTrue(File(linux.received, file.name).readBytes().contentEquals(file.readBytes()))
     }
 }

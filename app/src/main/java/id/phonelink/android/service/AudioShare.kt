@@ -27,6 +27,7 @@ import androidx.core.content.IntentCompat
 import id.phonelink.android.MainActivity
 import id.phonelink.android.core.Envelope
 import id.phonelink.android.core.MessageType
+import id.phonelink.android.core.SilenceGate
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -107,7 +108,7 @@ object AudioShare {
                 _problem.value = null
             }
             MessageType.AUDIO_FRAME -> if (_listening.value == peerId) {
-                envelope.audio?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }?.let { player?.feed(it) }
+                envelope.payload()?.let { player?.feed(it) }
             }
             MessageType.AUDIO_STOPPED -> if (_listening.value == peerId || _listening.value == null) {
                 envelope.error?.let { _problem.value = it }
@@ -160,10 +161,18 @@ private class MacSoundPlayer(rate: Int, private val channels: Int, private val m
         .setBufferSizeInBytes(maxOf(AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT), AudioShare.CHUNK_BYTES * 4))
         .setTransferMode(AudioTrack.MODE_STREAM)
         .build()
+    /** Silence written before the first chunk after a gap, as at the start, so the track has a little in hand. */
+    private val prime = ByteArray(AudioShare.CHUNK_BYTES * if (maxQueued <= 4) 1 else 2)
     private val writer = Thread({
+        var lastWrite = 0L
         while (running) {
             val chunk = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+            // A Mac with binary frames stops sending during silence; the track has run dry by now, so the sound
+            // that comes back gets a short cushion instead of stuttering on the next late chunk.
+            val now = System.nanoTime()
+            if (lastWrite != 0L && now - lastWrite > GAP_NANOS) track.write(prime, 0, prime.size)
             track.write(chunk, 0, chunk.size)
+            lastWrite = System.nanoTime()
         }
     }, "dysk-audio-play")
 
@@ -181,6 +190,11 @@ private class MacSoundPlayer(rate: Int, private val channels: Int, private val m
     fun stop() {
         running = false
         runCatching { track.pause(); track.flush(); track.release() }
+    }
+
+    private companion object {
+        /** Longer than the track's own buffer (4 chunks), so it really ran out. */
+        const val GAP_NANOS = 200_000_000L
     }
 }
 
@@ -223,8 +237,9 @@ class PlaybackPump(
     }
 
     private fun pump(record: AudioRecord) {
-        val chunk = ByteArray(AudioShare.CHUNK_BYTES)
+        var chunk = ByteArray(AudioShare.CHUNK_BYTES)
         var failures = 0
+        val gate = SilenceGate()
         while (running) {
             var filled = 0
             while (running && filled < chunk.size) {
@@ -244,7 +259,13 @@ class PlaybackPump(
                 filled += read
             }
             if (filled < chunk.size) continue
-            if (send(Envelope(MessageType.AUDIO_FRAME, audio = java.util.Base64.getEncoder().encodeToString(chunk)))) {
+            // Silence isn't sent to a Mac with binary frames (it plays silence by itself); older Macs get every chunk.
+            val binary = PhoneLinkService.connectionManager.value?.binaryTo(peerId) == true
+            if (binary && !gate.shouldSend(chunk)) continue
+            // Raw: binary to a bin1 Mac, base64 to an older one. The array is handed over, so the next chunk gets a new one.
+            val sent = send(Envelope(MessageType.AUDIO_FRAME, raw = chunk))
+            chunk = ByteArray(AudioShare.CHUNK_BYTES)
+            if (sent) {
                 failures = 0
             } else if (++failures >= MAX_SEND_FAILURES) {
                 // The Mac is gone: recording on for nobody only costs battery.

@@ -70,22 +70,27 @@ class MacScreenDecoder(private val surface: Surface, private val width: Int, pri
         thread(isDaemon = true, name = "macscreen-in") { pump() }
     }
 
-    private val queue = FrameQueue<String>(QUEUE_FRAMES)
+    /** Each frame is raw H.264 (a binary frame) or still base64 (a JSON frame from an older Mac). */
+    private val queue = FrameQueue<Any>(QUEUE_FRAMES)
 
     /**
-     * Called on the connection's reading thread with a frame still in base64. Returns at once: decoding the base64 and
-     * waiting for the codec happen on the decoder's own thread.
+     * Called on the connection's reading thread with a raw frame or one still in base64. Returns at once: decoding any
+     * base64 and waiting for the codec happen on the decoder's own thread.
      */
-    fun feedEncoded(base64: String, key: Boolean) {
+    fun feedEncoded(frame: Any, key: Boolean) {
         if (!running.get()) return
-        if (queue.offer(base64, key)) onNeedKey()
+        if (queue.offer(frame, key)) onNeedKey()
     }
 
     private fun pump() {
         val decoder = java.util.Base64.getDecoder()
         while (running.get()) {
-            val (text, key) = queue.poll(INPUT_POLL_MS) ?: continue
-            val data = runCatching { decoder.decode(text) }.getOrNull() ?: continue
+            val (frame, key) = queue.poll(INPUT_POLL_MS) ?: continue
+            val data = when (frame) {
+                is ByteArray -> frame
+                is String -> runCatching { decoder.decode(frame) }.getOrNull()
+                else -> null
+            } ?: continue
             runCatching { feed(data, key) }
         }
     }

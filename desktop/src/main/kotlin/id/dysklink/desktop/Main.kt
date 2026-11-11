@@ -164,6 +164,7 @@ private fun Screen(app: DesktopApp, pickFiles: () -> List<File>) {
                 problem?.let { Banner(it, Palette.Coral); Spacer(Modifier.height(12.dp)) }
                 val current = pairing
                 when {
+                    current != null && current.outdated -> OutdatedCard(current, onClose = app.hub::rejectPairing)
                     current != null && current.typing -> TypeCodeCard(current, onSubmit = app.hub::submitCode, onCancel = app.hub::rejectPairing)
                     current != null -> PairingCard(current, onCancel = app.hub::rejectPairing)
                     selected != null && selected.isPaired -> PhonePage(app, selected, pickFiles)
@@ -200,6 +201,7 @@ private fun Sidebar(app: DesktopApp, phones: List<HubPhone>, selectedId: String?
         val controlOn by app.controlOn.collectAsState()
         Toggle("Phones can control this PC", controlOn, app::setControlOn)
         if (controlOn && app.input.isWayland) Hint("Wayland lets the phone only use the media remote. Log in with an X11 session for the touchpad and keyboard.")
+        if (controlOn) app.input.typingNote?.let { Hint(it) }
         Toggle("Sync with other computers", computersOn, app::setComputersOn)
         if (Autostart.isAvailable) {
             var atLogin by remember { mutableStateOf(Autostart.isOn()) }
@@ -251,6 +253,18 @@ private fun PairingCard(pairing: HubPairing, onCancel: () -> Unit) {
         pairing.error?.let { Spacer(Modifier.height(10.dp)); Text(it, color = Palette.Amber, fontSize = 13.sp) }
         Spacer(Modifier.height(22.dp))
         OutlinedButton(onClick = onCancel) { Text("Cancel", color = Palette.TextPrimary) }
+    }
+}
+
+/** The other device has an older DyskLink, which can't pair any more until it's updated. */
+@Composable
+private fun OutdatedCard(pairing: HubPairing, onClose: () -> Unit) {
+    Card {
+        Text("Can't pair with ${pairing.phoneName} yet", color = Palette.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        Text(pairing.error ?: "Update DyskLink on ${pairing.phoneName} to pair.", color = Palette.Amber, fontSize = 14.sp)
+        Spacer(Modifier.height(22.dp))
+        OutlinedButton(onClick = onClose) { Text("Close", color = Palette.TextPrimary) }
     }
 }
 

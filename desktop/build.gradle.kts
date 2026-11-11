@@ -18,6 +18,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
     // Bonjour/mDNS in plain Java, so neither Windows nor Linux needs Bonjour or Avahi installed.
     implementation("org.jmdns:jmdns:3.6.5")
+    // Typing from the phone on any keyboard layout: SendInput with Unicode on Windows, Xlib and XTest on X11.
+    // Only the core jar (about 2 MB, native parts for every OS inside), not jna-platform.
+    implementation("net.java.dev.jna:jna:5.17.0")
 
     testImplementation(kotlin("test-junit"))
 }

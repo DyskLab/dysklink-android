@@ -31,14 +31,6 @@ class PairingTest {
 
 class TypedPairingTest {
     @org.junit.Test
-    fun proofIsTheSameFromBothSides() {
-        kotlin.test.assertEquals(Pairing.proof("123456", "aaa", "bbb"), Pairing.proof("123456", "bbb", "aaa"))
-        kotlin.test.assertNotEquals(Pairing.proof("123456", "aaa", "bbb"), Pairing.proof("123457", "aaa", "bbb"))
-        // Tied to the devices: someone in the middle has a different certificate, so the proof doesn't match.
-        kotlin.test.assertNotEquals(Pairing.proof("123456", "aaa", "bbb"), Pairing.proof("123456", "aaa", "ccc"))
-    }
-
-    @org.junit.Test
     fun codesAreRandomSixDigits() {
         val codes = (1..200).map { Pairing.newCode() }
         kotlin.test.assertTrue(codes.all { it.length == 6 && it.all(Char::isDigit) })

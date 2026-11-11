@@ -49,10 +49,8 @@ class DesktopApp(scope: CoroutineScope) {
     private val media = MediaKeys()
     val input: PcInput = PcInput(::paste)
 
-    private fun paste(text: String) {
-        systemClipboard.set(text)
-        input.pasteNow()
-    }
+    /** For text that can't be typed: pasted, with the clipboard put back after and nothing synced. */
+    private fun paste(text: String): Boolean = systemClipboard.pasteThrough(text) { input.pasteNow() }
     private val _popups = MutableSharedFlow<Popup>(extraBufferCapacity = 16)
     val popups: SharedFlow<Popup> = _popups.asSharedFlow()
 
@@ -69,7 +67,7 @@ class DesktopApp(scope: CoroutineScope) {
 
     val hub: ComputerHub = ComputerHub(
         Platform.dataDir, scope,
-        localHello = { paired -> Hello(Platform.deviceName, Platform.protocolName, Platform.model, PhoneLinkProtocol.VERSION, paired, Platform.version) },
+        localHello = { paired -> Hello(Platform.deviceName, Platform.protocolName, Platform.model, PhoneLinkProtocol.VERSION, paired, Platform.version, PhoneLinkProtocol.CAPS) },
         events = object : HubEvents {
             override fun clipboard(text: String, from: String): Boolean = _clipboardOn.value && systemClipboard.set(text)
 

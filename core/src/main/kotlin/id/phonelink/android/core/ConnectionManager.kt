@@ -65,7 +65,7 @@ data class PairingPrompt(
     val localAccepted: Boolean = false,
     val error: String? = null,
     val attempts: Int = 0,
-    /** The other device has an older DyskLink that can't type codes. */
+    /** The other device has an older DyskLink that can't pair with CPace; [error] says to update it. */
     val outdated: Boolean = false,
 ) {
     val showsCode: Boolean get() = startedByPeer
@@ -121,6 +121,11 @@ class ConnectionManager(
     private val declined = HashSet<String>()
     private var pairingTimeout: Job? = null
     private val pairingGuard = PairingGuard()
+    /** CPace state of the prompt: [shower] while this phone shows the code, [typer] while it types it. */
+    private var shower: Pake.Shower? = null
+    private var typer: Pake.Typer? = null
+    /** A code typed before the other side's `pair.pake` arrived. */
+    private var pendingCode: String? = null
     /** Devices connected over the USB cable now. Their Wi-Fi dialing waits until the cable is pulled. */
     private val usbPeers = MutableStateFlow<Set<String>>(emptySet())
 
@@ -420,7 +425,7 @@ class ConnectionManager(
         // Files are written outside the lock so disk writes don't hold up other messages and actions.
         if (envelope.type.startsWith("file.")) {
             if (synchronized(lock) { records.containsKey(connection.peerId) }) {
-                fileTransfers.handle(connection.peerId, envelope.type, envelope.file)
+                fileTransfers.handle(connection.peerId, envelope.type, envelope.file, envelope.raw)
             }
             return
         }
@@ -469,13 +474,30 @@ class ConnectionManager(
                 autoPair()
             }
             MessageType.PAIR_REQUEST -> {
-                if (!records.containsKey(id) && connection.hello != null) beginPairing(id, startedByPeer = true)
+                if (!records.containsKey(id) && connection.hello != null) beginPairing(id, startedByPeer = true, request = envelope.pake)
+            }
+            MessageType.PAIR_PAKE -> {
+                val prompt = _prompt.value?.takeIf { it.peerId == id && !it.showsCode && !it.outdated } ?: return@locked
+                val typing = typer ?: return@locked
+                if (!typing.received(envelope.pake)) {
+                    CoreLog.w(TAG, "PAIRING_BAD_PAKE $id")
+                    return@locked rejectCurrentPairing()
+                }
+                pendingCode?.let { code ->
+                    pendingCode = null
+                    sendCode(connection, prompt, code)
+                }
             }
             MessageType.PAIR_ACCEPT -> {
                 val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@locked
                 if (prompt.showsCode) {
-                    if (envelope.key == Pairing.proof(prompt.code, identity.deviceId, id)) {
-                        send(connection, Envelope(MessageType.PAIR_ACCEPT))
+                    if (prompt.outdated) return@locked
+                    val showing = shower ?: return@locked
+                    // Only the old key: an older app, which can't pair any more. Not counted as a wrong code.
+                    val pake = envelope.pake ?: return@locked rejectCurrentPairing(Pairing.UPDATE_REQUIRED)
+                    val reply = showing.check(pake)
+                    if (reply != null) {
+                        send(connection, Envelope(MessageType.PAIR_ACCEPT, pake = reply))
                         completePairing(id)
                     } else if (pairingGuard.wrong(id)) {
                         CoreLog.w(TAG, "PAIRING_LOCKED $id")
@@ -484,14 +506,24 @@ class ConnectionManager(
                         _prompt.value = prompt.copy(attempts = prompt.attempts + 1, error = "A wrong code was typed on ${prompt.peerName}.")
                         send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.WRONG_CODE))
                     }
-                } else if (prompt.localAccepted) {
-                    completePairing(id)
+                } else if (prompt.localAccepted && pendingCode == null) {
+                    // Saved only once the other side proves it derived the same key.
+                    if (typer?.confirms(envelope.pake) == true) {
+                        completePairing(id)
+                    } else {
+                        CoreLog.w(TAG, "PAIRING_BAD_CONFIRM $id")
+                        rejectCurrentPairing()
+                    }
                 }
             }
             MessageType.PAIR_REJECT -> {
                 val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@locked
                 if (envelope.error == Pairing.WRONG_CODE && !prompt.showsCode) {
+                    typer?.wrongCode()
                     _prompt.value = prompt.copy(localAccepted = false, error = "That code isn't right. Check the code on ${prompt.peerName} and try again.")
+                } else if (envelope.error == Pairing.UPDATE_REQUIRED && !prompt.showsCode) {
+                    dropPake()
+                    _prompt.value = prompt.copy(localAccepted = false, outdated = true, error = Pairing.updateMessage(prompt.peerName))
                 } else {
                     clearPairing()
                 }
@@ -586,7 +618,6 @@ class ConnectionManager(
             val connection = connections[id] ?: return@locked
             if (records.containsKey(id)) return@locked
             if (declined.remove(id)) saveDeclined()
-            send(connection, Envelope(MessageType.PAIR_REQUEST))
             beginPairing(id, startedByPeer = false)
         }
     }
@@ -598,9 +629,21 @@ class ConnectionManager(
             val prompt = _prompt.value ?: return@locked
             if (prompt.showsCode || prompt.outdated || digits.length != 6) return@locked
             val connection = connections[prompt.peerId] ?: return@locked
+            val typing = typer ?: return@locked
             _prompt.value = prompt.copy(localAccepted = true, error = null)
-            send(connection, Envelope(MessageType.PAIR_ACCEPT, key = Pairing.proof(digits, identity.deviceId, prompt.peerId)))
+            // The other side's share hasn't come yet: the code goes as soon as it does.
+            if (!typing.ready) pendingCode = digits else sendCode(connection, prompt, digits)
         }
+    }
+
+    /** The CPace answer for a typed code. A fresh secret each time, so the same code can be typed again. */
+    private fun Outgoing.sendCode(connection: PeerConnection, prompt: PairingPrompt, code: String) {
+        val accept = typer?.answer(code, Pake.channel(identity.deviceId, prompt.peerId))
+        if (accept == null) {
+            CoreLog.w(TAG, "PAIRING_BAD_PAKE ${prompt.peerId}")
+            return rejectCurrentPairing()
+        }
+        send(connection, Envelope(MessageType.PAIR_ACCEPT, pake = accept))
     }
 
     fun rejectPairing() = onIo {
@@ -627,7 +670,6 @@ class ConnectionManager(
             connection.hello != null && id !in records && id !in autoAsked && id !in declined && !isPhone(connection)
         }?.key ?: return
         autoAsked.add(id)
-        send(connections[id], Envelope(MessageType.PAIR_REQUEST))
         beginPairing(id, startedByPeer = false)
     }
 
@@ -650,7 +692,11 @@ class ConnectionManager(
         clearPairing()
     }
 
-    private fun Outgoing.beginPairing(id: String, startedByPeer: Boolean) {
+    /**
+     * [startedByPeer]: the other side sent `pair.request` ([request] is its `pake`), so this phone shows the code.
+     * Otherwise this phone asks, and types the code.
+     */
+    private fun Outgoing.beginPairing(id: String, startedByPeer: Boolean, request: PakeMessage? = null) {
         val connection = connections[id] ?: return
         val hello = connection.hello ?: return
         val current = _prompt.value
@@ -660,8 +706,18 @@ class ConnectionManager(
                 send(connection, Envelope(MessageType.PAIR_REJECT))
                 return
             }
-            // Both asked at once: the smaller ID shows the code, the other types it. Asked again while the code
-            // shows, the same code stays, and so do the wrong tries.
+            // Asked again while the code shows: the same code stays, and so do the wrong tries. A new request
+            // (a new nonce) gets a new share for that same code.
+            if (startedByPeer && current.showsCode && !current.outdated) {
+                val nonce = Pake.requestNonce(request) ?: return
+                if (shower?.sameRequest(nonce) != true) {
+                    shower?.close()
+                    shower = Pake.Shower(current.code, nonce, Pake.channel(id, identity.deviceId))
+                }
+                shower?.let { send(connection, Envelope(MessageType.PAIR_PAKE, pake = it.message)) }
+                return
+            }
+            // Both asked at once: the smaller ID shows the code, the other types it.
             if (!startedByPeer || current.showsCode || identity.deviceId >= id) return
         }
         // Too many wrong codes lately: the code isn't shown for a while.
@@ -670,17 +726,35 @@ class ConnectionManager(
             if (current != null) {
                 pairingTimeout?.cancel()
                 pairingTimeout = null
+                dropPake()
                 _prompt.value = null
             }
             send(connection, Envelope(MessageType.PAIR_REJECT, error = PairingGuard.waitMessage(wait)))
             return
         }
-        val outdated = hello.protocolVersion < Pairing.TYPED_SINCE
+        // Older apps only know the old code check, which a device in the middle could brute-force. They must update.
+        val nonceT = if (startedByPeer) Pake.requestNonce(request) else null
+        val outdated = hello.protocolVersion < Pairing.PAKE_SINCE || (startedByPeer && nonceT == null)
+        dropPake()
+        val code = if (startedByPeer && !outdated) Pairing.newCode() else ""
         _prompt.value = PairingPrompt(
-            id, hello.name, if (startedByPeer) Pairing.newCode() else "", startedByPeer,
-            error = if (outdated) "${hello.name} has an older DyskLink. Update it there, then pair again." else null,
+            id, hello.name, code, startedByPeer,
+            error = if (outdated) Pairing.updateMessage(hello.name) else null,
             outdated = outdated,
         )
+        when {
+            outdated -> if (startedByPeer) send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.UPDATE_REQUIRED))
+            startedByPeer -> {
+                val showing = Pake.Shower(code, nonceT!!, Pake.channel(id, identity.deviceId))
+                shower = showing
+                send(connection, Envelope(MessageType.PAIR_PAKE, pake = showing.message))
+            }
+            else -> {
+                val typing = Pake.Typer()
+                typer = typing
+                send(connection, Envelope(MessageType.PAIR_REQUEST, pake = typing.request))
+            }
+        }
         pairingTimeout?.cancel()
         pairingTimeout = scope.launch(Dispatchers.IO) {
             delay(PhoneLinkProtocol.PAIRING_TIMEOUT_MS)
@@ -702,9 +776,18 @@ class ConnectionManager(
         publishPeers()
     }
 
+    private fun dropPake() {
+        shower?.close()
+        shower = null
+        typer?.close()
+        typer = null
+        pendingCode = null
+    }
+
     private fun Outgoing.clearPairing() {
         pairingTimeout?.cancel()
         pairingTimeout = null
+        dropPake()
         _prompt.value = null
         autoPair()
     }
@@ -738,6 +821,9 @@ class ConnectionManager(
 
     /** Sends directly, without the queue. Returns false if the device isn't connected. */
     fun sendDirect(peerId: String, envelope: Envelope): Boolean = sendTo(peerId, envelope)
+
+    /** The device's connection takes binary frames: both hellos listed `bin1` (see [BinaryFrames]). */
+    fun binaryTo(peerId: String): Boolean = pairedConnection(peerId)?.binary == true
 
     fun sendInput(peerId: String, event: InputEvent) {
         postTo(peerId, Envelope(MessageType.INPUT, input = event))
@@ -1012,7 +1098,7 @@ class ConnectionManager(
         }
 
         val PHONE_MESSAGES = setOf(
-            MessageType.HELLO, MessageType.PAIR_REQUEST, MessageType.PAIR_ACCEPT, MessageType.PAIR_REJECT, MessageType.UNPAIR,
+            MessageType.HELLO, MessageType.PAIR_REQUEST, MessageType.PAIR_PAKE, MessageType.PAIR_ACCEPT, MessageType.PAIR_REJECT, MessageType.UNPAIR,
             MessageType.INFO, MessageType.CLIPBOARD, MessageType.CLIPBOARD_ACK, MessageType.RING, MessageType.PING, MessageType.PONG,
         )
     }

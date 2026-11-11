@@ -152,4 +152,84 @@ class DesktopTest {
         tiny.setRGB(2, 1, -1)
         kotlin.test.assertNotEquals(tinyBefore, Clipboard.quickFingerprint(tiny))
     }
+
+    private val windows = TypingTools(Desktop.WINDOWS, unicodeInput = true, clipboard = true, robot = true)
+    private val x11Bare = TypingTools(Desktop.X11, clipboard = true, robot = true)
+
+    @Test
+    fun windowsTypesEveryCharacterAsUnicode() {
+        // The same steps whatever the layout: nothing in the plan depends on key positions.
+        for (text in listOf("hello", "@#{}|~", "é ñ ü ß", "日本語", "Grüße 😀")) {
+            assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.UNICODE_INPUT, text)), Typing.plan(text, windows))
+        }
+    }
+
+    @Test
+    fun enterAndTabArePressedAsKeys() {
+        assertEquals(
+            listOf(TypeStep.Text(TypeMethod.UNICODE_INPUT, "a"), TypeStep.Key("return"), TypeStep.Text(TypeMethod.UNICODE_INPUT, "b"),
+                TypeStep.Key("tab"), TypeStep.Text(TypeMethod.UNICODE_INPUT, "c"), TypeStep.Key("return")),
+            Typing.plan("a\r\nb\tc\n", windows),
+        )
+        // Other control characters are dropped.
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.UNICODE_INPUT, "ab")), Typing.plan("a\u0007b", windows))
+    }
+
+    @Test
+    fun emojiStaysOneCharacter() {
+        val face = "\uD83D\uDE00"
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.XDOTOOL, "x$face")), Typing.plan("x$face", x11Bare.copy(xdotool = true)))
+        // A lone half of a pair is never typed.
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.UNICODE_INPUT, "ab")), Typing.plan("a\uD83Db", windows))
+        // SendInput gets both halves, each down and up, as Unicode with no virtual key.
+        val bytes = java.nio.ByteBuffer.wrap(WinInput.unicodeEvents(face, 8)).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        assertEquals(4 * 40, bytes.capacity())
+        val scans = (0 until 4).map { bytes.getShort(it * 40 + 10).toInt() and 0xffff }
+        assertEquals(listOf(0xD83D, 0xD83D, 0xDE00, 0xDE00), scans)
+        val flags = (0 until 4).map { bytes.getInt(it * 40 + 12) }
+        assertEquals(listOf(4, 6, 4, 6), flags)
+        assertTrue((0 until 4).all { bytes.getInt(it * 40) == WinInput.INPUT_KEYBOARD && bytes.getShort(it * 40 + 8).toInt() == 0 })
+        // 32-bit Windows packs INPUT into 28 bytes, with the key data right after the type.
+        val small = java.nio.ByteBuffer.wrap(WinInput.unicodeEvents("é", 4)).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        assertEquals(2 * 28, small.capacity())
+        assertEquals(0xE9, small.getShort(6).toInt())
+    }
+
+    @Test
+    fun linuxPrefersXdotoolThenRemapThenPaste() {
+        assertEquals(TypeMethod.XDOTOOL, Typing.methodFor('é'.code, x11Bare.copy(xdotool = true, x11Remap = true)))
+        assertEquals(TypeMethod.X11_REMAP, Typing.methodFor('é'.code, x11Bare.copy(x11Remap = true)))
+        // Without either, even plain letters are pasted: Robot's US keys would be wrong on another layout.
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.PASTE, "ab\ncé")), Typing.plan("ab\ncé", x11Bare))
+        assertEquals(listOf<TypeStep>(TypeStep.Key("return"), TypeStep.Text(TypeMethod.PASTE, "a")), Typing.plan("\na", x11Bare))
+        // Robot's US keys only as the very last way, and only for what they can type.
+        val robotOnly = TypingTools(Desktop.X11, robot = true)
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.US_KEYS, "ab")), Typing.plan("aéb", robotOnly))
+        assertEquals(emptyList(), Typing.plan("é", TypingTools(Desktop.WAYLAND, clipboard = true, robot = true)))
+    }
+
+    @Test
+    fun aFailedWayMovesToTheNext() {
+        val noUnicode = windows.without(TypeMethod.UNICODE_INPUT)
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.PASTE, "é")), Typing.plan("é", noUnicode))
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.US_KEYS, "a")), Typing.plan("aé", noUnicode.without(TypeMethod.PASTE)))
+    }
+
+    @Test
+    fun desktopIsToldApart() {
+        assertEquals(Desktop.WINDOWS, Typing.desktop(isWindows = true, isMac = false) { null })
+        assertEquals(Desktop.WAYLAND, Typing.desktop(false, false) { if (it == "XDG_SESSION_TYPE") "wayland" else null })
+        assertEquals(Desktop.X11, Typing.desktop(false, false) { if (it == "XDG_SESSION_TYPE") "x11" else null })
+    }
+
+    @Test
+    fun x11KeysymsAndSpareKeys() {
+        assertEquals(0x61L, X11Keys.keysymFor('a'.code))
+        assertEquals(0xe9L, X11Keys.keysymFor('é'.code))
+        assertEquals(0x010020acL, X11Keys.keysymFor('€'.code))
+        assertEquals(0x0101f600L, X11Keys.keysymFor(0x1F600))
+        // Key codes 8..11, two keysyms each: 9 and 11 are unused.
+        val mapping = longArrayOf(0x61, 0x41, 0, 0, 0x62, 0, 0, 0)
+        assertEquals(listOf(9, 11), X11Keys.spareKeycodes(mapping, 2, 8))
+    }
 }

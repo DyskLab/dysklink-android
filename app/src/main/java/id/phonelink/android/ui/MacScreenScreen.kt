@@ -169,9 +169,10 @@ fun MacScreenScreen(
             if (id != peerId) return@setSink
             when (envelope.type) {
                 MessageType.MACSCREEN_FRAME -> {
-                    val video = envelope.video ?: return@setSink
                     // Queued for the decoder's thread; this is the connection's reader and must not wait.
-                    decoderHolder[0]?.feedEncoded(video, envelope.keyFrame == true)
+                    // A binary frame is raw already; base64 from an older Mac is decoded on the decoder's thread.
+                    val frame: Any = envelope.raw ?: envelope.video ?: return@setSink
+                    decoderHolder[0]?.feedEncoded(frame, envelope.keyFrame == true)
                 }
                 MessageType.MACSCREEN_STARTED -> {
                     val info = envelope.screen ?: return@setSink

@@ -59,6 +59,78 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
         Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
     }.isSuccess
 
+    private val pasteLock = Any()
+    /** What the clipboard held before a run of pastes, put back once they're done. Guarded by [pasteLock]. */
+    private var beforePaste: Snapshot? = null
+    private var pasted: String? = null
+    private var pastedAt = 0L
+    private var restore: java.util.concurrent.ScheduledFuture<*>? = null
+    private val restorer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "dysk-clip-restore").apply { isDaemon = true }
+    }
+
+    /**
+     * Pastes [text] into the app in front through the clipboard, for text that can't be typed, then puts back what
+     * the clipboard held. Neither change is sent to phones or computers: both go through [changes], as [set] does.
+     */
+    fun pasteThrough(text: String, pressPaste: () -> Unit): Boolean = synchronized(pasteLock) {
+        restore?.cancel(false)
+        // Only the first paste of a run saves the clipboard; later ones would save the text pasted before.
+        if (beforePaste == null) beforePaste = snapshot()
+        // The paste before may still be being read by the app: don't change the clipboard under it.
+        val wait = pastedAt + PASTE_GAP_MS - System.currentTimeMillis()
+        if (wait > 0) Thread.sleep(wait)
+        if (!set(text)) return false
+        pressPaste()
+        pasted = text
+        pastedAt = System.currentTimeMillis()
+        restore = restorer.schedule(::restoreAfterPaste, RESTORE_AFTER_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        true
+    }
+
+    private fun restoreAfterPaste(): Unit = synchronized(pasteLock) {
+        val saved = beforePaste ?: return
+        beforePaste = null
+        // Something copied meanwhile, by the person or a phone, stays.
+        if (read() != pasted) return
+        runCatching {
+            val image = saved.image
+            changes.change {
+                last = saved.text
+                if (image != null) { lastImage = fingerprint(image); lastQuick = quickFingerprint(image) }
+            }
+            Toolkit.getDefaultToolkit().systemClipboard.setContents(saved, null)
+        }.onFailure { id.phonelink.android.core.CoreLog.w("DyskLink", "Couldn't put the clipboard back", it) }
+        Unit
+    }
+
+    private fun snapshot(): Snapshot {
+        val clipboard = runCatching { Toolkit.getDefaultToolkit().systemClipboard }.getOrNull() ?: return Snapshot(null, null, null)
+        fun <T> get(flavor: DataFlavor, cast: (Any) -> T?): T? = runCatching {
+            if (clipboard.isDataFlavorAvailable(flavor)) cast(clipboard.getData(flavor)) else null
+        }.getOrNull()
+        @Suppress("UNCHECKED_CAST")
+        val files = get(DataFlavor.javaFileListFlavor) { it as? List<File> }
+        return Snapshot(get(DataFlavor.stringFlavor) { it as? String }, readImage(), files)
+    }
+
+    /** Text, a picture, and copied files: what can be read back and put back. Formatting is lost. */
+    private class Snapshot(val text: String?, val image: BufferedImage?, val files: List<File>?) : java.awt.datatransfer.Transferable {
+        private val flavors = listOfNotNull(
+            DataFlavor.stringFlavor.takeIf { text != null },
+            DataFlavor.imageFlavor.takeIf { image != null },
+            DataFlavor.javaFileListFlavor.takeIf { files != null },
+        )
+        override fun getTransferDataFlavors() = flavors.toTypedArray()
+        override fun isDataFlavorSupported(flavor: DataFlavor) = flavor in flavors
+        override fun getTransferData(flavor: DataFlavor): Any = when {
+            flavor == DataFlavor.stringFlavor && text != null -> text
+            flavor == DataFlavor.imageFlavor && image != null -> image
+            flavor == DataFlavor.javaFileListFlavor && files != null -> files
+            else -> throw java.awt.datatransfer.UnsupportedFlavorException(flavor)
+        }
+    }
+
     /** Neither Windows nor Linux tells apps when the clipboard changes in a portable way, so it's checked often. */
     fun start() {
         watcher = thread(isDaemon = true, name = "dysk-clipboard") {
@@ -112,6 +184,9 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
         }
 
         const val QUICK_SAMPLES = 1_000
+        /** How long an app gets to read a paste before the clipboard changes again. */
+        const val PASTE_GAP_MS = 150L
+        const val RESTORE_AFTER_MS = 800L
 
         /** The size and about a thousand pixels spread over the picture: cheap enough to take every time it's checked. */
         fun quickFingerprint(image: BufferedImage): String {

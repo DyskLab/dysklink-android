@@ -74,6 +74,8 @@ interface TransferLink {
     fun sendFrame(frame: OutFrame): Boolean
     /** False once the connection is closing or closed. */
     val isOpen: Boolean
+    /** [sendFrame] takes binary frames ([OutFrame.binary]): both sides listed `bin1` in their hello. */
+    val binary: Boolean get() = false
 }
 
 class FileTransfers(
@@ -194,6 +196,23 @@ class FileTransfers(
         // Without a frame sender, one reused buffer holds the Base64 text.
         val text = if (frames == null) ByteArray(Base64Bytes.encodedLength(CHUNK_BYTES)) else null
         open().use { input ->
+            if (frames?.binary == true) {
+                // Binary frames: the file is read straight into the frame after its header, with no other copy.
+                while (scope.isActive) {
+                    stopped()?.let { return it }
+                    val frame = frames.take { scope.isActive && stopped() == null } ?: continue
+                    val count = input.readUpTo(frame, frames.dataOffset, CHUNK_BYTES)
+                    if (count <= 0) {
+                        frames.giveBack(frame)
+                        break
+                    }
+                    digest.update(frame, frames.dataOffset, count)
+                    total += count
+                    if (!frames.sendBinary(frame, count)) return stopped() ?: "Connection lost"
+                    progress(id, total)
+                }
+                return@use
+            }
             val buffer = ByteArray(CHUNK_BYTES)
             while (scope.isActive) {
                 stopped()?.let { return it }
@@ -221,10 +240,10 @@ class FileTransfers(
     }
 
     /** Fills [buffer] as far as the stream allows, so chunks are full size. Returns 0 at the end. */
-    private fun InputStream.readUpTo(buffer: ByteArray): Int {
+    private fun InputStream.readUpTo(buffer: ByteArray, offset: Int = 0, max: Int = buffer.size - offset): Int {
         var count = 0
-        while (count < buffer.size) {
-            val read = read(buffer, count, buffer.size - count)
+        while (count < max) {
+            val read = read(buffer, offset + count, max - count)
             if (read < 0) break
             count += read
         }
@@ -236,8 +255,12 @@ class FileTransfers(
      * so a chunk costs no new arrays, Strings, or Envelopes.
      */
     private class ChunkFrames(id: String, private val link: TransferLink) {
-        private val prefix = FileChunkFrame.prefix(id)
-        private val capacity = FileChunkFrame.capacity(prefix, CHUNK_BYTES)
+        /** Decided once per upload; a connection only ever turns binary on (at its hello), never off. */
+        val binary = link.binary
+        private val prefix = if (binary) FileChunkFrame.binaryPrefix(id) else FileChunkFrame.prefix(id)
+        private val capacity = if (binary) prefix.size + CHUNK_BYTES else FileChunkFrame.capacity(prefix, CHUNK_BYTES)
+        /** Binary frames: where the file bytes start. The header before it is written once per buffer. */
+        val dataOffset = prefix.size
         private val free = java.util.concurrent.ArrayBlockingQueue<ByteArray>(FRAMES_PER_UPLOAD)
         private var made = 0
 
@@ -246,7 +269,7 @@ class FileTransfers(
             free.poll()?.let { return it }
             if (made < FRAMES_PER_UPLOAD) {
                 made++
-                return ByteArray(capacity)
+                return ByteArray(capacity).also { if (binary) prefix.copyInto(it) }
             }
             while (keepWaiting()) {
                 free.poll(WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)?.let { return it }
@@ -254,9 +277,17 @@ class FileTransfers(
             return null
         }
 
+        fun giveBack(frame: ByteArray) {
+            free.offer(frame)
+        }
+
+        /** [count] file bytes already sit at [dataOffset] in [frame]. */
+        fun sendBinary(frame: ByteArray, count: Int): Boolean =
+            link.sendFrame(OutFrame(frame, dataOffset + count, release = { free.offer(frame) }, binary = true))
+
         fun send(frame: ByteArray, data: ByteArray, count: Int): Boolean {
             val length = FileChunkFrame.build(frame, prefix, data, count)
-            return link.sendFrame(OutFrame(frame, length) { free.offer(frame) })
+            return link.sendFrame(OutFrame(frame, length, release = { free.offer(frame) }))
         }
 
         private companion object {
@@ -265,11 +296,11 @@ class FileTransfers(
     }
 
     /** Only called for paired devices. */
-    fun handle(peerId: String, type: String, file: FileMessage?) {
+    fun handle(peerId: String, type: String, file: FileMessage?, data: ByteArray? = null) {
         file ?: return
         when (type) {
             MessageType.FILE_OFFER -> onOffer(peerId, file)
-            MessageType.FILE_CHUNK -> onChunk(peerId, file)
+            MessageType.FILE_CHUNK -> onChunk(peerId, file, data)
             MessageType.FILE_DONE -> onDone(peerId, file)
             MessageType.FILE_CANCEL -> onCancel(peerId, file)
             MessageType.FILE_RESULT -> onResult(peerId, file)
@@ -304,10 +335,11 @@ class FileTransfers(
         add(Transfer(file.id, peerId, name, size, 0, outgoing = false, status = TransferStatus.Active))
     }
 
-    private fun onChunk(peerId: String, file: FileMessage) {
+    /** [data] is the raw chunk of a binary frame; otherwise `file.data` holds it in base64. */
+    private fun onChunk(peerId: String, file: FileMessage, data: ByteArray?) {
         val item = incoming[file.id]?.takeIf { it.peerId == peerId } ?: return
         val failure = runCatching {
-            val bytes = Base64.getDecoder().decode(file.data.orEmpty())
+            val bytes = data ?: Base64.getDecoder().decode(file.data.orEmpty())
             if (item.received + bytes.size > item.size) error("Data exceeds the file size")
             item.sink.write(bytes)
             item.digest.update(bytes)

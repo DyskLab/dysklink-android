@@ -1,6 +1,5 @@
 package id.phonelink.android.core
 
-import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -195,8 +194,8 @@ class ScreenStreamer(
                     requestKeyFrame()
                     continue
                 }
-                val encoded = Base64.getEncoder().encodeToString(frame.data)
-                if (!send(Envelope(frameType, video = encoded, keyFrame = frame.key.takeIf { it }))) {
+                // Raw: the connection sends it binary to a bin1 peer, or as base64 `video` to an older one.
+                if (!send(Envelope(frameType, keyFrame = frame.key.takeIf { it }, raw = frame.data))) {
                     if (resync == null) { close(); break }
                     lostAt = System.currentTimeMillis()
                     lastTry = lostAt
@@ -235,7 +234,7 @@ class ScreenStreamer(
         /** How long sharing waits for a dropped connection, such as a switch between USB and Wi-Fi. */
         const val RECONNECT_WAIT_MS = 20_000L
         const val RESYNC_INTERVAL_MS = 1_000L
-        /** Base64 adds a third to the size, and the result must fit in a 1 MiB frame. */
+        /** Base64 (to peers without binary frames) adds a third to the size, and the result must fit in a 1 MiB frame. */
         const val MAX_RAW_BYTES = 760 * 1024
     }
 }

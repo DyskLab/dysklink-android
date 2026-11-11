@@ -46,6 +46,8 @@ data class HubPairing(
     val typing: Boolean = false,
     /** Typing here: the code was sent and the answer is awaited. Only then does the other side's accept count. */
     val localAccepted: Boolean = false,
+    /** The other device has an older DyskLink that can't pair with CPace. [error] says to update it. */
+    val outdated: Boolean = false,
 )
 
 /** What the computer itself does with what phones send. Called on background threads. */
@@ -113,6 +115,11 @@ class ComputerHub(
     /** The phone whose sound plays here. */
     @Volatile private var soundFrom: String? = null
     private var pairingTimeout: Job? = null
+    /** CPace state of [pairing]: [shower] while the code shows here, [typer] while it's typed here. */
+    private var shower: Pake.Shower? = null
+    private var typer: Pake.Typer? = null
+    /** A code typed before the other computer's `pair.pake` arrived. */
+    private var pendingCode: String? = null
 
     /** Other computers found on the network, by device ID, and the loops that dial them. */
     private val computerAddresses = ConcurrentHashMap<String, Pair<String, Int>>()
@@ -239,7 +246,7 @@ class ComputerHub(
                 return
             }
             MessageType.PONG -> return
-            MessageType.PAIR_REQUEST, MessageType.PAIR_ACCEPT, MessageType.PAIR_REJECT -> return pairingMessage(connection, envelope)
+            MessageType.PAIR_REQUEST, MessageType.PAIR_PAKE, MessageType.PAIR_ACCEPT, MessageType.PAIR_REJECT -> return pairingMessage(connection, envelope)
             MessageType.UNPAIR -> {
                 synchronized(lock) { removeRecord(id); publish() }
                 return
@@ -249,7 +256,7 @@ class ComputerHub(
         if (!paired) return
         if (isComputer(connection)) return computerMessage(connection, envelope)
         if (envelope.type.startsWith("file.")) {
-            fileTransfers.handle(id, envelope.type, envelope.file)
+            fileTransfers.handle(id, envelope.type, envelope.file, envelope.raw)
             return
         }
         when (envelope.type) {
@@ -297,7 +304,7 @@ class ComputerHub(
                 events.phoneSound(id, envelope.audioRate ?: 48_000, envelope.audioChannels ?: 2)
             }
             MessageType.AUDIO_FRAME -> if (soundFrom == id) {
-                envelope.audio?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }?.let { events.phoneSoundChunk(id, it) }
+                envelope.payload()?.let { events.phoneSoundChunk(id, it) }
             }
             MessageType.AUDIO_STOPPED -> if (soundFrom == id) { soundFrom = null; events.phoneSoundEnded(id) }
             // This computer can't send its own sound yet; the phone shows why.
@@ -381,13 +388,13 @@ class ComputerHub(
             }
             MessageType.FILE_OFFER, MessageType.FILE_CHUNK, MessageType.FILE_DONE, MessageType.FILE_CANCEL, MessageType.FILE_RESULT -> {
                 val file = envelope.file ?: return
-                if (!clipboardFile(id, envelope.type, file)) fileTransfers.handle(id, envelope.type, file)
+                if (!clipboardFile(id, envelope.type, file, envelope.raw)) fileTransfers.handle(id, envelope.type, file, envelope.raw)
             }
         }
     }
 
     /** Handles a picture for the clipboard. Returns false for an ordinary file. */
-    private fun clipboardFile(id: String, type: String, file: FileMessage): Boolean {
+    private fun clipboardFile(id: String, type: String, file: FileMessage, raw: ByteArray?): Boolean {
         when (type) {
             MessageType.FILE_OFFER -> {
                 if (file.kind != CLIPBOARD_KIND) return false
@@ -404,7 +411,7 @@ class ComputerHub(
             }
             MessageType.FILE_CHUNK -> {
                 val item = clipImages[file.id]?.takeIf { it.peerId == id } ?: return false
-                val bytes = runCatching { java.util.Base64.getDecoder().decode(file.data.orEmpty()) }.getOrNull()
+                val bytes = raw ?: runCatching { java.util.Base64.getDecoder().decode(file.data.orEmpty()) }.getOrNull()
                 if (bytes == null || item.bytes.size() + bytes.size > item.size) { clipImages.remove(file.id, item); return true }
                 item.bytes.write(bytes)
                 item.digest.update(bytes)
@@ -443,6 +450,19 @@ class ComputerHub(
     private fun sendClipImage(connection: PeerConnection, transfer: String, png: ByteArray, hash: String): Boolean {
         if (!connection.send(Envelope(MessageType.FILE_OFFER, file = FileMessage(transfer, name = "Clipboard.png", size = png.size.toLong(), kind = CLIPBOARD_KIND)))) return false
         // Straight into frames, behind live messages, without copying the picture or making Strings.
+        if (connection.binary) {
+            val header = FileChunkFrame.binaryPrefix(transfer)
+            var at = 0
+            while (at < png.size) {
+                val count = minOf(CHUNK_BYTES, png.size - at)
+                val frame = ByteArray(header.size + count)
+                header.copyInto(frame)
+                png.copyInto(frame, header.size, at, at + count)
+                if (!connection.sendFrame(OutFrame(frame, frame.size, binary = true))) return false
+                at += count
+            }
+            return connection.send(Envelope(MessageType.FILE_DONE, file = FileMessage(transfer, sha256 = hash)))
+        }
         val prefix = FileChunkFrame.prefix(transfer)
         val chunk = ByteArray(CHUNK_BYTES)
         var offset = 0
@@ -527,19 +547,39 @@ class ComputerHub(
         val connection = connections[id] ?: return@lockedInBackground
         val hello = connection.hello ?: return@lockedInBackground
         if (records.containsKey(id) || !isComputer(connection) || _pairing.value != null) return@lockedInBackground
-        send(connection, Envelope(MessageType.PAIR_REQUEST))
-        _pairing.value = HubPairing(id, hello.name, code = "", typing = true)
+        dropPake()
+        if (hello.protocolVersion < Pairing.PAKE_SINCE) {
+            // Its DyskLink only pairs the old way, which this one no longer accepts.
+            _pairing.value = HubPairing(id, hello.name, code = "", typing = true, outdated = true, error = Pairing.updateMessage(hello.name))
+        } else {
+            val typing = Pake.Typer()
+            typer = typing
+            send(connection, Envelope(MessageType.PAIR_REQUEST, pake = typing.request))
+            _pairing.value = HubPairing(id, hello.name, code = "", typing = true)
+        }
         startPairingTimeout(id)
     }
 
     /** The code shown on the other computer. A code already on its way isn't sent again. */
     fun submitCode(typed: String): Unit = lockedInBackground {
-        val prompt = _pairing.value?.takeIf { it.typing && !it.localAccepted } ?: return@lockedInBackground
+        val prompt = _pairing.value?.takeIf { it.typing && !it.localAccepted && !it.outdated } ?: return@lockedInBackground
         val digits = typed.filter(Char::isDigit)
         if (digits.length != 6) return@lockedInBackground
         val connection = connections[prompt.phoneId] ?: return@lockedInBackground
+        val typing = typer ?: return@lockedInBackground
         _pairing.value = prompt.copy(error = null, localAccepted = true)
-        send(connection, Envelope(MessageType.PAIR_ACCEPT, key = Pairing.proof(digits, identity.deviceId, prompt.phoneId)))
+        // The other side's share hasn't come yet: the code goes as soon as it does.
+        if (!typing.ready) pendingCode = digits else sendCode(connection, prompt, digits)
+    }
+
+    /** The CPace answer for a typed code, with a fresh secret each time. */
+    private fun Outgoing.sendCode(connection: PeerConnection, prompt: HubPairing, code: String) {
+        val accept = typer?.answer(code, Pake.channel(identity.deviceId, prompt.phoneId))
+        if (accept == null) {
+            CoreLog.w(TAG, "PAIRING_BAD_PAKE ${prompt.phoneId}")
+            return rejectCurrentPairing()
+        }
+        send(connection, Envelope(MessageType.PAIR_ACCEPT, pake = accept))
     }
 
     private fun startPairingTimeout(id: String) {
@@ -573,12 +613,27 @@ class ComputerHub(
                     send(connection, Envelope(MessageType.PAIR_REJECT))
                     return@locked
                 }
-                // Asked again while the code shows: the same code stays, and so do the wrong tries.
-                if (current != null && !current.typing) return@locked
+                // Asked again while the code shows: the same code stays, and so do the wrong tries. A new request
+                // (a new nonce) gets a new share for that same code.
+                if (current != null && !current.typing) {
+                    if (current.outdated) return@locked
+                    val nonce = Pake.requestNonce(envelope.pake) ?: return@locked
+                    if (shower?.sameRequest(nonce) != true) {
+                        shower?.close()
+                        shower = Pake.Shower(current.code, nonce, Pake.channel(id, identity.deviceId))
+                    }
+                    shower?.let { send(connection, Envelope(MessageType.PAIR_PAKE, pake = it.message)) }
+                    return@locked
+                }
                 // Both computers asked at once: the smaller ID shows the code, the other types it.
                 if (current != null && current.typing && identity.deviceId > id) return@locked
-                if (hello.protocolVersion < Pairing.TYPED_SINCE) {
-                    send(connection, Envelope(MessageType.PAIR_REJECT, error = "Update DyskLink on the phone, then pair again."))
+                // Older apps only know the old code check, which a device in the middle could brute-force.
+                val nonceT = Pake.requestNonce(envelope.pake)
+                if (hello.protocolVersion < Pairing.PAKE_SINCE || nonceT == null) {
+                    dropPake()
+                    send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.UPDATE_REQUIRED))
+                    _pairing.value = HubPairing(id, hello.name, "", outdated = true, error = Pairing.updateMessage(hello.name))
+                    startPairingTimeout(id)
                     return@locked
                 }
                 val wait = pairingGuard.waitMs(id)
@@ -587,18 +642,47 @@ class ComputerHub(
                     send(connection, Envelope(MessageType.PAIR_REJECT, error = PairingGuard.waitMessage(wait)))
                     return@locked
                 }
-                _pairing.value = HubPairing(id, hello.name, Pairing.newCode())
+                dropPake()
+                val code = Pairing.newCode()
+                val showing = Pake.Shower(code, nonceT, Pake.channel(id, identity.deviceId))
+                shower = showing
+                _pairing.value = HubPairing(id, hello.name, code)
+                send(connection, Envelope(MessageType.PAIR_PAKE, pake = showing.message))
                 startPairingTimeout(id)
+            }
+            MessageType.PAIR_PAKE -> {
+                val prompt = _pairing.value?.takeIf { it.phoneId == id && it.typing && !it.outdated } ?: return@locked
+                val typing = typer ?: return@locked
+                if (!typing.received(envelope.pake)) {
+                    CoreLog.w(TAG, "PAIRING_BAD_PAKE $id")
+                    return@locked rejectCurrentPairing()
+                }
+                pendingCode?.let { code ->
+                    pendingCode = null
+                    sendCode(connection, prompt, code)
+                }
             }
             MessageType.PAIR_ACCEPT -> {
                 val prompt = _pairing.value?.takeIf { it.phoneId == id } ?: return@locked
-                // Typed here: the other computer checked the code and agrees, but only once a code was actually sent.
+                // Typed here: saved only once the other computer proves it derived the same key from our code.
                 if (prompt.typing) {
-                    if (prompt.localAccepted) completePairing(connection, hello)
+                    if (prompt.localAccepted && pendingCode == null) {
+                        if (typer?.confirms(envelope.pake) == true) {
+                            completePairing(connection, hello)
+                        } else {
+                            CoreLog.w(TAG, "PAIRING_BAD_CONFIRM $id")
+                            rejectCurrentPairing()
+                        }
+                    }
                     return@locked
                 }
-                if (envelope.key == Pairing.proof(prompt.code, identity.deviceId, id)) {
-                    send(connection, Envelope(MessageType.PAIR_ACCEPT))
+                if (prompt.outdated) return@locked
+                val showing = shower ?: return@locked
+                // Only the old key: an older app, which can't pair any more. Not counted as a wrong code.
+                val pake = envelope.pake ?: return@locked rejectCurrentPairing(Pairing.UPDATE_REQUIRED)
+                val reply = showing.check(pake)
+                if (reply != null) {
+                    send(connection, Envelope(MessageType.PAIR_ACCEPT, pake = reply))
                     completePairing(connection, hello)
                 } else if (pairingGuard.wrong(id)) {
                     CoreLog.w(TAG, "PAIRING_LOCKED $id")
@@ -611,7 +695,11 @@ class ComputerHub(
             MessageType.PAIR_REJECT -> {
                 val prompt = _pairing.value?.takeIf { it.phoneId == id } ?: return@locked
                 if (prompt.typing && envelope.error == Pairing.WRONG_CODE) {
+                    typer?.wrongCode()
                     _pairing.value = prompt.copy(attempts = prompt.attempts + 1, localAccepted = false, error = "That code is wrong. Check it on ${prompt.phoneName}.")
+                } else if (prompt.typing && envelope.error == Pairing.UPDATE_REQUIRED) {
+                    dropPake()
+                    _pairing.value = prompt.copy(localAccepted = false, outdated = true, error = Pairing.updateMessage(prompt.phoneName))
                 } else {
                     clearPairing()
                 }
@@ -628,9 +716,18 @@ class ComputerHub(
         clearPairing()
     }
 
+    private fun dropPake() {
+        shower?.close()
+        shower = null
+        typer?.close()
+        typer = null
+        pendingCode = null
+    }
+
     private fun clearPairing() {
         pairingTimeout?.cancel()
         pairingTimeout = null
+        dropPake()
         _pairing.value = null
     }
 

@@ -26,7 +26,8 @@ class MacIntegrationTest {
     private val port = System.getenv("DYSKLINK_IT_PORT")?.toIntOrNull()
     private val downloads = System.getenv("DYSKLINK_IT_DOWNLOADS")?.let(::File)
 
-    private class Client(port: Int) {
+    /** [caps] null is a phone app before binary frames (1.1.x), which the Mac must keep serving JSON. */
+    private class Client(port: Int, caps: List<String>? = null) {
         val identity = LocalIdentity.loadOrCreate(Files.createTempDirectory("dysk-it").toFile())
         val connection = PeerConnection.connect(identity.sslContext(), "127.0.0.1", port)
         val inbox = LinkedBlockingQueue<Envelope>()
@@ -44,7 +45,7 @@ class MacIntegrationTest {
                 }
             }
             connection.send(
-                Envelope(MessageType.HELLO, hello = Hello("Tes", "android", "JVM", PhoneLinkProtocol.VERSION, false)),
+                Envelope(MessageType.HELLO, hello = Hello("Tes", "android", "JVM", PhoneLinkProtocol.VERSION, false, caps = caps)),
             )
         }
 
@@ -60,10 +61,13 @@ class MacIntegrationTest {
 
         /** The debug Mac shows 123456 in tests, and the phone types it. */
         fun pair() {
-            connection.send(Envelope(MessageType.PAIR_REQUEST))
-            Thread.sleep(300)
-            connection.send(Envelope(MessageType.PAIR_ACCEPT, key = Pairing.proof("123456", identity.deviceId, connection.peerId)))
-            assertNotNull(await(MessageType.PAIR_ACCEPT), "Mac did not accept pairing")
+            val typer = Pake.Typer()
+            connection.send(Envelope(MessageType.PAIR_REQUEST, pake = typer.request))
+            assertTrue(typer.received(await(MessageType.PAIR_PAKE)?.pake), "Mac did not send its CPace share")
+            val answer = assertNotNull(typer.answer("123456", Pake.channel(identity.deviceId, connection.peerId)))
+            connection.send(Envelope(MessageType.PAIR_ACCEPT, pake = answer))
+            val accept = assertNotNull(await(MessageType.PAIR_ACCEPT), "Mac did not accept pairing")
+            assertTrue(typer.confirms(accept.pake), "Mac's confirmation didn't match")
         }
 
         fun sendFile(id: String, name: String, data: ByteArray, kind: String? = null) {
@@ -101,6 +105,62 @@ class MacIntegrationTest {
         assertNull(client.await(MessageType.FILE_RESULT, seconds = 2), "File accepted from an unknown device")
         assertNull(client.await(MessageType.COMMAND_RESULT, seconds = 1), "Command run for an unknown device")
         assertTrue(downloads!!.listFiles().orEmpty().none { it.name == "asing.txt" })
+        client.connection.close()
+    }
+
+    @Test
+    fun binaryFramesWithTheMac() {
+        assumeTrue(port != null)
+        val client = Client(port!!, PhoneLinkProtocol.CAPS)
+        val hello = assertNotNull(client.await(MessageType.HELLO), "No hello from the Mac")
+        assertEquals(listOf(PhoneLinkProtocol.CAP_BINARY), hello.hello?.caps)
+        client.pair()
+        assertTrue(client.connection.binary, "Binary frames weren't agreed")
+
+        // A file in binary chunks, read straight from raw bytes, still checked by SHA-256.
+        val data = Random(5).nextBytes(200_003)
+        client.connection.send(Envelope(MessageType.FILE_OFFER, file = FileMessage("b1", name = "biner.bin", size = data.size.toLong())))
+        data.toList().chunked(65_536).forEach { piece ->
+            client.connection.send(Envelope(MessageType.FILE_CHUNK, file = FileMessage("b1"), raw = piece.toByteArray()))
+        }
+        client.connection.send(Envelope(MessageType.FILE_DONE, file = FileMessage("b1", sha256 = sha256Hex(data))))
+        assertEquals(true, assertNotNull(client.await(MessageType.FILE_RESULT)).file?.ok)
+        assertContentEquals(data, File(downloads, "biner.bin").readBytes())
+        // A wrong hash over binary chunks is still refused.
+        client.connection.send(Envelope(MessageType.FILE_OFFER, file = FileMessage("b2", name = "biner-rusak.bin", size = 3)))
+        client.connection.send(Envelope(MessageType.FILE_CHUNK, file = FileMessage("b2"), raw = byteArrayOf(1, 2, 3)))
+        client.connection.send(Envelope(MessageType.FILE_DONE, file = FileMessage("b2", sha256 = "0".repeat(64))))
+        assertEquals(false, assertNotNull(client.await(MessageType.FILE_RESULT)).file?.ok)
+        assertTrue(!File(downloads, "biner-rusak.bin").exists())
+
+        // The Mac's sound comes as binary frames of raw PCM.
+        client.connection.send(Envelope(MessageType.AUDIO_LISTEN))
+        assertNotNull(client.await(MessageType.AUDIO_STARTED, seconds = 10), "Mac did not start its sound")
+        val sound = assertNotNull(client.await(MessageType.AUDIO_FRAME, seconds = 5), "No sound from the Mac")
+        assertEquals(7_680, assertNotNull(sound.raw, "Sound came as JSON").size)
+        assertNull(sound.audio)
+        client.connection.send(Envelope(MessageType.AUDIO_STOP))
+        assertNotNull(client.await(MessageType.AUDIO_STOPPED, seconds = 5))
+
+        // The phone's sound and camera to the Mac, binary.
+        client.connection.send(Envelope(MessageType.AUDIO_STARTED, audioRate = 48_000, audioChannels = 2))
+        repeat(4) { client.connection.send(Envelope(MessageType.AUDIO_FRAME, raw = ByteArray(7_680) { i -> (i % 50).toByte() })) }
+        client.connection.send(Envelope(MessageType.AUDIO_STOPPED))
+        client.connection.send(Envelope(MessageType.CAMERA_STARTED, screen = ScreenInfo(1280, 720), text = "front", rotation = 0))
+        assertNotNull(client.await(MessageType.CAMERA_SYNC), "Mac did not ask for a key frame")
+        client.connection.send(Envelope(MessageType.CAMERA_FRAME, keyFrame = true, raw = byteArrayOf(0, 0, 0, 1, 0x65, 1, 2)))
+        client.connection.send(Envelope(MessageType.CAMERA_STOPPED, error = "uji-biner"))
+
+        // The Mac's screen comes as binary H.264 frames.
+        client.connection.send(Envelope(MessageType.MACSCREEN_START))
+        assertNotNull(client.await(MessageType.MACSCREEN_STARTED, seconds = 15), "Mac did not share its screen")
+        val video = assertNotNull(client.await(MessageType.MACSCREEN_FRAME, seconds = 10), "No video from the Mac")
+        assertEquals(true, video.keyFrame)
+        val types = MacScreenTestNal.types(assertNotNull(video.raw, "Video came as JSON"))
+        assertTrue(types.containsAll(listOf(7, 8, 5)), "NAL types $types")
+        client.connection.send(Envelope(MessageType.MACSCREEN_STOP))
+        Thread.sleep(500)
+        assertTrue(client.connection.isOpen, "The Mac closed the connection")
         client.connection.close()
     }
 
@@ -147,6 +207,8 @@ class MacIntegrationTest {
         assertEquals(48_000, started.audioRate)
         assertEquals(2, started.audioChannels)
         val frame = assertNotNull(client.await(MessageType.AUDIO_FRAME, seconds = 5), "No sound from the Mac")
+        // No caps in this phone's hello: an app before binary frames gets JSON with base64, as always.
+        assertNull(frame.raw, "An old phone got a binary frame")
         val pcm = Base64.getDecoder().decode(frame.audio)
         assertEquals(7_680, pcm.size)
         assertTrue(pcm.any { it != 0.toByte() }, "The Mac sent silence")
@@ -174,6 +236,7 @@ class MacIntegrationTest {
         // The first frame is a key frame that carries SPS (7) and PPS (8) before the picture (5).
         val frame = assertNotNull(client.await(MessageType.MACSCREEN_FRAME, seconds = 10), "No video from the Mac")
         assertEquals(true, frame.keyFrame)
+        assertNull(frame.raw, "An old phone got a binary frame")
         val data = Base64.getDecoder().decode(frame.video)
         val types = MacScreenTestNal.types(data)
         assertTrue(types.containsAll(listOf(7, 8, 5)) && types.indexOf(7) < types.indexOf(5), "NAL types $types")

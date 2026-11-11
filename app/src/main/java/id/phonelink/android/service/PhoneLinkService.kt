@@ -20,6 +20,7 @@ import id.phonelink.android.ClipboardSendActivity
 import id.phonelink.android.MainActivity
 import id.phonelink.android.R
 import id.phonelink.android.core.ConnectionManager
+import id.phonelink.android.core.Pairing
 import id.phonelink.android.core.PairingPrompt
 import id.phonelink.android.core.PhoneLinkProtocol
 import id.phonelink.android.core.TransferStatus
@@ -349,10 +350,13 @@ class PhoneLinkService : Service() {
     private fun buildPairingNotification(prompt: PairingPrompt): Notification =
         Notification.Builder(this, PAIRING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo_glyph)
-            .setContentTitle("Pair with ${prompt.peerName}")
+            .setContentTitle(if (prompt.outdated) "Can't pair with ${prompt.peerName}" else "Pair with ${prompt.peerName}")
             .setContentText(
-                if (prompt.showsCode) "Type code ${prompt.code} on ${prompt.peerName}."
-                else "Tap to enter the code shown on ${prompt.peerName}.",
+                when {
+                    prompt.outdated -> prompt.error ?: Pairing.updateMessage(prompt.peerName)
+                    prompt.showsCode -> "Type code ${prompt.code} on ${prompt.peerName}."
+                    else -> "Tap to enter the code shown on ${prompt.peerName}."
+                },
             )
             .setContentIntent(openAppIntent())
             .setAutoCancel(true)

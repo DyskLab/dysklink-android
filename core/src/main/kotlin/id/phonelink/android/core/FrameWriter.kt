@@ -10,8 +10,12 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlinx.serialization.builtins.serializer
 
-/** A frame's JSON, already encoded: the first [length] bytes of [bytes]. [release] runs once, after it's written or dropped. */
-class OutFrame(val bytes: ByteArray, val length: Int, val release: (() -> Unit)? = null)
+/**
+ * A frame's body, already encoded: the first [length] bytes of [bytes]. [release] runs once, after it's written or
+ * dropped. For a [binary] frame the body is `[UInt16 header length][JSON header][raw payload]` and the length word
+ * gets [BinaryFrames.FLAG]; only build one for a link whose [TransferLink.binary] is true.
+ */
+class OutFrame(val bytes: ByteArray, val length: Int, val release: (() -> Unit)? = null, val binary: Boolean = false)
 
 /**
  * Writes one connection's frames on its own thread, so a peer that stops reading only holds up itself.
@@ -22,7 +26,21 @@ class OutFrame(val bytes: ByteArray, val length: Int, val release: (() -> Unit)?
  * keeps its own order, and every message of a file transfer (offer, chunks, done, cancel) is in the file queue.
  */
 internal class FrameWriter(output: OutputStream, name: String, private val closeSocket: () -> Unit) {
-    private class Item(var bytes: ByteArray, var length: Int, var mergeable: Envelope?, var seq: Long, val release: (() -> Unit)?)
+    /**
+     * [bytes] up to [length], then [payload] if any. [binary] frames are `[UInt16][header]` in [bytes] and the raw media
+     * in [payload], written straight from the sender's array.
+     */
+    private class Item(
+        var bytes: ByteArray,
+        var length: Int,
+        var mergeable: Envelope?,
+        var seq: Long,
+        val release: (() -> Unit)?,
+        val payload: ByteArray? = null,
+        val binary: Boolean = false,
+    ) {
+        val size: Int get() = length + (payload?.size ?: 0)
+    }
 
     private val out = DataOutputStream(output)
     private val lock = ReentrantLock()
@@ -40,6 +58,17 @@ internal class FrameWriter(output: OutputStream, name: String, private val close
     /** True once [close] was called or writing failed. Nothing new is accepted. */
     val isClosing: Boolean get() = closing
 
+    /** This side's hello, as it went out, listed binary frames. */
+    @Volatile private var localBinary = false
+    /** The other side's first hello listed binary frames. */
+    @Volatile var peerBinary = false
+
+    /**
+     * Messages with [Envelope.raw] go out as binary frames: both hellos listed [PhoneLinkProtocol.CAP_BINARY].
+     * Until then, and always with older apps, they go out as JSON with base64.
+     */
+    val binary: Boolean get() = localBinary && peerBinary
+
     /**
      * Queues without waiting, for the main thread and for sending to several peers at once. False when the
      * connection is closing, the queue is full, or the message is too big for one frame.
@@ -54,17 +83,34 @@ internal class FrameWriter(output: OutputStream, name: String, private val close
 
     /** A pre-encoded file frame, such as a `file.chunk`. Waits for room in the file window. */
     fun sendBulk(frame: OutFrame): Boolean {
-        if (frame.length > PhoneLinkProtocol.MAX_FRAME_BYTES) {
+        if (frame.length > PhoneLinkProtocol.MAX_FRAME_BYTES || (frame.binary && !binary)) {
             frame.release?.invoke()
             return false
         }
-        return admitBulk(Item(frame.bytes, frame.length, null, 0, frame.release), wait = true)
+        return admitBulk(Item(frame.bytes, frame.length, null, 0, frame.release, binary = frame.binary), wait = true)
+    }
+
+    /** The message as a queue item: binary when it has a payload and the peer takes binary frames, else JSON. */
+    private fun item(envelope: Envelope): Item? {
+        val raw = envelope.raw
+        if (raw != null && binary && envelope.type in BinaryFrames.TYPES) {
+            val header = BinaryFrames.header(envelope)
+            if (header == null || header.size + raw.size > PhoneLinkProtocol.MAX_FRAME_BYTES) {
+                CoreLog.w(TAG, "FRAME_TOO_BIG ${envelope.type} ${raw.size} bytes, not sent")
+                return null
+            }
+            return Item(header, header.size, null, 0, null, payload = raw, binary = true)
+        }
+        val bytes = encode(envelope) ?: return null
+        return Item(bytes, bytes.size, null, 0, null)
     }
 
     private fun enqueue(envelope: Envelope, wait: Boolean): Boolean {
         if (closing) return false
+        if (envelope.type == MessageType.HELLO) localBinary = BinaryFrames.supports(envelope.hello)
+        if (envelope.type in BULK_TYPES) return admitBulk(item(envelope) ?: return false, wait)
+        if (envelope.raw != null) return enqueueLive(item(envelope) ?: return false, wait, envelope.type)
         val bytes = encode(envelope) ?: return false
-        if (envelope.type in BULK_TYPES) return admitBulk(Item(bytes, bytes.size, null, 0, null), wait)
         val mergeable = envelope.takeIf(::isMergeable)
         val seq: Long
         lock.withLock {
@@ -81,35 +127,54 @@ internal class FrameWriter(output: OutputStream, name: String, private val close
                 last.seq = ++liveSeq
                 seq = last.seq
             } else {
-                while (live.size >= MAX_LIVE_MESSAGES || (live.isNotEmpty() && liveBytes + bytes.size > MAX_LIVE_BYTES)) {
-                    if (!wait) {
-                        CoreLog.w(TAG, "SEND_QUEUE_FULL ${envelope.type} ${live.size} messages, $liveBytes bytes")
-                        return false
-                    }
-                    changed.await()
-                    if (closing) return false
-                }
-                seq = ++liveSeq
-                live.addLast(Item(bytes, bytes.size, mergeable, seq, null))
-                liveBytes += bytes.size
+                seq = addLive(Item(bytes, bytes.size, mergeable, 0, null), wait, envelope.type) ?: return false
             }
-            changed.signalAll()
-            if (!wait) return true
-            while (liveWritten < seq && !closed) changed.await()
-            return liveWritten >= seq
+            return awaitLive(seq, wait)
         }
+    }
+
+    private fun enqueueLive(item: Item, wait: Boolean, type: String): Boolean {
+        lock.withLock {
+            if (closing) return false
+            val seq = addLive(item, wait, type) ?: return false
+            return awaitLive(seq, wait)
+        }
+    }
+
+    /** Holding the lock: queues [item] once there's room, or returns null. */
+    private fun addLive(item: Item, wait: Boolean, type: String): Long? {
+        while (live.size >= MAX_LIVE_MESSAGES || (live.isNotEmpty() && liveBytes + item.size > MAX_LIVE_BYTES)) {
+            if (!wait) {
+                CoreLog.w(TAG, "SEND_QUEUE_FULL $type ${live.size} messages, $liveBytes bytes")
+                return null
+            }
+            changed.await()
+            if (closing) return null
+        }
+        item.seq = ++liveSeq
+        live.addLast(item)
+        liveBytes += item.size
+        return item.seq
+    }
+
+    /** Holding the lock. */
+    private fun awaitLive(seq: Long, wait: Boolean): Boolean {
+        changed.signalAll()
+        if (!wait) return true
+        while (liveWritten < seq && !closed) changed.await()
+        return liveWritten >= seq
     }
 
     private fun admitBulk(item: Item, wait: Boolean): Boolean {
         val accepted = lock.withLock {
             val limit = if (wait) BULK_WINDOW_BYTES else MAX_BULK_BYTES
-            while (!closing && bulk.isNotEmpty() && bulkBytes + item.length > limit) {
+            while (!closing && bulk.isNotEmpty() && bulkBytes + item.size > limit) {
                 if (!wait) break
                 changed.await()
             }
-            if (closing || (bulk.isNotEmpty() && bulkBytes + item.length > limit)) return@withLock false
+            if (closing || (bulk.isNotEmpty() && bulkBytes + item.size > limit)) return@withLock false
             bulk.addLast(item)
-            bulkBytes += item.length
+            bulkBytes += item.size
             changed.signalAll()
             true
         }
@@ -140,14 +205,14 @@ internal class FrameWriter(output: OutputStream, name: String, private val close
             val fileTurn = bulk.isNotEmpty() && !closing && liveStreak >= MAX_LIVE_STREAK_BYTES
             val next = if (fileTurn) null else live.pollFirst()
             if (next != null) {
-                liveBytes -= next.length
-                liveStreak += next.length
+                liveBytes -= next.size
+                liveStreak += next.size
                 return@withLock Taken(next, true, live.isNotEmpty() || (!closing && bulk.isNotEmpty()))
             }
             if (closing) return@withLock null
             val file = bulk.pollFirst()
             if (file != null) {
-                bulkBytes -= file.length
+                bulkBytes -= file.size
                 liveStreak = 0
                 // Room in the window for the uploader's next chunk.
                 changed.signalAll()
@@ -167,8 +232,9 @@ internal class FrameWriter(output: OutputStream, name: String, private val close
                 val taken = take() ?: break
                 val item = taken.item
                 try {
-                    out.writeInt(item.length)
+                    out.writeInt(if (item.binary) BinaryFrames.FLAG or item.size else item.size)
                     out.write(item.bytes, 0, item.length)
+                    item.payload?.let { out.write(it) }
                     // Small messages queued together go out in one flush.
                     if (!taken.more) out.flush()
                 } finally {
@@ -229,7 +295,7 @@ internal class FrameWriter(output: OutputStream, name: String, private val close
 
         /** Null, with a log line, for a message bigger than one frame: the other side would drop the connection over it. */
         fun encode(envelope: Envelope): ByteArray? {
-            val payload = protocolJson.encodeToString(Envelope.serializer(), envelope).encodeToByteArray()
+            val payload = protocolJson.encodeToString(Envelope.serializer(), BinaryFrames.asJson(envelope)).encodeToByteArray()
             if (payload.size > PhoneLinkProtocol.MAX_FRAME_BYTES) {
                 CoreLog.w(TAG, "FRAME_TOO_BIG ${envelope.type} ${payload.size} bytes, not sent")
                 return null
@@ -272,6 +338,15 @@ internal object FileChunkFrame {
             .encodeToByteArray()
 
     fun capacity(prefix: ByteArray, rawBytes: Int): Int = prefix.size + Base64Bytes.encodedLength(rawBytes) + SUFFIX.size
+
+    /**
+     * `[UInt16][{"type":"file.chunk","file":{"id":…}}]`, the start of a binary `file.chunk`; the raw bytes follow it in
+     * the same buffer. The same header bytes as [BinaryFrames.header] makes for that message.
+     */
+    fun binaryPrefix(id: String): ByteArray = BinaryFrames.lengthPrefixed(
+        ("{\"type\":\"${MessageType.FILE_CHUNK}\",\"file\":{\"id\":" + protocolJson.encodeToString(String.serializer(), id) + "}}")
+            .encodeToByteArray(),
+    ) ?: error("File ID too long")
 
     /** Writes the frame for the first [count] bytes of [data] into [into]. Returns its length. */
     fun build(into: ByteArray, prefix: ByteArray, data: ByteArray, count: Int): Int {

@@ -9,8 +9,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 object PhoneLinkProtocol {
-    /** 2: the code is random and typed on the device that asked to pair. */
-    const val VERSION = 2
+    /** 3: pairing by CPace on the typed code. 2: the code is random and typed on the device that asked to pair. */
+    const val VERSION = 3
     const val SERVICE_TYPE = "_phonelink._tcp."
     /** Platforms that act as a computer: phones serve them their data. Anything else is another phone. */
     val COMPUTERS = setOf("macos", "windows", "linux")
@@ -21,6 +21,13 @@ object PhoneLinkProtocol {
     /** Phones listen here for other phones. Not the Mac port, so scanning for Macs never finds a phone. */
     const val PHONE_PORT = 47822
     const val MAX_FRAME_BYTES = 1024 * 1024
+    /**
+     * Capability for binary frames (see [BinaryFrames]). Sent in `hello.caps`; binary frames go to a peer only when
+     * both hellos list it. Apps before 1.2 don't send `caps` and ignore it, so they keep getting JSON.
+     */
+    const val CAP_BINARY = "bin1"
+    /** What this build advertises in `hello.caps`. */
+    val CAPS: List<String> = listOf(CAP_BINARY)
     const val PAIRING_TIMEOUT_MS = 60_000L
     const val MAX_CLIPBOARD_CHARS = 256 * 1024
 }
@@ -34,6 +41,8 @@ data class Hello(
     val paired: Boolean,
     /** The app version, such as "0.2.0". Missing from apps older than 0.2.0. */
     val appVersion: String? = null,
+    /** Optional protocol features this side understands, such as [PhoneLinkProtocol.CAP_BINARY]. Missing before 1.2. */
+    val caps: List<String>? = null,
 )
 
 @Serializable
@@ -279,6 +288,41 @@ data class Envelope(
     val macAction: String? = null,
     /** On the `terminal.*` messages. */
     val terminal: TerminalMessage? = null,
+    /** On `pair.request`, `pair.pake`, and `pair.accept` (pairing version 3). */
+    val pake: PakeMessage? = null,
+    /**
+     * Not part of the JSON. The raw media of `screen.frame`, `camera.frame`, `macscreen.frame` (H.264), `audio.frame`
+     * (PCM), or `file.chunk` (file bytes): set by the reader for a binary frame, and by senders, whose writer sends it
+     * as a binary frame to a `bin1` peer and as the usual base64 field to anyone else. Read it with [payload].
+     */
+    @kotlinx.serialization.Transient val raw: ByteArray? = null,
+) {
+    /**
+     * The media bytes of a frame message: [raw], or the base64 field decoded (`video`, `audio`, or `file.data`).
+     * Null when there is none or the base64 is invalid.
+     */
+    fun payload(): ByteArray? {
+        raw?.let { return it }
+        val text = when (type) {
+            MessageType.FILE_CHUNK -> file?.data
+            MessageType.AUDIO_FRAME -> audio
+            else -> video
+        } ?: return null
+        return runCatching { java.util.Base64.getDecoder().decode(text) }.getOrNull()
+    }
+}
+
+/**
+ * Pairing version 3 (CPace). `v` is the PAKE version, 1. Base64 fields: `nonce` (16 bytes, in `pair.request` and
+ * `pair.pake`), `y` (a 32-byte X25519 point, in `pair.pake` and the typing side's `pair.accept`), and `confirm`
+ * (32 bytes, in both `pair.accept`s).
+ */
+@Serializable
+data class PakeMessage(
+    val v: Int,
+    val nonce: String? = null,
+    val y: String? = null,
+    val confirm: String? = null,
 )
 
 /** A terminal session on the Mac. `data` is base64 bytes: typed keys, or what the shell printed. */
@@ -297,6 +341,8 @@ object MessageType {
     const val PAIR_REQUEST = "pair.request"
     const val PAIR_ACCEPT = "pair.accept"
     const val PAIR_REJECT = "pair.reject"
+    /** The showing side's CPace share, sent once the code shows. */
+    const val PAIR_PAKE = "pair.pake"
     const val UNPAIR = "unpair"
     const val INFO = "info"
     const val PING = "ping"
@@ -395,16 +441,8 @@ object Frames {
         return true
     }
 
-    /** Returns null for a corrupt message. The connection stays usable. */
-    fun read(input: DataInputStream): Envelope? {
-        val length = input.readInt()
-        if (length <= 0 || length > PhoneLinkProtocol.MAX_FRAME_BYTES) {
-            throw IOException("Invalid frame size: $length")
-        }
-        val payload = ByteArray(length)
-        input.readFully(payload)
-        return decode(payload, length)
-    }
+    /** Returns null for a corrupt message. The connection stays usable. Reads binary frames too. */
+    fun read(input: DataInputStream): Envelope? = FrameReader(input).read()
 
     /**
      * Null for a corrupt message. Through a String on purpose: measured with kotlinx.serialization 1.11,
@@ -419,17 +457,43 @@ object Frames {
 class FrameReader(private val input: DataInputStream) {
     private var buffer = ByteArray(INITIAL_BYTES)
 
-    /** Returns null for a corrupt message. The connection stays usable. */
+    /**
+     * Returns null for a corrupt JSON message; the connection stays usable. Throws [IOException] for a frame that
+     * breaks the framing (bad length, a binary header that doesn't fit or isn't JSON), which ends the connection.
+     */
     fun read(): Envelope? {
-        val length = input.readInt()
+        val word = input.readInt()
+        if (word and BinaryFrames.FLAG != 0) return readBinary(word and BinaryFrames.FLAG.inv())
+        val length = word
         if (length <= 0 || length > PhoneLinkProtocol.MAX_FRAME_BYTES) {
             throw IOException("Invalid frame size: $length")
         }
+        ensure(length)
+        input.readFully(buffer, 0, length)
+        return Frames.decode(buffer, length)
+    }
+
+    /** `[UInt16 header length][JSON header][raw payload]`, [length] bytes in all. The payload gets its own array. */
+    private fun readBinary(length: Int): Envelope {
+        if (length < BinaryFrames.HEADER_LENGTH_BYTES || length > PhoneLinkProtocol.MAX_FRAME_BYTES) {
+            throw IOException("Invalid binary frame size: $length")
+        }
+        val headerLength = input.readUnsignedShort()
+        if (headerLength == 0 || headerLength > length - BinaryFrames.HEADER_LENGTH_BYTES) {
+            throw IOException("Invalid binary header length: $headerLength of $length")
+        }
+        ensure(headerLength)
+        input.readFully(buffer, 0, headerLength)
+        val payload = ByteArray(length - BinaryFrames.HEADER_LENGTH_BYTES - headerLength)
+        input.readFully(payload)
+        val header = Frames.decode(buffer, headerLength) ?: throw IOException("Invalid binary header")
+        return header.copy(raw = payload)
+    }
+
+    private fun ensure(length: Int) {
         if (length > buffer.size) {
             buffer = ByteArray(maxOf(length, minOf(buffer.size * 2, PhoneLinkProtocol.MAX_FRAME_BYTES)))
         }
-        input.readFully(buffer, 0, length)
-        return Frames.decode(buffer, length)
     }
 
     private companion object {
@@ -437,23 +501,77 @@ class FrameReader(private val input: DataInputStream) {
     }
 }
 
+/**
+ * Binary frames, used only toward a peer whose `hello.caps` has [PhoneLinkProtocol.CAP_BINARY] (and only when this
+ * side's hello listed it too):
+ * `[UInt32 BE: 0x80000000 | length][UInt16 BE: header length][header: UTF-8 JSON envelope][raw payload]`.
+ * `length` counts everything after the first word and is at most [PhoneLinkProtocol.MAX_FRAME_BYTES]. The header is the
+ * message without its base64 field (`video`, `audio`, or `file.data`); the payload is that field's raw bytes.
+ */
+object BinaryFrames {
+    const val FLAG = 0x80000000.toInt()
+    const val HEADER_LENGTH_BYTES = 2
+    /** The messages that go binary. Everything else stays JSON. */
+    val TYPES = setOf(
+        MessageType.SCREEN_FRAME, MessageType.CAMERA_FRAME, MessageType.MACSCREEN_FRAME,
+        MessageType.AUDIO_FRAME, MessageType.FILE_CHUNK,
+    )
+
+    /** True when [hello] lists binary frames. */
+    fun supports(hello: Hello?): Boolean = hello?.caps?.contains(PhoneLinkProtocol.CAP_BINARY) == true
+
+    /** `[UInt16 BE length][JSON]` of [envelope] without its payload, or null when the header is too long. */
+    fun header(envelope: Envelope): ByteArray? {
+        val bare = envelope.copy(raw = null, video = null, audio = null, file = envelope.file?.copy(data = null))
+        return lengthPrefixed(protocolJson.encodeToString(Envelope.serializer(), bare).encodeToByteArray())
+    }
+
+    internal fun lengthPrefixed(json: ByteArray): ByteArray? {
+        if (json.isEmpty() || json.size > 0xFFFF) return null
+        val out = ByteArray(json.size + HEADER_LENGTH_BYTES)
+        out[0] = (json.size ushr 8).toByte()
+        out[1] = json.size.toByte()
+        json.copyInto(out, HEADER_LENGTH_BYTES)
+        return out
+    }
+
+    /** The JSON form of a message whose payload is in [Envelope.raw]: the payload as the usual base64 field. */
+    fun asJson(envelope: Envelope): Envelope {
+        val raw = envelope.raw ?: return envelope
+        val text = java.util.Base64.getEncoder().encodeToString(raw)
+        return when (envelope.type) {
+            MessageType.FILE_CHUNK -> envelope.copy(raw = null, file = (envelope.file ?: FileMessage("")).copy(data = text))
+            MessageType.AUDIO_FRAME -> envelope.copy(raw = null, audio = text)
+            else -> envelope.copy(raw = null, video = text)
+        }
+    }
+
+    /** The whole frame, length word included, as it goes on the wire. For tests and fixed vectors. */
+    fun encode(envelope: Envelope): ByteArray? {
+        val header = header(envelope) ?: return null
+        val raw = envelope.raw ?: ByteArray(0)
+        val length = header.size + raw.size
+        if (length > PhoneLinkProtocol.MAX_FRAME_BYTES) return null
+        return ByteBuffer.allocate(4 + length).putInt(FLAG or length).put(header).put(raw).array()
+    }
+}
+
 object Pairing {
     /** Sent in `pair.reject` when the typed code was wrong, so the other side can try again. */
     const val WRONG_CODE = "wrong-code"
+    /** Sent in `pair.reject` to a device that can only pair the old way (version 1 or 2). */
+    const val UPDATE_REQUIRED = "update-required"
     const val MAX_ATTEMPTS = 5
-    /** The first protocol version that types the code. */
-    const val TYPED_SINCE = 2
+    /** The first protocol version that pairs with CPace. Older devices must update before they can pair. */
+    const val PAKE_SINCE = 3
 
     /** A random code, shown on the device that was asked to pair. */
     fun newCode(): String = "%06d".format(java.security.SecureRandom().nextInt(1_000_000))
 
-    /** What the typing side sends: the code tied to both certificates, the same as the Mac computes. */
-    fun proof(code: String, idA: String, idB: String): String {
-        val (first, second) = listOf(idA, idB).sorted()
-        return sha256Hex("dysklink-pair-v2:$code:$first:$second".toByteArray())
-    }
+    /** What the user sees when the other device has an older DyskLink. */
+    fun updateMessage(name: String): String = "Update DyskLink on $name to pair."
 
-    /** Version 1 code, from both IDs. Kept for the record; pairing now uses [newCode]. */
+    /** Version 1 code, from both IDs. Kept for the record; new pairings only use CPace ([Pake]). */
     fun code(idA: String, idB: String): String {
         val (first, second) = listOf(idA, idB).sorted()
         val input = "phonelink-pair-v1:$first:$second"

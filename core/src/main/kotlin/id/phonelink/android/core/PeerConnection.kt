@@ -45,13 +45,22 @@ class PeerConnection private constructor(
     /** False once [close] was called or the connection broke. */
     override val isOpen: Boolean get() = !writer.isClosing
 
+    /** Frame messages with a payload go out binary: both hellos listed `bin1`. See [BinaryFrames]. */
+    override val binary: Boolean get() = writer.binary
+
     fun readLoop(onMessage: (Envelope) -> Unit) {
         val reader = FrameReader(input)
+        var helloSeen = false
         try {
             while (true) {
                 val envelope = reader.read()
                 // Closed here: what still arrives isn't handled, as if the socket had closed at once.
                 if (writer.isClosing) throw java.io.IOException("Connection closed")
+                // Only the first hello counts, as everywhere else.
+                if (envelope?.type == MessageType.HELLO && !helloSeen) {
+                    helloSeen = true
+                    writer.peerBinary = BinaryFrames.supports(envelope.hello)
+                }
                 envelope?.let(onMessage)
             }
         } finally {
