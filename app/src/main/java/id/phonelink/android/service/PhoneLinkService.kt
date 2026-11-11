@@ -13,6 +13,7 @@ import android.net.Network
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import id.phonelink.android.ClipboardSendActivity
@@ -21,6 +22,7 @@ import id.phonelink.android.R
 import id.phonelink.android.core.ConnectionManager
 import id.phonelink.android.core.PairingPrompt
 import id.phonelink.android.core.PhoneLinkProtocol
+import id.phonelink.android.core.TransferStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,6 +33,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -43,9 +48,14 @@ class PhoneLinkService : Service() {
     @Volatile private var discovery: NsdDiscovery? = null
     @Volatile private var watchers: PhoneWatchers? = null
 
+    /** Whether NSD should be looking now; set from the main thread. */
+    @Volatile private var discoveryWanted = true
+
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+            // A new network: scan again from the shortest wait, and look for services on it.
             rescan.trySend(Unit)
+            android.os.Handler(mainLooper).post { if (discoveryWanted) discovery?.restart() }
         }
     }
 
@@ -72,7 +82,7 @@ class PhoneLinkService : Service() {
             buildNotification(0),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0,
         )
-        acquireWifiLock()
+        createWifiLock()
         ChargeReminder.start(this)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
 
@@ -100,6 +110,28 @@ class PhoneLinkService : Service() {
                 connections::addDiscovered,
                 connections::removeDiscovered,
             ).also { it.start() }
+            // Multicast discovery costs battery: stop it while every paired device is connected, unless the app is
+            // open (where a new device may be paired).
+            launch(Dispatchers.Main) {
+                combine(connections.peers.map(::allPairedConnected), uiVisible) { all, visible -> !all || visible }
+                    .distinctUntilChanged()
+                    .collect { wanted ->
+                        discoveryWanted = wanted
+                        if (wanted) discovery?.start() else discovery?.pause()
+                    }
+            }
+            // A device dropping off: look for it again right away.
+            launch {
+                var previous = emptySet<String>()
+                connections.peers
+                    .map { peers -> peers.filter { it.isPaired && it.isConnected }.map { it.id }.toSet() }
+                    .distinctUntilChanged()
+                    .collect { now ->
+                        if (!now.containsAll(previous)) rescan.trySend(Unit)
+                        previous = now
+                    }
+            }
+            launch { holdWifiLockWhileBusy(connections) }
 
             // Other phones: listen, and say so on the network while phone connections are on.
             launch {
@@ -116,10 +148,13 @@ class PhoneLinkService : Service() {
             }
             launch { showStatus(connections) }
             launch(Dispatchers.Main) {
-                connections.peers.collect {
-                    MacWidget.render(this@PhoneLinkService, it)
-                    Widgets.renderAll(this@PhoneLinkService)
-                }
+                // Peers change for every INFO; widgets only show names, battery and connection.
+                connections.peers
+                    .distinctUntilChangedBy { peers -> peers.map(::widgetFields) }
+                    .collect {
+                        MacWidget.render(this@PhoneLinkService, it)
+                        Widgets.renderAll(this@PhoneLinkService)
+                    }
             }
             launch(Dispatchers.Main) { connections.notch.collect { Widgets.renderAll(this@PhoneLinkService) } }
             connections.startUsb()
@@ -127,7 +162,14 @@ class PhoneLinkService : Service() {
             connections.audioSink = { peer, envelope -> AudioShare.handle(this@PhoneLinkService, peer, envelope) }
             photoSyncer = PhotoSyncer(this@PhoneLinkService, connections, scope).also { syncer -> launch(Dispatchers.Main) { syncer.start() } }
             launch { showPairingAlerts(connections) }
-            launch { uiVisible.collect { if (it) connections.tryAutoPair() } }
+            launch {
+                uiVisible.collect {
+                    if (it) {
+                        connections.tryAutoPair()
+                        rescan.trySend(Unit)
+                    }
+                }
+            }
             launch { scanLoop(connections) }
             launch { Updates.runLoop(this@PhoneLinkService) }
             launch {
@@ -146,10 +188,12 @@ class PhoneLinkService : Service() {
     }
 
     private suspend fun showStatus(connections: ConnectionManager) {
-        connections.peers.collect { peers ->
-            val count = peers.count { it.isPaired && it.isConnected }
-            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(count))
-        }
+        connections.peers
+            .map { peers -> peers.count { it.isPaired && it.isConnected } }
+            .distinctUntilChanged()
+            .collect { count ->
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(count))
+            }
     }
 
     /** The pairing code appears as a notification when the app isn't open. */
@@ -162,22 +206,55 @@ class PhoneLinkService : Service() {
             }
     }
 
+    /**
+     * Fallback for networks without multicast. Sweeps back off (20 s, 1 min, 5 min, 30 min) while nothing turns up,
+     * try known addresses first, skip the sweep with the screen off, and stop while every paired device is connected.
+     */
     private suspend fun scanLoop(connections: ConnectionManager) {
         val scanner = LanScanner(this)
+        val backoff = ScanBackoff()
+        val power = getSystemService(PowerManager::class.java)
+        val prefs = getSharedPreferences(SCAN_PREFS, MODE_PRIVATE)
         while (true) {
-            scanner.findHosts().forEach { connections.probe(it, PhoneLinkProtocol.PORT) }
-            val connected = connections.peers.value.any { it.isConnected }
-            withTimeoutOrNull(if (connected) SCAN_IDLE_MS else SCAN_SEARCHING_MS) { rescan.receive() }
+            val peers = connections.peers.value
+            val action = ScanPolicy.decide(
+                pairedCount = peers.count { it.isPaired },
+                connectedPaired = peers.count { it.isPaired && it.isConnected },
+                screenOn = power.isInteractive,
+            )
+            val known = prefs.getString(SCAN_HOSTS, null)?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+            if (action != ScanAction.Idle) known.forEach { connections.probe(it, PhoneLinkProtocol.PORT) }
+            if (action == ScanAction.Sweep) {
+                val found = scanner.findHosts()
+                found.forEach { connections.probe(it, PhoneLinkProtocol.PORT) }
+                if (found.isNotEmpty()) {
+                    prefs.edit().putString(SCAN_HOSTS, ScanPolicy.rememberHosts(known, found).joinToString(",")).apply()
+                }
+            }
+            val wait = if (action == ScanAction.Idle) SCAN_IDLE_MS else backoff.next()
+            // A new network, a lost device, or opening the app scans again now and from the shortest wait.
+            if (withTimeoutOrNull(wait) { rescan.receive() } != null) backoff.reset()
         }
     }
 
     @Suppress("DEPRECATION")
-    private fun acquireWifiLock() {
+    private fun createWifiLock() {
         wifiLock = getSystemService(WifiManager::class.java)
-            .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "phonelink:connection")
-            .apply {
-                setReferenceCounted(false)
-                acquire()
+            .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "phonelink:streaming")
+            .apply { setReferenceCounted(false) }
+    }
+
+    /** The high-performance Wi-Fi lock costs battery, so it's held only while streaming or moving files. */
+    private suspend fun holdWifiLockWhileBusy(connections: ConnectionManager) {
+        val streaming = combine(
+            ScreenCaptureService.activePeer, AudioShare.sending, AudioShare.listening, CameraStreamService.active, macScreenViewing,
+        ) { screen, soundOut, soundIn, camera, macScreen -> screen != null || soundOut != null || soundIn != null || camera != null || macScreen }
+        val moving = connections.fileTransfers.transfers.map { list -> list.any { it.status == TransferStatus.Active } }
+        combine(streaming, moving) { a, b -> a || b }
+            .distinctUntilChanged()
+            .collect { busy ->
+                val lock = wifiLock ?: return@collect
+                runCatching { if (busy) lock.acquire() else if (lock.isHeld) lock.release() }
             }
     }
 
@@ -187,7 +264,7 @@ class PhoneLinkService : Service() {
 
     override fun onDestroy() {
         getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
-        wifiLock?.release()
+        wifiLock?.takeIf { it.isHeld }?.release()
         ChargeReminder.stop(this)
         discovery?.stop()
         watchers?.stop()
@@ -259,8 +336,26 @@ class PhoneLinkService : Service() {
         private const val PAIRING_NOTIFICATION_ID = 2
         private const val INFO_INTERVAL_MS = 30_000L
         private const val HEARTBEAT_MS = 25_000L
-        private const val SCAN_SEARCHING_MS = 20_000L
-        private const val SCAN_IDLE_MS = 300_000L
+        /** With every paired device connected the loop only wakes to re-check; a lost device wakes it sooner. */
+        private const val SCAN_IDLE_MS = 1_800_000L
+        private const val SCAN_PREFS = "scan"
+        private const val SCAN_HOSTS = "hosts"
+
+        private val macScreenViewing = MutableStateFlow(false)
+
+        /** The Mac screen viewer on this phone is showing (it keeps Wi-Fi in high-performance mode). */
+        fun setMacScreenViewing(viewing: Boolean) {
+            macScreenViewing.value = viewing
+        }
+
+        /** Only what the widgets show, so they redraw only when one of these changes. */
+        private fun widgetFields(peer: id.phonelink.android.core.Peer) = listOf(
+            peer.id, peer.name, peer.platform, peer.isPaired, peer.isConnected, peer.canWake,
+            peer.info?.batteryPercent, peer.info?.isCharging, peer.info?.keepAwake,
+        )
+
+        private fun allPairedConnected(peers: List<id.phonelink.android.core.Peer>): Boolean =
+            peers.any { it.isPaired } && peers.filter { it.isPaired }.all { it.isConnected }
 
         private val manager = MutableStateFlow<ConnectionManager?>(null)
         val connectionManager: StateFlow<ConnectionManager?> = manager.asStateFlow()

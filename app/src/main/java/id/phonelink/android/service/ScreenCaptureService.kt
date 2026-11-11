@@ -74,8 +74,17 @@ class ScreenCaptureService : Service() {
         val code = intent?.getIntExtra(EXTRA_CODE, Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data = intent?.let { IntentCompat.getParcelableExtra(it, EXTRA_DATA, Intent::class.java) }
         val peer = intent?.getStringExtra(EXTRA_PEER)
-        if (code != Activity.RESULT_OK || data == null || peer == null || projection != null) {
-            if (projection == null) stopSelf()
+        val busyWith = peerId
+        if (busyWith != null && peer != null && peer != busyWith) {
+            // Already sharing with another computer: tell this one instead of leaving it waiting.
+            val other = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == busyWith }?.name ?: "another computer"
+            PhoneLinkService.connectionManager.value?.sendDirect(
+                peer, Envelope(MessageType.SCREEN_STOPPED, error = "The phone is already sharing its screen with $other. Stop that first."),
+            )
+            return START_NOT_STICKY
+        }
+        if (code != Activity.RESULT_OK || data == null || peer == null || projection != null || busyWith != null) {
+            if (projection == null && busyWith == null) stopSelf()
             return START_NOT_STICKY
         }
         // Android requires this service to be in the foreground before the recording permission is used.

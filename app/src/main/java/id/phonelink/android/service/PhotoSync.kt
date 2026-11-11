@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -211,17 +212,49 @@ class PhotoSyncer(private val context: Context, private val connections: Connect
         PhotoSync.trigger = null
     }
 
-    /** A camera writes a photo in steps, so wait for it to settle before reading. */
-    private fun schedule(delayMs: Long) {
+    /** Set while a run is sending; a change then only asks for another run after it, never cancels it. */
+    private var running = false
+    private var rerun = false
+
+    /**
+     * A camera writes a photo in steps, so wait for it to settle before reading. Only a run still waiting is
+     * replaced: cancelling one mid-send would drop the transfer's result before the mark is saved, and the
+     * photo would go again.
+     */
+    private fun schedule(delayMs: Long) = synchronized(this) {
+        if (running) {
+            rerun = true
+            return@synchronized
+        }
         pending?.cancel()
         pending = scope.launch(Dispatchers.IO) {
             delay(delayMs)
-            runOnce()
+            synchronized(this@PhotoSyncer) {
+                if (!isActive) return@launch
+                running = true
+                rerun = false
+            }
+            try {
+                while (true) {
+                    val more = runOnce()
+                    val again = synchronized(this@PhotoSyncer) {
+                        val changed = rerun
+                        rerun = false
+                        if (!changed && !more) running = false
+                        changed to (changed || more)
+                    }
+                    if (!again.second) break
+                    if (again.first) delay(PHOTO_SETTLE_MS)
+                }
+            } finally {
+                synchronized(this@PhotoSyncer) { running = false }
+            }
         }
     }
 
-    private suspend fun runOnce() = lock.withLock {
-        if (!PhotoSync.canRead(context)) return@withLock
+    /** Returns true when there are more photos to send right away. */
+    private suspend fun runOnce(): Boolean = lock.withLock {
+        if (!PhotoSync.canRead(context)) return@withLock false
         val macs = connections.peers.value.filter { it.isMac && it.isPaired && it.isConnected && PhotoSync.isOn(context, it.id) }
             .filter { !PhotoSync.wifiOnly(context, it.id) || PhotoSync.onFreeWifi(context) }
         var more = false
@@ -230,7 +263,7 @@ class PhotoSyncer(private val context: Context, private val connections: Connect
             // New photos first, then the catch-up a batch at a time.
             more = newMore || (!newMore && sendEarlier(mac.id)) || more
         }
-        if (more) schedule(0)
+        more
     }
 
     private suspend fun sendNew(macId: String): Boolean =

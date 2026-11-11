@@ -129,6 +129,23 @@ against the switch and the Android permission, and your choice applies to every 
 The SMS, call log, and all-files permissions make this app unsuitable for Google Play without a special application,
 so it is installed directly.
 
+## Windows and Linux
+
+`desktop/` is DyskLink for Windows and Linux: one Kotlin app (Compose Multiplatform) on the same `core/` module as
+the phone app. It plays the Mac's part for phones: pairing with a code, the clipboard both ways, files both ways
+(drop them on the window), phone notifications and calls as system notifications, and ringing both ways. Mac-only
+features such as the screen, notch, and charging aren't in it.
+
+```bash
+./gradlew :desktop:run                      # try it; on a Mac set DYSKLINK_PORT=47831 next to DyskLink for Mac
+./gradlew :desktop:packageMsi               # on Windows
+./gradlew :desktop:packageDeb               # on Linux
+```
+
+Installers are built by GitHub Actions (`.github/workflows/desktop.yml`) on Windows and Ubuntu runners, because each
+installer can only be made on its own system. Set `DYSKLINK_DESKTOP_ONLY=1` to build it without the Android SDK.
+Discovery uses jmDNS with a host name of its own, so it works next to the Bonjour that Windows, macOS, and Avahi run.
+
 ## Build and install
 You need Android 8 or later on the phone, JDK 17, and the Android SDK. Set `ANDROID_HOME` to the SDK, or put `sdk.dir`
 in `local.properties`.

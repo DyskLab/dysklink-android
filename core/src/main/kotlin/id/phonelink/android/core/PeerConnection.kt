@@ -3,7 +3,6 @@ package id.phonelink.android.core
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import javax.net.ssl.SSLContext
@@ -19,25 +18,42 @@ class PeerConnection private constructor(
     val inbound: Boolean = false,
 ) {
     private val input = DataInputStream(BufferedInputStream(socket.inputStream))
-    private val output = DataOutputStream(BufferedOutputStream(socket.outputStream))
+    private val writer = FrameWriter(BufferedOutputStream(socket.outputStream), peerId.take(8)) {
+        runCatching { socket.close() }
+    }
 
     @Volatile var hello: Hello? = null
 
-    /** Returns false if sending failed, in which case the connection is closed right away. */
-    fun send(envelope: Envelope): Boolean =
-        runCatching { Frames.write(output, envelope) }.onFailure { error ->
-            // Writing from Android's main thread is refused before anything is sent, so the connection is still fine.
-            if (error::class.java.name != "android.os.NetworkOnMainThreadException") close()
-        }.isSuccess
+    /**
+     * Waits like a direct write: a live message until it's written, a file message until the file window has room.
+     * Returns false if the connection is closed or closing, or if the message was too big to send, in which case the
+     * connection stays open. Writing happens on this connection's own thread, never the caller's.
+     */
+    fun send(envelope: Envelope): Boolean = writer.send(envelope)
+
+    /** Queues without waiting, for the main thread and for messages to several peers. False if it can't be queued. */
+    fun post(envelope: Envelope): Boolean = writer.post(envelope)
+
+    /** A pre-encoded `file.*` frame, behind live messages. Waits for room in the file window. */
+    fun sendFrame(frame: OutFrame): Boolean = writer.sendBulk(frame)
 
     fun readLoop(onMessage: (Envelope) -> Unit) {
-        while (true) {
-            Frames.read(input)?.let(onMessage)
+        val reader = FrameReader(input)
+        try {
+            while (true) {
+                val envelope = reader.read()
+                // Closed here: what still arrives isn't handled, as if the socket had closed at once.
+                if (writer.isClosing) throw java.io.IOException("Connection closed")
+                envelope?.let(onMessage)
+            }
+        } finally {
+            writer.close()
         }
     }
 
+    /** Hangs up. Live messages already queued, such as a rejection, still go out first, for at most a second. */
     fun close() {
-        runCatching { socket.close() }
+        writer.close()
     }
 
     companion object {

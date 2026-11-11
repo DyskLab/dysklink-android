@@ -19,7 +19,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -102,15 +104,23 @@ fun FileHistoryScreen(
     var selected by remember { mutableStateOf<String?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     var peerFilter by remember { mutableStateOf(initialPeer) }
-    val names = peers.associate { it.id to it.name }
+    val names = remember(peers) { peers.associate { it.id to it.name } }
     val all = transfers
-    val transfers = peerFilter?.let { id -> all.filter { it.peerId == id } } ?: all
-    val matching = transfers.filter { filter.includes(it) && (query.isBlank() || it.name.contains(query.trim(), ignoreCase = true)) }
-    val zone = ZoneId.systemDefault()
-    val timeFormat = DateTimeFormatter.ofPattern("HH:mm")
+    val transfers = remember(all, peerFilter) { peerFilter?.let { id -> all.filter { it.peerId == id } } ?: all }
+    val matching = remember(transfers, filter, query) {
+        transfers.filter { filter.includes(it) && (query.isBlank() || it.name.contains(query.trim(), ignoreCase = true)) }
+    }
+    val counts = remember(transfers) { HistoryFilter.entries.associateWith { option -> transfers.count { option.includes(it) } } }
+    val zone = remember { ZoneId.systemDefault() }
+    val today = LocalDate.now(zone)
+    val groups = remember(matching, today) { historyGroups(matching, today, zone) }
+    val timeFormat = remember { DateTimeFormatter.ofPattern("HH:mm") }
 
     FeatureScaffold("File history", onBack) {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // No spacing between items, so a day's rows join into one card; other items add their own top gap.
+        LazyColumn(Modifier.weight(1f)) {
+          item(key = "controls") {
+          Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             // Filter tabs, each with its own count.
             Row(
                 Modifier
@@ -124,7 +134,7 @@ fun FileHistoryScreen(
             ) {
                 HistoryFilter.entries.forEach { option ->
                     val on = option == filter
-                    val count = transfers.count { option.includes(it) }
+                    val count = counts[option] ?: 0
                     Row(
                         Modifier
                             .clip(CircleShape)
@@ -192,8 +202,11 @@ fun FileHistoryScreen(
                 )
             }
 
-            if (matching.isEmpty()) {
-                GlassCard {
+          }
+          }
+
+            if (matching.isEmpty()) item(key = "empty") {
+                GlassCard(Modifier.padding(top = 12.dp)) {
                     Text(
                         when {
                             transfers.isEmpty() -> "No files yet. Files you send to your Mac or receive from it show up here."
@@ -207,10 +220,13 @@ fun FileHistoryScreen(
                 }
             }
 
-            historyGroups(matching, LocalDate.now(zone), zone).forEach { (label, items) ->
-                Text(label.uppercase(), color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, modifier = Modifier.padding(top = 4.dp))
-                GlassCard {
-                    items.forEachIndexed { index, transfer ->
+            groups.forEach { (label, items) ->
+                item(key = "day:$label") {
+                    Text(label.uppercase(), color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, modifier = Modifier.padding(top = 16.dp, bottom = 12.dp))
+                }
+                // One lazy row per transfer, drawn as slices of one card, so 500 entries don't all compose at once.
+                itemsIndexed(items, key = { _, transfer -> transfer.id }) { index, transfer ->
+                    Column(Modifier.cardSegment(first = index == 0, last = index == items.lastIndex)) {
                         if (index > 0) Box(Modifier.fillMaxWidth().padding(vertical = 2.dp).height(1.dp).background(Palette.Stroke))
                         HistoryRow(
                             transfer = transfer,
@@ -234,6 +250,8 @@ fun FileHistoryScreen(
                 }
             }
 
+            item(key = "footer") {
+            Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 SecondaryButton("Open folder", Modifier.weight(1f), onClick = onOpenFolder)
                 if (peerFilter == null && transfers.any { it.status != TransferStatus.Active }) {
@@ -248,6 +266,8 @@ fun FileHistoryScreen(
                 lineHeight = 17.sp,
             )
             Spacer(Modifier.height(12.dp))
+            }
+            }
         }
     }
 
@@ -459,4 +479,34 @@ private fun RowAction(text: String, color: Color, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 7.dp),
     )
+}
+
+/** One row of a card split across lazy items: the panel, with the outline and rounded corners only at its ends. */
+private fun Modifier.cardSegment(first: Boolean, last: Boolean): Modifier {
+    val radius = 22.dp
+    val shape = RoundedCornerShape(
+        topStart = if (first) radius else 0.dp,
+        topEnd = if (first) radius else 0.dp,
+        bottomStart = if (last) radius else 0.dp,
+        bottomEnd = if (last) radius else 0.dp,
+    )
+    return fillMaxWidth()
+        .clip(shape)
+        .background(Palette.Panel.copy(alpha = 0.86f))
+        .drawWithContent {
+            drawContent()
+            // A full rounded outline, stretched past the ends that join the next slice, so only the sides show there.
+            val stroke = 1.dp.toPx()
+            val r = radius.toPx()
+            val top = if (first) stroke / 2 else -2 * r
+            val bottom = if (last) size.height - stroke / 2 else size.height + 2 * r
+            drawRoundRect(
+                color = Palette.Stroke,
+                topLeft = androidx.compose.ui.geometry.Offset(stroke / 2, top),
+                size = androidx.compose.ui.geometry.Size(size.width - stroke, bottom - top),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(r - stroke / 2),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
+            )
+        }
+        .padding(start = 18.dp, end = 18.dp, top = if (first) 18.dp else 0.dp, bottom = if (last) 18.dp else 0.dp)
 }

@@ -3,8 +3,46 @@ package id.phonelink.android.core
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.view.Surface
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+
+/**
+ * A short queue of frames between the connection's reading thread and the decoder. When the decoder falls behind and
+ * the queue is full, the queued frames are dropped and later ones skipped until the next key frame, so the reader
+ * never waits (sound and input on the same connection keep flowing).
+ */
+class FrameQueue<T>(private val capacity: Int) {
+    private val items = LinkedBlockingQueue<Pair<T, Boolean>>()
+    private var dropping = false
+
+    /** Queues a frame. Returns true when frames were just dropped, so the caller should ask for a key frame. */
+    @Synchronized
+    fun offer(frame: T, key: Boolean): Boolean {
+        if (key) dropping = false
+        if (dropping) return false
+        if (items.size >= capacity) {
+            items.clear()
+            if (!key) {
+                dropping = true
+                return true
+            }
+        }
+        items.offer(frame to key)
+        return false
+    }
+
+    /** The next frame and whether it's a key frame, or null after [timeoutMs] with none. */
+    fun poll(timeoutMs: Long): Pair<T, Boolean>? = items.poll(timeoutMs, TimeUnit.MILLISECONDS)
+
+    val size: Int get() = items.size
+
+    @Synchronized
+    fun clear() {
+        items.clear()
+    }
+}
 
 /**
  * Decodes the Mac's H.264 (Annex B, SPS and PPS before each key frame) onto a surface.
@@ -29,10 +67,31 @@ class MacScreenDecoder(private val surface: Surface, private val width: Int, pri
         this.codec = codec
         running.set(true)
         thread(isDaemon = true, name = "macscreen-out") { drain(codec) }
+        thread(isDaemon = true, name = "macscreen-in") { pump() }
     }
 
-    /** Called on the reading thread for each frame. */
-    fun feed(data: ByteArray, key: Boolean) {
+    private val queue = FrameQueue<String>(QUEUE_FRAMES)
+
+    /**
+     * Called on the connection's reading thread with a frame still in base64. Returns at once: decoding the base64 and
+     * waiting for the codec happen on the decoder's own thread.
+     */
+    fun feedEncoded(base64: String, key: Boolean) {
+        if (!running.get()) return
+        if (queue.offer(base64, key)) onNeedKey()
+    }
+
+    private fun pump() {
+        val decoder = java.util.Base64.getDecoder()
+        while (running.get()) {
+            val (text, key) = queue.poll(INPUT_POLL_MS) ?: continue
+            val data = runCatching { decoder.decode(text) }.getOrNull() ?: continue
+            runCatching { feed(data, key) }
+        }
+    }
+
+    /** Hands one frame to the codec; runs on the decoder's input thread. */
+    private fun feed(data: ByteArray, key: Boolean) {
         val codec = codec ?: return
         if (!running.get()) return
         if (waitingForKey && !key) return
@@ -69,12 +128,16 @@ class MacScreenDecoder(private val surface: Surface, private val width: Int, pri
 
     fun release() {
         if (!running.getAndSet(false)) return
+        queue.clear()
         codec?.let { runCatching { it.stop() }; runCatching { it.release() } }
         codec = null
     }
 
     private companion object {
         const val INPUT_WAIT_US = 30_000L
+        const val INPUT_POLL_MS = 200L
+        /** About a tenth of a second at the Mac's frame rate. */
+        const val QUEUE_FRAMES = 4
         const val OUTPUT_WAIT_US = 20_000L
     }
 }

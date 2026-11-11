@@ -15,4 +15,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "PhoneLink"
-include(":app", ":core")
+// CI for the desktop apps sets DYSKLINK_DESKTOP_ONLY, so it needs no Android SDK.
+if (System.getenv("DYSKLINK_DESKTOP_ONLY") == null) include(":app")
+include(":core", ":desktop")

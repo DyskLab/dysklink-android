@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
@@ -40,6 +41,7 @@ import id.phonelink.android.service.PhoneApps
 import id.phonelink.android.service.PhoneDataImpl
 import id.phonelink.android.service.DyskAccessibilityService
 import id.phonelink.android.service.FocusDnd
+import id.phonelink.android.service.IntentTokens
 import id.phonelink.android.service.ChargeReminder
 import id.phonelink.android.service.PhoneLinkService
 import id.phonelink.android.service.PrayerWeatherStore
@@ -99,7 +101,13 @@ class MainActivity : ComponentActivity() {
         Updates.prepare(this)
         PhoneLinkService.start(this)
 
-        screenPeer = savedInstanceState?.getString(KEY_SCREEN_PEER)
+        savedInstanceState?.let { saved ->
+            screenPeer = saved.getString(KEY_SCREEN_PEER)
+            pickFilesFor = saved.getString(KEY_PICK_FILES_FOR)
+            soundPeer = saved.getString(KEY_SOUND_PEER)
+            cameraPeer = saved.getString(KEY_CAMERA_PEER)
+            cameraFront = saved.getBoolean(KEY_CAMERA_FRONT)
+        }
         handleShare(intent)
         handleScreenRequest(intent)
         handleCameraRequest(intent)
@@ -117,7 +125,6 @@ class MainActivity : ComponentActivity() {
                     val manualTargets by connections.manualTargets.collectAsStateWithLifecycle()
                     val lastError by connections.lastError.collectAsStateWithLifecycle()
                     val restricted by batteryRestricted
-                    val transfers by connections.fileTransfers.transfers.collectAsStateWithLifecycle()
                     val commands by connections.commands.collectAsStateWithLifecycle()
                     val commandResult by connections.commandResult.collectAsStateWithLifecycle()
                     val clipboardEnabled by connections.clipboardEnabled.collectAsStateWithLifecycle()
@@ -132,10 +139,11 @@ class MainActivity : ComponentActivity() {
                     val charge by ChargeReminder.settings.collectAsStateWithLifecycle()
                     val chargeSessions by ChargeReminder.sessions.collectAsStateWithLifecycle()
                     val phonesEnabled by connections.phonesEnabled.collectAsStateWithLifecycle()
+                    val actions = remember(connections) { makeActions(connections) }
                     PhoneLinkApp(
                         state = UiState(
                             localName, peers, prompt, manualTargets, lastError, restricted,
-                            transfers, commands, commandResult, clipboardEnabled, clipboardAuto, phoneEnabled, phoneActive, sharingPeer,
+                            connections.fileTransfers.transfers, commands, commandResult, clipboardEnabled, clipboardAuto, phoneEnabled, phoneActive, sharingPeer,
                             updates, Updates.currentVersion,
                             notch = notch,
                             ringingMacs = ringingMacs,
@@ -147,92 +155,104 @@ class MainActivity : ComponentActivity() {
                             featureRequest = featureRequest.value,
                             phonesEnabled = phonesEnabled,
                         ),
-                        actions = UiActions(
-                            requestPairing = connections::requestPairing,
-                            submitCode = connections::submitCode,
-                            rejectPairing = connections::rejectPairing,
-                            unpair = connections::unpair,
-                            addManual = connections::addManual,
-                            removeManual = connections::removeManual,
-                            allowBackground = ::requestBatteryExemption,
-                            openAppSettings = ::openAppSettings,
-                            sendFiles = { peerId ->
-                                pickFilesFor = peerId
-                                filePicker.launch(arrayOf("*/*"))
-                            },
-                            sendInput = connections::sendInput,
-                            sendLocalFile = { peerId, file, kind ->
-                                connections.fileTransfers.sendFile(peerId, file.name, file.length(), kind) { file.inputStream() }
-                            },
-                            setPhonesEnabled = connections::setPhonesEnabled,
-                            wakeMac = connections::wakeMac,
-                            macAction = { peer, action -> connections.sendMacAction(action, peer) },
-                            terminalLink = id.phonelink.android.ui.TerminalLink(connections.terminalEvents, connections::sendTerminal),
-                            startCamera = ::startCamera,
-                            startPhoneSound = ::startPhoneSound,
-                            macScreenLink = id.phonelink.android.ui.MacScreenLink(
-                                setSink = { connections.macScreenSink = it },
-                                start = { peer, display -> connections.startMacScreen(peer, display) },
-                                extend = connections::extendMacScreen,
-                                stop = connections::stopMacScreen,
-                                sync = connections::syncMacScreen,
-                                pointer = connections::sendMacPointer,
-                                input = connections::sendInput,
-                            ),
-                            sendClipboardText = { text ->
-                                connections.shareClipboard(text, force = true) { ok ->
-                                    runOnUiThread { toast(if (ok) "Text sent to your devices' clipboard" else "Couldn't send the text. It may be too long.") }
-                                }
-                            },
-                            sendMedia = connections::sendMedia,
-                            runCommand = connections::runCommand,
-                            setClipboardEnabled = connections::setClipboardEnabled,
-                            setClipboardAuto = { on ->
-                                connections.setClipboardAuto(on)
-                                if (on && !DyskAccessibilityService.isRunning) {
-                                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                                }
-                            },
-                            setPhoneFeature = { feature, on ->
-                                connections.phone.setEnabled(feature, on)
-                                if (on && feature !in connections.phone.active.value) grantFeature(feature)
-                            },
-                            grantPhoneFeature = ::grantFeature,
-                            startScreen = ::askForScreen,
-                            stopScreen = { ScreenCaptureService.stop(this) },
-                            downloadUpdate = {
-                                updates.available?.let { release ->
-                                    runCatching { startActivity(Updates.downloadIntent(release)) }
-                                        .onFailure { toast("No browser found to download the update.") }
-                                }
-                            },
-                            skipUpdate = { Updates.skip(this) },
-                            checkUpdates = { lifecycleScope.launch { Updates.check(this@MainActivity, manual = true) } },
-                            setAutoUpdates = { Updates.setAuto(this, it) },
-                            openTransfer = ::openReceived,
-                            notchAction = connections::sendNotchAction,
-                            ringMac = connections::ringMac,
-                            clearTransfers = connections.fileTransfers::clearHistory,
-                            removeTransfer = { connections.fileTransfers.remove(it.id) },
-                            shareTransfer = ::shareReceived,
-                            openReceivedFolder = ::openReceivedFolder,
-                            setCharge = { ChargeReminder.update(this, it) },
-                            clearCharge = { ChargeReminder.clearHistory(this) },
-                            setFocusDnd = { FocusDnd.setEnabled(this, it) },
-                            openExactAlarms = {
-                                runCatching { startActivity(PrayerWeatherStore.exactAlarmSettings(this)) }
-                                    .onFailure { openAppSettings() }
-                            },
-                            openDndSettings = {
-                                runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
-                                    .onFailure { openAppSettings() }
-                            },
-                        ),
+                        actions = actions,
                     )
                 }
             }
         }
     }
+
+    /** Made once per connection manager, so links like the Mac screen and the terminal survive recomposition. */
+    private fun makeActions(connections: ConnectionManager): UiActions = UiActions(
+            requestPairing = connections::requestPairing,
+            submitCode = connections::submitCode,
+            rejectPairing = connections::rejectPairing,
+            unpair = connections::unpair,
+            addManual = connections::addManual,
+            removeManual = connections::removeManual,
+            allowBackground = ::requestBatteryExemption,
+            openAppSettings = ::openAppSettings,
+            sendFiles = { peerId ->
+                pickFilesFor = peerId
+                filePicker.launch(arrayOf("*/*"))
+            },
+            sendInput = connections::sendInput,
+            sendLocalFile = { peerId, file, kind ->
+                connections.fileTransfers.sendFile(peerId, file.name, file.length(), kind) { file.inputStream() }
+            },
+            setPhonesEnabled = connections::setPhonesEnabled,
+            wakeMac = connections::wakeMac,
+            macAction = { peer, action -> connections.sendMacAction(action, peer) },
+            terminalLink = id.phonelink.android.ui.TerminalLink(connections.terminalEvents, connections::sendTerminal),
+            startCamera = ::startCamera,
+            startPhoneSound = ::startPhoneSound,
+            macScreenLink = id.phonelink.android.ui.MacScreenLink(
+                setSink = { connections.macScreenSink = it },
+                start = { peer, display ->
+                    PhoneLinkService.setMacScreenViewing(true)
+                    connections.startMacScreen(peer, display)
+                },
+                extend = { peer, width, height, large ->
+                    PhoneLinkService.setMacScreenViewing(true)
+                    connections.extendMacScreen(peer, width, height, large)
+                },
+                stop = { peer ->
+                    PhoneLinkService.setMacScreenViewing(false)
+                    connections.stopMacScreen(peer)
+                },
+                sync = connections::syncMacScreen,
+                pointer = connections::sendMacPointer,
+                input = connections::sendInput,
+            ),
+            sendClipboardText = { text ->
+                connections.shareClipboard(text, force = true) { ok ->
+                    runOnUiThread { toast(if (ok) "Text sent to your devices' clipboard" else "Couldn't send the text. It may be too long.") }
+                }
+            },
+            sendMedia = connections::sendMedia,
+            runCommand = connections::runCommand,
+            setClipboardEnabled = connections::setClipboardEnabled,
+            setClipboardAuto = { on ->
+                connections.setClipboardAuto(on)
+                if (on && !DyskAccessibilityService.isRunning) {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+            },
+            setPhoneFeature = { feature, on ->
+                connections.phone.setEnabled(feature, on)
+                if (on && feature !in connections.phone.active.value) grantFeature(feature)
+            },
+            grantPhoneFeature = ::grantFeature,
+            startScreen = ::askForScreen,
+            stopScreen = { ScreenCaptureService.stop(this) },
+            downloadUpdate = {
+                Updates.state.value.available?.let { release ->
+                    runCatching { startActivity(Updates.downloadIntent(release)) }
+                        .onFailure { toast("No browser found to download the update.") }
+                }
+            },
+            skipUpdate = { Updates.skip(this) },
+            checkUpdates = { lifecycleScope.launch { Updates.check(this@MainActivity, manual = true) } },
+            setAutoUpdates = { Updates.setAuto(this, it) },
+            openTransfer = ::openReceived,
+            notchAction = connections::sendNotchAction,
+            ringMac = connections::ringMac,
+            clearTransfers = connections.fileTransfers::clearHistory,
+            removeTransfer = { connections.fileTransfers.remove(it.id) },
+            shareTransfer = ::shareReceived,
+            openReceivedFolder = ::openReceivedFolder,
+            setCharge = { ChargeReminder.update(this, it) },
+            clearCharge = { ChargeReminder.clearHistory(this) },
+            setFocusDnd = { FocusDnd.setEnabled(this, it) },
+            openExactAlarms = {
+                runCatching { startActivity(PrayerWeatherStore.exactAlarmSettings(this)) }
+                    .onFailure { openAppSettings() }
+            },
+            openDndSettings = {
+                runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
+                    .onFailure { openAppSettings() }
+            },
+    )
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -268,7 +288,7 @@ class MainActivity : ComponentActivity() {
             listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
         } else {
             IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
-        }
+        }.filter(::isForeignContent)
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
@@ -283,6 +303,13 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * Any app can send a share intent here. Only content from other apps' providers is read, so a share can't
+     * make DyskLink send its own private files (file:// paths or its own FileProvider).
+     */
+    private fun isForeignContent(uri: Uri): Boolean =
+        uri.scheme == "content" && uri.authority?.substringBefore('@')?.startsWith(packageName) != true
 
     private fun sendUris(connections: ConnectionManager, peerId: String, uris: List<Uri>) {
         uris.forEach { uri ->
@@ -300,6 +327,10 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString(KEY_SCREEN_PEER, screenPeer)
+        outState.putString(KEY_PICK_FILES_FOR, pickFilesFor)
+        outState.putString(KEY_SOUND_PEER, soundPeer)
+        outState.putString(KEY_CAMERA_PEER, cameraPeer)
+        outState.putBoolean(KEY_CAMERA_FRONT, cameraFront)
     }
 
     private var cameraPeer: String? = null
@@ -353,7 +384,11 @@ class MainActivity : ComponentActivity() {
     /** Comes from the Mac's camera request notification, which the user tapped. */
     private fun handleCameraRequest(intent: Intent?) {
         val peerId = intent?.getStringExtra(EXTRA_CAMERA_PEER) ?: return
+        val token = intent.getStringExtra(EXTRA_TOKEN)
         intent.removeExtra(EXTRA_CAMERA_PEER)
+        intent.removeExtra(EXTRA_TOKEN)
+        // MainActivity is exported: only our own notification, with its one-time token, may start the camera.
+        if (!IntentTokens.shared.consume(token, IntentTokens.CAMERA, peerId)) return
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
             if (connections.peers.value.any { it.id == peerId && it.isPaired && it.isMac }) startCamera(peerId, false)
@@ -363,7 +398,10 @@ class MainActivity : ComponentActivity() {
     /** Comes from the Mac request notification. Only opens the Android dialog and records nothing. */
     private fun handleScreenRequest(intent: Intent?) {
         val peerId = intent?.getStringExtra(EXTRA_SCREEN_PEER) ?: return
+        val token = intent.getStringExtra(EXTRA_TOKEN)
         intent.removeExtra(EXTRA_SCREEN_PEER)
+        intent.removeExtra(EXTRA_TOKEN)
+        if (!IntentTokens.shared.consume(token, IntentTokens.SCREEN, peerId)) return
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
             if (connections.peers.value.any { it.id == peerId && it.isPaired }) askForScreen(peerId)
@@ -499,8 +537,13 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_SCREEN_PEER = "id.phonelink.android.SCREEN_PEER"
         const val EXTRA_CAMERA_PEER = "id.phonelink.android.CAMERA_PEER"
         const val EXTRA_OPEN = "id.phonelink.android.OPEN"
+        const val EXTRA_TOKEN = "id.phonelink.android.TOKEN"
         const val OPEN_PRAYER = "prayer"
         const val OPEN_FEATURE_PREFIX = "feature:"
         private const val KEY_SCREEN_PEER = "screenPeer"
+        private const val KEY_PICK_FILES_FOR = "pickFilesFor"
+        private const val KEY_SOUND_PEER = "soundPeer"
+        private const val KEY_CAMERA_PEER = "cameraPeer"
+        private const val KEY_CAMERA_FRONT = "cameraFront"
     }
 }

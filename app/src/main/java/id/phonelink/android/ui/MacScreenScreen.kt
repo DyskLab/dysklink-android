@@ -167,8 +167,9 @@ fun MacScreenScreen(
             if (id != peerId) return@setSink
             when (envelope.type) {
                 MessageType.MACSCREEN_FRAME -> {
-                    val data = envelope.video?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() } ?: return@setSink
-                    decoderHolder[0]?.feed(data, envelope.keyFrame == true)
+                    val video = envelope.video ?: return@setSink
+                    // Queued for the decoder's thread; this is the connection's reader and must not wait.
+                    decoderHolder[0]?.feedEncoded(video, envelope.keyFrame == true)
                 }
                 MessageType.MACSCREEN_STARTED -> {
                     val info = envelope.screen ?: return@setSink

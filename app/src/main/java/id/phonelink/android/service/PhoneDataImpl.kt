@@ -159,6 +159,7 @@ class PhoneDataImpl(context: Context) : PhoneData {
     override fun requestScreen(peerId: String) {
         val intent = Intent(context, MainActivity::class.java)
             .putExtra(MainActivity.EXTRA_SCREEN_PEER, peerId)
+            .putExtra(MainActivity.EXTRA_TOKEN, IntentTokens.shared.issue(IntentTokens.SCREEN, peerId))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val notification = Notification.Builder(context, PhoneLinkService.SCREEN_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo_glyph)

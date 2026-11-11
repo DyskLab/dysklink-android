@@ -42,20 +42,46 @@ object ChargeReminder {
     val sessions: StateFlow<List<ChargeSession>> = _sessions.asStateFlow()
 
     private var receiver: BroadcastReceiver? = null
+    @Volatile private var started = false
     private var remindedThisCharge = false
     private var wasCharging: Boolean? = null
+    /** Files are read and written here, off the main thread, in order. */
+    private val io = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
     private fun settingsFile(context: Context) = File(context.filesDir, "charge_settings.json")
     private fun sessionsFile(context: Context) = File(context.filesDir, "charge_sessions.json")
 
     fun start(context: Context) {
-        if (receiver != null) return
+        if (started) return
+        started = true
         val app = context.applicationContext
-        _settings.value = runCatching { protocolJson.decodeFromString(SettingsFile.serializer(), settingsFile(app).readText()) }
-            .getOrNull()?.let { Settings(it.on, it.limit.takeIf { limit -> limit in limitChoices } ?: 80) } ?: Settings()
-        _sessions.value = runCatching {
-            protocolJson.decodeFromString(ListSerializer(ChargeSession.serializer()), sessionsFile(app).readText())
-        }.getOrNull().orEmpty()
+        io.execute {
+            val loaded = runCatching { protocolJson.decodeFromString(SettingsFile.serializer(), settingsFile(app).readText()) }
+                .getOrNull()?.let { Settings(it.on, it.limit.takeIf { limit -> limit in limitChoices } ?: 80) } ?: Settings()
+            val history = runCatching {
+                protocolJson.decodeFromString(ListSerializer(ChargeSession.serializer()), sessionsFile(app).readText())
+            }.getOrNull().orEmpty()
+            main.post {
+                _settings.value = loaded
+                _sessions.value = history
+                if (started) syncReceiver(app)
+            }
+        }
+    }
+
+    fun stop(context: Context) {
+        started = false
+        unregister(context.applicationContext)
+    }
+
+    /** Battery broadcasts wake the app often, so they're only listened to while the reminder (and its history) is on. */
+    private fun syncReceiver(app: Context) {
+        if (_settings.value.on && started) register(app) else unregister(app)
+    }
+
+    private fun register(app: Context) {
+        if (receiver != null) return
         val created = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) = handle(app, intent)
         }
@@ -64,15 +90,27 @@ object ChargeReminder {
         ContextCompat.registerReceiver(app, created, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
-    fun stop(context: Context) {
-        receiver?.let { runCatching { context.applicationContext.unregisterReceiver(it) } }
+    private fun unregister(app: Context) {
+        val current = receiver ?: return
+        runCatching { app.unregisterReceiver(current) }
         receiver = null
+        wasCharging = null
+        // A charge left open would read "charging" forever: close it at the current level.
+        val open = _sessions.value.firstOrNull()?.takeIf { it.end == null } ?: return
+        val sticky = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = sticky?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = (sticky?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100).coerceAtLeast(1)
+        _sessions.value = listOf(open.copy(end = System.currentTimeMillis(), endLevel = if (level >= 0) level * 100 / scale else open.startLevel)) +
+            _sessions.value.drop(1)
+        saveSessions(app)
     }
 
     fun update(context: Context, settings: Settings) {
         _settings.value = settings
         remindedThisCharge = false
-        runCatching { settingsFile(context).writeText(protocolJson.encodeToString(SettingsFile.serializer(), SettingsFile(settings.on, settings.limit))) }
+        val app = context.applicationContext
+        io.execute { runCatching { settingsFile(app).writeText(protocolJson.encodeToString(SettingsFile.serializer(), SettingsFile(settings.on, settings.limit))) } }
+        syncReceiver(app)
         if (!settings.on) context.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
     }
 
@@ -129,8 +167,10 @@ object ChargeReminder {
     }
 
     private fun saveSessions(context: Context) {
-        runCatching {
-            sessionsFile(context).writeText(protocolJson.encodeToString(ListSerializer(ChargeSession.serializer()), _sessions.value))
+        val snapshot = _sessions.value
+        val app = context.applicationContext
+        io.execute {
+            runCatching { sessionsFile(app).writeText(protocolJson.encodeToString(ListSerializer(ChargeSession.serializer()), snapshot)) }
         }
     }
 

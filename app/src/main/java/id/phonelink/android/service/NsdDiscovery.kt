@@ -17,8 +17,10 @@ class NsdDiscovery(
     private val manager = context.getSystemService(NsdManager::class.java)
     private val executor = Executors.newSingleThreadExecutor()
     private var started = false
+    private var listener: NsdManager.DiscoveryListener? = null
 
-    private val listener = object : NsdManager.DiscoveryListener {
+    /** A listener can't be reused until Android has stopped the last discovery, so each start gets its own. */
+    private fun newListener() = object : NsdManager.DiscoveryListener {
         override fun onServiceFound(service: NsdServiceInfo) {
             Log.i(TAG, "Service found: ${service.serviceName}")
             resolve(service)
@@ -30,15 +32,33 @@ class NsdDiscovery(
         override fun onDiscoveryStopped(serviceType: String) = Unit
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
             Log.w(TAG, "Discovery failed to start: $errorCode")
-            started = false
+            synchronized(this@NsdDiscovery) { if (listener === this) { started = false; listener = null } }
         }
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
     }
 
+    @Synchronized
     fun start() {
         if (started) return
-        started = true
-        manager.discoverServices(PhoneLinkProtocol.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        val next = newListener()
+        runCatching { manager.discoverServices(PhoneLinkProtocol.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, next) }
+            .onSuccess { started = true; listener = next }
+            .onFailure { Log.w(TAG, "Can't start discovery", it) }
+    }
+
+    /** Stops looking (multicast costs battery) but keeps advertising; [start] looks again. */
+    @Synchronized
+    fun pause() {
+        if (!started) return
+        started = false
+        listener?.let { runCatching { manager.stopServiceDiscovery(it) } }
+        listener = null
+    }
+
+    /** Starts over, for a new network. */
+    fun restart() {
+        pause()
+        start()
     }
 
     private var advertised: NsdManager.RegistrationListener? = null
@@ -68,10 +88,7 @@ class NsdDiscovery(
 
     fun stop() {
         advertise("", "", null)
-        if (started) {
-            started = false
-            runCatching { manager.stopServiceDiscovery(listener) }
-        }
+        pause()
         executor.shutdown()
     }
 

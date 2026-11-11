@@ -39,6 +39,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
@@ -86,7 +87,8 @@ data class UiState(
     val manualTargets: List<ManualTarget>,
     val lastError: String?,
     val batteryRestricted: Boolean,
-    val transfers: List<Transfer>,
+    /** Collected only by the screens that show transfers, so progress doesn't recompose the whole app. */
+    val transfers: kotlinx.coroutines.flow.StateFlow<List<Transfer>>,
     val commands: Map<String, List<CommandItem>>,
     val commandResult: CommandResult?,
     val clipboardEnabled: Boolean,
@@ -193,8 +195,9 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
     AuroraBackground {
         if (showHistory) {
             BackHandler { showHistory = false }
+            val transfers by state.transfers.collectAsStateWithLifecycle()
             FileHistoryScreen(
-                transfers = state.transfers,
+                transfers = transfers,
                 peers = state.peers,
                 initialPeer = historyPeer,
                 onBack = { showHistory = false },
@@ -234,9 +237,11 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
             when (feature) {
                 null -> {
                     BackHandler { selectedId = null }
+                    val allTransfers by state.transfers.collectAsStateWithLifecycle()
+                    val transfers = remember(allTransfers, selected.id) { allTransfers.filter { it.peerId == selected.id } }
                     DetailScreen(
                         selected,
-                        transfers = state.transfers.filter { it.peerId == selected.id },
+                        transfers = transfers,
                         clipboardEnabled = state.clipboardEnabled,
                         clipboardAuto = state.clipboardAuto,
                         isSharingScreen = state.screenPeer == selected.id,
@@ -296,7 +301,7 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                 )
                 Feature.Scan -> ScanScreen(selected.name, selected.isConnected, closeFeature) { actions.sendInput(selected.id, it) }
                 Feature.Terminal -> TerminalScreen(selected.id, selected.name, selected.isConnected, actions.terminalLink, closeFeature)
-                Feature.Sound -> SoundScreen(selected.id, selected.name, selected.isConnected, closeFeature) { actions.startPhoneSound(selected.id) }
+                Feature.Sound -> SoundScreen(selected.id, selected.name, selected.isConnected, selected.isMac, closeFeature) { actions.startPhoneSound(selected.id) }
                 Feature.Camera -> CameraScreen(selected.id, selected.name, selected.isConnected, actions.startCamera, closeFeature)
                 Feature.MacScreen -> MacScreenScreen(selected.id, selected.name, selected.isConnected, selected.info?.inputTrusted, actions.macScreenLink, closeFeature)
                 Feature.SecondDisplay -> MacScreenScreen(selected.id, selected.name, selected.isConnected, selected.info?.inputTrusted, actions.macScreenLink, closeFeature, extend = true)
@@ -915,7 +920,7 @@ private fun DetailScreen(
 ) {
     val info = peer.info
     val context = androidx.compose.ui.platform.LocalContext.current
-    val kind = if (peer.isPhone) "phone" else "Mac"
+    val kind = when { peer.isPhone -> "phone"; peer.isMac -> "Mac"; else -> "PC" }
     Column(
         Modifier
             .fillMaxSize()
@@ -952,7 +957,7 @@ private fun DetailScreen(
                 Spacer(Modifier.height(12.dp))
                 Text(
                     if (peer.isPhone) "Open DyskLink on ${peer.name} and keep both on the same Wi-Fi. It connects by itself."
-                    else "Open DyskLink on the Mac and keep both on the same Wi-Fi. Controls come back as soon as it connects.",
+                    else "Open DyskLink on the $kind and keep both on the same Wi-Fi. Controls come back as soon as it connects.",
                     color = Palette.TextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
@@ -963,10 +968,11 @@ private fun DetailScreen(
             if (peer.isConnected && peer.isMac && charge != null) ChargeRow(charge, onMacAction)
         }
 
-        if (peer.isConnected && peer.isPhone) {
+        // Other phones and Windows or Linux PCs share files, the clipboard, and ringing. Macs have more, below.
+        if (peer.isConnected && !peer.isMac) {
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                QuickAction(FlatIcons.sendFile, "Send file", "To this phone", Palette.Mint, Modifier.weight(1f), onClick = onSendFiles)
+                QuickAction(FlatIcons.sendFile, "Send file", "To this $kind", Palette.Mint, Modifier.weight(1f), onClick = onSendFiles)
                 QuickAction(FlatIcons.commands, "Clipboard", "Send copied text", Palette.Sky, Modifier.weight(1f)) {
                     val text = context.getSystemService(android.content.ClipboardManager::class.java)
                         .primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
@@ -978,13 +984,29 @@ private fun DetailScreen(
                 }
                 QuickAction(
                     if (isRinging) FlatIcons.ringOff else FlatIcons.ring,
-                    if (isRinging) "Stop ringing" else "Find phone",
+                    if (isRinging) "Stop ringing" else "Find $kind",
                     if (isRinging) "Ringing now" else "Play a sound",
                     if (isRinging) Palette.Coral else Palette.Amber,
                     Modifier.weight(1f),
                     active = isRinging,
                     onClick = onRing,
                 )
+            }
+            if (peer.isComputer) {
+                Spacer(Modifier.height(24.dp))
+                SectionLabel("CONTROL THE PC")
+                PC_FEATURES.chunked(2).forEach { row ->
+                    Row(Modifier.padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        row.forEach { item -> FeatureTile(item, Modifier.weight(1f)) { onOpenFeature(item) } }
+                        if (row.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+                if (peer.info?.inputTrusted == false) {
+                    Text(
+                        "The touchpad and keyboard are off on this PC. Turn on \"Phones can control this PC\" in DyskLink there. On Linux they need an X11 session.",
+                        color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp,
+                    )
+                }
             }
             Spacer(Modifier.height(14.dp))
             DeviceFilesCard(
@@ -1047,7 +1069,7 @@ private fun DetailScreen(
             SettingRow(
                 "Automatic clipboard",
                 if (peer.isPhone) "Text copied on ${peer.name} comes straight to this phone, when it sends it with Clipboard or Send clipboard."
-                else "Text copied on the Mac comes straight to this phone. Send from the phone with Send clipboard in the DyskLink notification.",
+                else "Text copied on the $kind comes straight to this phone. Send from the phone with Send clipboard in the DyskLink notification.",
                 clipboardEnabled,
                 onToggleClipboard,
             )
@@ -1066,7 +1088,10 @@ private fun DetailScreen(
         Spacer(Modifier.height(24.dp))
         SectionLabel("PHOTOS")
         PhotoSyncCard(peer)
+        }
 
+        // Notifications, SMS and calls work with every computer, not only a Mac.
+        if (peer.isComputer) {
         Spacer(Modifier.height(24.dp))
         SectionLabel("THIS PHONE")
         GlassCard(onClick = { onOpenFeature(Feature.Sharing) }) {
@@ -1087,7 +1112,7 @@ private fun DetailScreen(
         }
 
         Spacer(Modifier.height(24.dp))
-        SectionLabel(if (peer.isPhone) "ABOUT THIS PHONE" else "ABOUT THIS MAC")
+        SectionLabel("ABOUT THIS ${kind.uppercase()}")
         GlassCard {
             DetailRow("System", info?.osVersion ?: "Unknown")
             DetailRow("Network", info?.network ?: "Unknown")
@@ -1503,3 +1528,6 @@ private fun ManualSheet(onDismiss: () -> Unit, onSubmit: (String, Int) -> Unit) 
         }
     }
 }
+
+/** What a Windows or Linux PC can do for now. */
+private val PC_FEATURES = listOf(Feature.Touchpad, Feature.Media, Feature.Presentation, Feature.Sound)

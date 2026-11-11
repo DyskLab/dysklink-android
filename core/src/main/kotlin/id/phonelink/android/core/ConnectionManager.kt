@@ -7,11 +7,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -47,8 +47,11 @@ data class Peer(
     val wakeEnabled: Boolean? = null,
 ) {
     /** Another phone, paired for files, clipboard, ringing, and battery only. */
-    val isPhone: Boolean get() = platform != "macos"
-    val isMac: Boolean get() = !isPhone
+    val isPhone: Boolean get() = platform !in PhoneLinkProtocol.COMPUTERS
+    /** A Mac, Windows, or Linux computer. */
+    val isComputer: Boolean get() = !isPhone
+    /** A Mac, with the Mac-only features such as its screen, notch, and charging. */
+    val isMac: Boolean get() = platform == "macos"
 }
 
 data class PairingPrompt(
@@ -117,6 +120,9 @@ class ConnectionManager(
     private val autoAsked = HashSet<String>()
     private val declined = HashSet<String>()
     private var pairingTimeout: Job? = null
+    private val pairingGuard = PairingGuard()
+    /** Devices connected over the USB cable now. Their Wi-Fi dialing waits until the cable is pulled. */
+    private val usbPeers = MutableStateFlow<Set<String>>(emptySet())
 
     private val recordsFile = File(directory, "paired.json")
     private val manualFile = File(directory, "manual.json")
@@ -131,15 +137,12 @@ class ConnectionManager(
     private val _manualTargets = MutableStateFlow<List<ManualTarget>>(emptyList())
     val manualTargets: StateFlow<List<ManualTarget>> = _manualTargets.asStateFlow()
 
-    // The queue keeps messages in order and moves sending off the main thread.
-    private val outbox = Channel<Pair<String, Envelope>>(Channel.UNLIMITED)
-
-    val fileTransfers = FileTransfers(scope, fileSinks, File(directory, "transfers.json"), ::sendTo)
+    val fileTransfers = FileTransfers(scope, fileSinks, File(directory, "transfers.json"), sendFrame = ::sendFrameTo, send = ::sendTo)
 
     val phone = PhoneBridge(
         directory, scope, phoneData, fileTransfers,
         pairedPeers = { synchronized(lock) { connections.keys.filter { it in records && !isPhone(it) } } },
-        send = { peerId, envelope -> outbox.trySend(peerId to envelope) },
+        send = { peerId, envelope -> postTo(peerId, envelope) },
     )
 
     private val _commands = MutableStateFlow<Map<String, List<CommandItem>>>(emptyMap())
@@ -186,9 +189,6 @@ class ConnectionManager(
         loadDeclined()
         synchronized(lock) { publishPeers() }
         _manualTargets.value.forEach { startTarget(it.key, it.host, it.port) }
-        scope.launch(Dispatchers.IO) {
-            for ((peerId, envelope) in outbox) sendTo(peerId, envelope)
-        }
     }
 
     // Connection targets
@@ -224,15 +224,24 @@ class ConnectionManager(
 
     private fun startTarget(key: String, host: String, port: Int) {
         targets[key] = scope.launch(Dispatchers.IO) {
-            var backoffMs = 2_000L
+            var backoffMs = MIN_BACKOFF_MS
+            var peerId: String? = null
             while (isActive) {
+                // While the cable carries this device, dialing it over Wi-Fi only gets refused. Wait for the cable to go.
+                val known = peerId
+                if (known != null && known in usbPeers.value) {
+                    usbPeers.first { known !in it }
+                    delay(USB_HANDBACK_MS)
+                    backoffMs = MIN_BACKOFF_MS
+                }
+                var connectedFor: Long? = null
                 try {
                     val connection = PeerConnection.connect(sslContext, host, port)
+                    peerId = connection.peerId
                     _lastError.value = null
+                    val started = System.currentTimeMillis()
                     // Duplicate connections are refused and don't reset the backoff, to avoid reconnecting nonstop.
-                    // While USB carries the connection, Wi-Fi checks back often so unplugging is quick to recover.
-                    if (runConnection(connection, host)) backoffMs = 2_000L
-                    else if (synchronized(lock) { connectionHosts.containsValue(PhoneLinkProtocol.USB_HOST) }) backoffMs = 2_500L
+                    if (runConnection(connection, host)) connectedFor = System.currentTimeMillis() - started
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Exception) {
@@ -241,8 +250,10 @@ class ConnectionManager(
                         _lastError.value = "Can't connect to $host:$port"
                     }
                 }
+                if (peerId?.let { it in usbPeers.value } == true) continue
+                backoffMs = backoffAfter(backoffMs, connectedFor)
                 delay(backoffMs)
-                backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
+                backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
             }
         }
     }
@@ -324,36 +335,57 @@ class ConnectionManager(
         }
     }
 
-    /** Inbound connections are always phones, since Macs never dial a phone. */
-    private fun isPhone(connection: PeerConnection): Boolean =
-        connection.inbound || (connection.hello?.platform ?: records[connection.peerId]?.platform)?.let { it != "macos" } == true
+    /**
+     * Inbound connections are always phones, since Macs never dial a phone. Otherwise a paired device is what it was
+     * when it paired, whatever its hello says now; only an unpaired one goes by its hello.
+     */
+    private fun isPhone(connection: PeerConnection): Boolean = synchronized(lock) {
+        if (connection.inbound) return@synchronized true
+        val platform = records[connection.peerId]?.platform ?: connection.hello?.platform
+        platform != null && platform !in PhoneLinkProtocol.COMPUTERS
+    }
 
-    private fun isPhone(id: String): Boolean = connections[id]?.let(::isPhone) ?: (records[id]?.platform?.let { it != "macos" } == true)
+    private fun isPhone(id: String): Boolean = synchronized(lock) {
+        connections[id]?.let(::isPhone) ?: (records[id]?.platform?.let { it !in PhoneLinkProtocol.COMPUTERS } == true)
+    }
+
+    /** Runs [block] under the lock and sends what it queued once the lock is released. */
+    private fun <T> locked(block: Outgoing.() -> T): T {
+        val out = Outgoing()
+        val result = synchronized(lock) { out.block() }
+        out.flush()
+        return result
+    }
 
     /** Returns false if the connection was refused because that device is already connected. */
     private fun runConnection(connection: PeerConnection, host: String): Boolean {
         val id = connection.peerId
-        synchronized(lock) {
+        var replaced: PeerConnection? = null
+        val greeting = synchronized(lock) {
             // The same Mac can be found through NSD, scanning, and a manual address at once.
             // Duplicates are closed before hello, so the Mac doesn't replace the active connection.
             val existing = connections[id]
             if (existing != null) {
                 // A cable beats Wi-Fi: the USB connection takes over, and Wi-Fi comes back when it's unplugged.
                 val usbTakesOver = host == PhoneLinkProtocol.USB_HOST && connectionHosts[id] != PhoneLinkProtocol.USB_HOST
-                if (!usbTakesOver) {
-                    connection.close()
-                    return false
-                }
+                if (!usbTakesOver) return@synchronized null
                 connectionHosts[id]?.let(activeHosts::remove)
                 connections.remove(id)
-                existing.close()
+                replaced = existing
             }
             connections[id] = connection
             connectionHosts[id] = host
             activeHosts.add(host)
+            if (host == PhoneLinkProtocol.USB_HOST) usbPeers.value = usbPeers.value + id
             CoreLog.i(TAG, "Connected to $host")
-            connection.send(Envelope(MessageType.HELLO, hello = localHello(records.containsKey(id))))
+            Envelope(MessageType.HELLO, hello = localHello(records.containsKey(id)))
         }
+        if (greeting == null) {
+            connection.close()
+            return false
+        }
+        replaced?.close()
+        connection.send(greeting)
         try {
             connection.readLoop { handle(connection, it) }
         } catch (_: Exception) {
@@ -361,10 +393,11 @@ class ConnectionManager(
         } finally {
             connection.close()
             fileTransfers.onDisconnected(id)
-            synchronized(lock) {
+            locked {
                 if (connections[id] === connection) {
                     connections.remove(id)
                     connectionHosts.remove(id)
+                    if (host == PhoneLinkProtocol.USB_HOST) usbPeers.value = usbPeers.value - id
                     _ringingMacs.value = _ringingMacs.value - id
                     activeHosts.remove(host)
                     if (_prompt.value?.peerId == id) clearPairing()
@@ -398,19 +431,27 @@ class ConnectionManager(
         handleControl(connection, envelope)
     }
 
-    private fun handleControl(connection: PeerConnection, envelope: Envelope) = synchronized(lock) {
+    private fun handleControl(connection: PeerConnection, envelope: Envelope): Unit = locked {
         val id = connection.peerId
         when (envelope.type) {
             MessageType.HELLO -> {
-                val hello = envelope.hello ?: return@synchronized
-                connection.hello = hello
+                val hello = envelope.hello ?: return@locked
+                // One hello per connection. A second one could claim to be a different kind of device.
+                if (connection.hello != null) return@locked
                 val record = records[id]
+                // Once paired, whether it's a phone or a computer comes from pairing. A device that now claims otherwise is hung up on.
+                if (record != null && (record.platform in PhoneLinkProtocol.COMPUTERS) != (hello.platform in PhoneLinkProtocol.COMPUTERS)) {
+                    CoreLog.w(TAG, "HELLO_CLASS_CHANGED $id was ${record.platform}, says ${hello.platform}")
+                    close(connection)
+                    return@locked
+                }
+                connection.hello = hello
                 if (record != null) {
                     if (hello.paired) {
                         records[id] = record.copy(name = hello.name, model = hello.model)
                         saveRecords()
-                        connection.send(Envelope(MessageType.INFO, info = localInfo()))
-                        pendingClipboard?.takeIf { id in it.waiting }?.let { connection.send(it.envelope()) }
+                        send(connection, Envelope(MessageType.INFO, info = localInfo()))
+                        pendingClipboard?.takeIf { id in it.waiting }?.let { send(connection, it.envelope()) }
                         if (!isPhone(connection)) phone.peerReady(id)
                     } else {
                         removeRecord(id)
@@ -423,23 +464,24 @@ class ConnectionManager(
                 if (!records.containsKey(id) && connection.hello != null) beginPairing(id, startedByPeer = true)
             }
             MessageType.PAIR_ACCEPT -> {
-                val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@synchronized
+                val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@locked
                 if (prompt.showsCode) {
                     if (envelope.key == Pairing.proof(prompt.code, identity.deviceId, id)) {
-                        connection.send(Envelope(MessageType.PAIR_ACCEPT))
+                        send(connection, Envelope(MessageType.PAIR_ACCEPT))
                         completePairing(id)
-                    } else if (prompt.attempts + 1 >= Pairing.MAX_ATTEMPTS) {
-                        rejectCurrentPairing()
+                    } else if (pairingGuard.wrong(id)) {
+                        CoreLog.w(TAG, "PAIRING_LOCKED $id")
+                        rejectCurrentPairing(PairingGuard.waitMessage(pairingGuard.waitMs(id)))
                     } else {
                         _prompt.value = prompt.copy(attempts = prompt.attempts + 1, error = "A wrong code was typed on ${prompt.peerName}.")
-                        connection.send(Envelope(MessageType.PAIR_REJECT, error = Pairing.WRONG_CODE))
+                        send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.WRONG_CODE))
                     }
                 } else if (prompt.localAccepted) {
                     completePairing(id)
                 }
             }
             MessageType.PAIR_REJECT -> {
-                val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@synchronized
+                val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@locked
                 if (envelope.error == Pairing.WRONG_CODE && !prompt.showsCode) {
                     _prompt.value = prompt.copy(localAccepted = false, error = "That code isn't right. Check the code on ${prompt.peerName} and try again.")
                 } else {
@@ -472,9 +514,9 @@ class ConnectionManager(
                     lastClipboard = text
                     val ok = runCatching { actions.setClipboard(text) }.isSuccess
                     // A phone sending waits for this receipt, like the Mac sends one.
-                    if (isPhone(connection)) connection.send(Envelope(MessageType.CLIPBOARD_ACK, key = envelope.key, error = if (ok) null else "failed"))
+                    if (isPhone(connection)) send(connection, Envelope(MessageType.CLIPBOARD_ACK, key = envelope.key, error = if (ok) null else "failed"))
                 } else if (records.containsKey(id) && isPhone(connection)) {
-                    connection.send(Envelope(MessageType.CLIPBOARD_ACK, key = envelope.key, error = "Clipboard is off"))
+                    send(connection, Envelope(MessageType.CLIPBOARD_ACK, key = envelope.key, error = "Clipboard is off"))
                 }
             }
             MessageType.CLIPBOARD_ACK -> {
@@ -524,7 +566,7 @@ class ConnectionManager(
             MessageType.TERMINAL_OPENED, MessageType.TERMINAL_OUTPUT, MessageType.TERMINAL_CLOSED -> {
                 if (records.containsKey(id) && envelope.terminal != null) _terminalEvents.tryEmit(id to envelope)
             }
-            MessageType.PING -> connection.send(Envelope(MessageType.PONG))
+            MessageType.PING -> send(connection, Envelope(MessageType.PONG))
             else -> Unit
         }
     }
@@ -532,11 +574,11 @@ class ConnectionManager(
     // Pairing
 
     fun requestPairing(id: String) = onIo {
-        synchronized(lock) {
-            val connection = connections[id] ?: return@synchronized
-            if (records.containsKey(id)) return@synchronized
+        locked {
+            val connection = connections[id] ?: return@locked
+            if (records.containsKey(id)) return@locked
             if (declined.remove(id)) saveDeclined()
-            connection.send(Envelope(MessageType.PAIR_REQUEST))
+            send(connection, Envelope(MessageType.PAIR_REQUEST))
             beginPairing(id, startedByPeer = false)
         }
     }
@@ -544,17 +586,17 @@ class ConnectionManager(
     /** Sends the code typed on this phone. The other device checks it. */
     fun submitCode(typed: String) = onIo {
         val digits = typed.filter(Char::isDigit)
-        synchronized(lock) {
-            val prompt = _prompt.value ?: return@synchronized
-            if (prompt.showsCode || prompt.outdated || digits.length != 6) return@synchronized
-            val connection = connections[prompt.peerId] ?: return@synchronized
+        locked {
+            val prompt = _prompt.value ?: return@locked
+            if (prompt.showsCode || prompt.outdated || digits.length != 6) return@locked
+            val connection = connections[prompt.peerId] ?: return@locked
             _prompt.value = prompt.copy(localAccepted = true, error = null)
-            connection.send(Envelope(MessageType.PAIR_ACCEPT, key = Pairing.proof(digits, identity.deviceId, prompt.peerId)))
+            send(connection, Envelope(MessageType.PAIR_ACCEPT, key = Pairing.proof(digits, identity.deviceId, prompt.peerId)))
         }
     }
 
     fun rejectPairing() = onIo {
-        synchronized(lock) {
+        locked {
             _prompt.value?.let { decline(it.peerId) }
             rejectCurrentPairing()
         }
@@ -562,7 +604,7 @@ class ConnectionManager(
 
     /** Called when the app UI appears, because the user needs to see the pairing code. */
     fun tryAutoPair() = onIo {
-        synchronized(lock) { autoPair() }
+        locked { autoPair() }
     }
 
     /**
@@ -570,14 +612,14 @@ class ConnectionManager(
      * otherwise anyone on the same Wi-Fi could pair. Each Mac is only asked about once per
      * session, and never again if the user declined or unpaired it.
      */
-    private fun autoPair() {
+    private fun Outgoing.autoPair() {
         if (!isUiVisible() || _prompt.value != null) return
         val id = connections.entries.firstOrNull { (id, connection) ->
             // Phones only pair when tapped, so a phone doesn't pop up the code on every phone around it.
             connection.hello != null && id !in records && id !in autoAsked && id !in declined && !isPhone(connection)
         }?.key ?: return
         autoAsked.add(id)
-        connections[id]?.send(Envelope(MessageType.PAIR_REQUEST))
+        send(connections[id], Envelope(MessageType.PAIR_REQUEST))
         beginPairing(id, startedByPeer = false)
     }
 
@@ -586,32 +628,44 @@ class ConnectionManager(
     }
 
     fun unpair(id: String) = onIo {
-        synchronized(lock) {
-            connections[id]?.send(Envelope(MessageType.UNPAIR))
+        locked {
+            send(connections[id], Envelope(MessageType.UNPAIR))
             decline(id)
             removeRecord(id)
             publishPeers()
         }
     }
 
-    private fun rejectCurrentPairing() {
+    private fun Outgoing.rejectCurrentPairing(error: String? = null) {
         val prompt = _prompt.value ?: return
-        connections[prompt.peerId]?.send(Envelope(MessageType.PAIR_REJECT))
+        send(connections[prompt.peerId], Envelope(MessageType.PAIR_REJECT, error = error))
         clearPairing()
     }
 
-    private fun beginPairing(id: String, startedByPeer: Boolean) {
+    private fun Outgoing.beginPairing(id: String, startedByPeer: Boolean) {
         val connection = connections[id] ?: return
         val hello = connection.hello ?: return
         val current = _prompt.value
         if (current != null) {
             // Only one request is active. Others are refused.
             if (current.peerId != id) {
-                connection.send(Envelope(MessageType.PAIR_REJECT))
+                send(connection, Envelope(MessageType.PAIR_REJECT))
                 return
             }
-            // Both asked at once: the smaller ID shows the code, the other types it.
+            // Both asked at once: the smaller ID shows the code, the other types it. Asked again while the code
+            // shows, the same code stays, and so do the wrong tries.
             if (!startedByPeer || current.showsCode || identity.deviceId >= id) return
+        }
+        // Too many wrong codes lately: the code isn't shown for a while.
+        val wait = if (startedByPeer) pairingGuard.waitMs(id) else 0L
+        if (wait > 0) {
+            if (current != null) {
+                pairingTimeout?.cancel()
+                pairingTimeout = null
+                _prompt.value = null
+            }
+            send(connection, Envelope(MessageType.PAIR_REJECT, error = PairingGuard.waitMessage(wait)))
+            return
         }
         val outdated = hello.protocolVersion < Pairing.TYPED_SINCE
         _prompt.value = PairingPrompt(
@@ -622,24 +676,25 @@ class ConnectionManager(
         pairingTimeout?.cancel()
         pairingTimeout = scope.launch(Dispatchers.IO) {
             delay(PhoneLinkProtocol.PAIRING_TIMEOUT_MS)
-            synchronized(lock) {
+            locked {
                 if (_prompt.value?.peerId == id) rejectCurrentPairing()
             }
         }
     }
 
-    private fun completePairing(id: String) {
+    private fun Outgoing.completePairing(id: String) {
         val connection = connections[id] ?: return
         val hello = connection.hello ?: return
         records[id] = PairedRecord(hello.name, hello.platform, hello.model, System.currentTimeMillis())
         saveRecords()
+        pairingGuard.succeeded(id)
         clearPairing()
-        connection.send(Envelope(MessageType.INFO, info = localInfo()))
+        send(connection, Envelope(MessageType.INFO, info = localInfo()))
         if (!isPhone(connection)) phone.peerReady(id)
         publishPeers()
     }
 
-    private fun clearPairing() {
+    private fun Outgoing.clearPairing() {
         pairingTimeout?.cancel()
         pairingTimeout = null
         _prompt.value = null
@@ -651,26 +706,39 @@ class ConnectionManager(
     fun broadcastInfo() = onIo {
         val info = localInfo()
         val paired = synchronized(lock) { connections.filterKeys { it in records }.values.toList() }
-        paired.forEach { it.send(Envelope(MessageType.INFO, info = info)) }
+        paired.forEach { it.post(Envelope(MessageType.INFO, info = info)) }
     }
 
     // Features
 
-    private fun sendTo(peerId: String, envelope: Envelope): Boolean {
-        val connection = synchronized(lock) { connections[peerId]?.takeIf { peerId in records } } ?: return false
-        return connection.send(envelope)
+    private fun pairedConnection(peerId: String): PeerConnection? =
+        synchronized(lock) { connections[peerId]?.takeIf { peerId in records } }
+
+    /** Waits like a direct write (see [PeerConnection.send]). */
+    private fun sendTo(peerId: String, envelope: Envelope): Boolean = pairedConnection(peerId)?.send(envelope) ?: false
+
+    private fun sendFrameTo(peerId: String, frame: OutFrame): Boolean {
+        val connection = pairedConnection(peerId)
+        if (connection == null) frame.release?.invoke()
+        return connection?.sendFrame(frame) ?: false
     }
+
+    /**
+     * Queues on that device's own connection without waiting. Live messages go before file data, touchpad moves that
+     * pile up merge into one, and a device that stopped reading holds up nobody else.
+     */
+    private fun postTo(peerId: String, envelope: Envelope): Boolean = pairedConnection(peerId)?.post(envelope) ?: false
 
     /** Queues a message, for callers on Android's main thread, which can't write to the network. */
     fun post(peerId: String, envelope: Envelope) {
-        outbox.trySend(peerId to envelope)
+        postTo(peerId, envelope)
     }
 
     /** Sends directly, without the queue. Returns false if the device isn't connected. */
     fun sendDirect(peerId: String, envelope: Envelope): Boolean = sendTo(peerId, envelope)
 
     fun sendInput(peerId: String, event: InputEvent) {
-        outbox.trySend(peerId to Envelope(MessageType.INPUT, input = event))
+        postTo(peerId, Envelope(MessageType.INPUT, input = event))
     }
 
     private val _terminalEvents = kotlinx.coroutines.flow.MutableSharedFlow<Pair<String, Envelope>>(extraBufferCapacity = 1024)
@@ -687,34 +755,35 @@ class ConnectionManager(
     @Volatile var audioSink: ((String, Envelope) -> Unit)? = null
 
     fun startMacScreen(peerId: String, display: Long? = null) {
-        outbox.trySend(peerId to Envelope(MessageType.MACSCREEN_START, displayId = display))
+        postTo(peerId, Envelope(MessageType.MACSCREEN_START, displayId = display))
     }
 
     /** Makes this phone an extra display of the Mac, [width] by [height] points. */
     fun extendMacScreen(peerId: String, width: Int, height: Int, large: Boolean = false) {
         val mode = if (large) "extend-large" else "extend"
-        outbox.trySend(peerId to Envelope(MessageType.MACSCREEN_START, text = mode, screen = ScreenInfo(width, height)))
+        postTo(peerId, Envelope(MessageType.MACSCREEN_START, text = mode, screen = ScreenInfo(width, height)))
     }
-    fun stopMacScreen(peerId: String) { outbox.trySend(peerId to Envelope(MessageType.MACSCREEN_STOP)) }
-    fun syncMacScreen(peerId: String) { outbox.trySend(peerId to Envelope(MessageType.MACSCREEN_SYNC)) }
+    fun stopMacScreen(peerId: String) { postTo(peerId, Envelope(MessageType.MACSCREEN_STOP)) }
+    fun syncMacScreen(peerId: String) { postTo(peerId, Envelope(MessageType.MACSCREEN_SYNC)) }
 
     /** A tap or drag on the Mac's screen. `x` and `y` range from 0 to 1. */
     fun sendMacPointer(peerId: String, kind: String, x: Float, y: Float) {
-        outbox.trySend(peerId to Envelope(MessageType.MACSCREEN_POINTER, control = ControlEvent(kind, x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))))
+        postTo(peerId, Envelope(MessageType.MACSCREEN_POINTER, control = ControlEvent(kind, x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))))
     }
 
+    /** Live, in typing order. A long paste goes in pieces, so no frame is too big and keys still get through between them. */
     fun sendTerminal(peerId: String, type: String, message: TerminalMessage) {
-        outbox.trySend(peerId to Envelope(type, terminal = message))
+        terminalPieces(type, message).forEach { postTo(peerId, Envelope(type, terminal = it)) }
     }
 
     fun sendMedia(peerId: String, action: String) {
-        outbox.trySend(peerId to Envelope(MessageType.MEDIA, media = action))
+        postTo(peerId, Envelope(MessageType.MEDIA, media = action))
     }
 
     /** Asks every connected, paired Mac to lock, or to start or stop Keep Awake. */
     fun sendMacAction(action: String, peerId: String? = null) {
         val targets = peerId?.let { listOf(it) } ?: _peers.value.filter { it.isPaired && it.isConnected && it.isMac }.map { it.id }
-        targets.forEach { outbox.trySend(it to Envelope(MessageType.MAC_ACTION, macAction = action)) }
+        targets.forEach { postTo(it, Envelope(MessageType.MAC_ACTION, macAction = action)) }
     }
 
     /** Sends Wake-on-LAN to a paired Mac. False when its address isn't known or nothing could be sent. */
@@ -725,12 +794,12 @@ class ConnectionManager(
     }
 
     fun sendNotchAction(peerId: String, action: NotchAction) {
-        outbox.trySend(peerId to Envelope(MessageType.NOTCH_ACTION, notchAction = action))
+        postTo(peerId, Envelope(MessageType.NOTCH_ACTION, notchAction = action))
     }
 
     /** Makes the Mac play a loud sound for up to 30 seconds. */
     fun ringMac(peerId: String, on: Boolean) {
-        outbox.trySend(peerId to Envelope(MessageType.RING, ring = if (on) "start" else "stop"))
+        postTo(peerId, Envelope(MessageType.RING, ring = if (on) "start" else "stop"))
         _ringingMacs.value = if (on) _ringingMacs.value + peerId else _ringingMacs.value - peerId
         if (on) scope.launch {
             delay(RING_MS)
@@ -741,12 +810,12 @@ class ConnectionManager(
     /** Tells every Mac that asked for a ring that it ended here. */
     fun ringStopped() = onIo {
         val paired = synchronized(lock) { connections.filterKeys { it in records }.values.toList() }
-        paired.forEach { it.send(Envelope(MessageType.RING, ring = "stopped")) }
+        paired.forEach { it.post(Envelope(MessageType.RING, ring = "stopped")) }
     }
 
     fun runCommand(peerId: String, commandId: String) {
         _commandResult.value = null
-        outbox.trySend(peerId to Envelope(MessageType.COMMAND_RUN, commandId = commandId))
+        postTo(peerId, Envelope(MessageType.COMMAND_RUN, commandId = commandId))
     }
 
     /**
@@ -761,17 +830,20 @@ class ConnectionManager(
         }
         if (!force && text == lastClipboard) return
         lastClipboard = text
-        val pending = synchronized(lock) {
-            PendingClipboard(UUID.randomUUID().toString(), text, records.keys.toMutableSet(), onResult).also { item ->
-                pendingClipboard = item
-                item.waiting.filter { it in connections }.forEach { outbox.trySend(it to item.envelope()) }
-            }
+        val (pending, targets) = synchronized(lock) {
+            val item = PendingClipboard(UUID.randomUUID().toString(), text, records.keys.toMutableSet(), onResult)
+            pendingClipboard = item
+            item to item.waiting.mapNotNull { connections[it] }
         }
+        // Queued after the lock is released.
+        val envelope = pending.envelope()
+        targets.forEach { it.post(envelope) }
         scope.launch(Dispatchers.IO) {
             delay(CLIPBOARD_RECEIPT_MS)
-            synchronized(lock) {
-                if (pendingClipboard === pending) pending.waiting.forEach { connections[it]?.close() }
+            val silent = synchronized(lock) {
+                if (pendingClipboard === pending) pending.waiting.mapNotNull { connections[it] } else emptyList()
             }
+            silent.forEach { it.close() }
             delay(CLIPBOARD_RETRY_MS)
             val failed = synchronized(lock) {
                 if (pendingClipboard !== pending) return@synchronized false
@@ -796,7 +868,7 @@ class ConnectionManager(
     /** Heartbeat: without a reply, the read timeout closes the dead connection. */
     fun ping() = onIo {
         val all = synchronized(lock) { connections.values.toList() }
-        all.forEach { it.send(Envelope(MessageType.PING)) }
+        all.forEach { it.post(Envelope(MessageType.PING)) }
     }
 
     fun shutdown() {
@@ -828,7 +900,7 @@ class ConnectionManager(
             Peer(
                 id = id,
                 name = hello?.name ?: record?.name ?: "Device",
-                platform = hello?.platform ?: record?.platform ?: if (connections[id]?.inbound == true) "android" else "macos",
+                platform = record?.platform ?: hello?.platform ?: if (connections[id]?.inbound == true) "android" else "macos",
                 model = hello?.model ?: record?.model ?: "",
                 isPaired = record != null,
                 isConnected = connections.containsKey(id),
@@ -896,6 +968,36 @@ class ConnectionManager(
         private const val CLIPBOARD_RECEIPT_MS = 4_000L
         private const val CLIPBOARD_RETRY_MS = 26_000L
         private const val RING_MS = 30_000L
+        private const val MIN_BACKOFF_MS = 2_000L
+        private const val MAX_BACKOFF_MS = 30_000L
+        /** A connection that lasted this long was a real one, so the next reconnect starts quickly again. */
+        private const val STABLE_CONNECTION_MS = 30_000L
+        /** After the cable is pulled, Wi-Fi is tried again this soon. */
+        private const val USB_HANDBACK_MS = 300L
+
+        /** The wait before the next dial: back to the shortest only after a connection that held for a while. */
+        fun backoffAfter(currentMs: Long, connectedForMs: Long?): Long =
+            if (connectedForMs != null && connectedForMs > STABLE_CONNECTION_MS) MIN_BACKOFF_MS else currentMs
+
+        /** Two queued touchpad moves, or two scrolls, for the same device as one; null when they can't merge. */
+        fun coalesce(first: Pair<String, Envelope>, second: Pair<String, Envelope>): Pair<String, Envelope>? {
+            if (first.first != second.first || !FrameWriter.isPointer(first.second) || !FrameWriter.isPointer(second.second)) return null
+            return FrameWriter.merge(first.second, second.second)?.let { first.first to it }
+        }
+
+        /** Raw bytes of terminal input per message: well inside a frame once in Base64. */
+        const val TERMINAL_PIECE_BYTES = 16 * 1024
+
+        /** Terminal input longer than [TERMINAL_PIECE_BYTES] as several messages in order; anything else as it is. */
+        fun terminalPieces(type: String, message: TerminalMessage): List<TerminalMessage> {
+            val data = message.data
+            if (type != MessageType.TERMINAL_INPUT || data == null || data.length <= Base64Bytes.encodedLength(TERMINAL_PIECE_BYTES)) return listOf(message)
+            val bytes = runCatching { java.util.Base64.getDecoder().decode(data) }.getOrNull() ?: return listOf(message)
+            return (bytes.indices step TERMINAL_PIECE_BYTES).map { start ->
+                val piece = bytes.copyOfRange(start, minOf(bytes.size, start + TERMINAL_PIECE_BYTES))
+                message.copy(data = java.util.Base64.getEncoder().encodeToString(piece))
+            }
+        }
         private val recordsSerializer = MapSerializer(String.serializer(), PairedRecord.serializer())
         /**
          * Macs are always dialed. Between two phones only the one with the smaller ID dials,

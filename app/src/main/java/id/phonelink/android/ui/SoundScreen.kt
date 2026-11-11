@@ -19,13 +19,15 @@ import id.phonelink.android.service.PhoneSoundService
 
 /** Sound both ways: the Mac's sound on this phone, or this phone's sound on the Mac. */
 @Composable
-fun SoundScreen(peerId: String, macName: String, connected: Boolean, onBack: () -> Unit, startSending: () -> Unit) {
+fun SoundScreen(peerId: String, macName: String, connected: Boolean, isMac: Boolean, onBack: () -> Unit, startSending: () -> Unit) {
     val context = LocalContext.current
     val listening by AudioShare.listening.collectAsState()
     val sending by AudioShare.sending.collectAsState()
     val problem by AudioShare.problem.collectAsState()
+    val kind = if (isMac) "Mac" else "PC"
     FeatureScaffold("Sound sharing", onBack) {
-        GlassCard {
+        // Windows and Linux can't send their sound yet.
+        if (isMac) GlassCard {
             Text("Hear $macName on this phone", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 "Music and videos on the Mac play here, on the speaker or earphones. Turn on \"Let phones hear this Mac\" on the Mac first. " +
@@ -39,12 +41,12 @@ fun SoundScreen(peerId: String, macName: String, connected: Boolean, onBack: () 
                 PrimaryButton("Listen", Modifier.fillMaxWidth().alpha(if (connected) 1f else 0.4f)) { if (connected) AudioShare.listen(peerId) }
             }
         }
-        Spacer(Modifier.height(12.dp))
+        if (isMac) Spacer(Modifier.height(12.dp))
         GlassCard {
             Text("Play this phone on $macName", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 if (AudioShare.canSend) {
-                    "What this phone plays is heard from the Mac's speakers. Android asks each time. Apps that block recording, such as some streaming apps, stay silent, and the phone keeps playing too, so turn its volume down if you like."
+                    "What this phone plays is heard from the $kind's speakers. Android asks each time. Apps that block recording, such as some streaming apps, stay silent, and the phone keeps playing too, so turn its volume down if you like."
                 } else {
                     "Needs Android 10 or newer."
                 },
@@ -55,10 +57,10 @@ fun SoundScreen(peerId: String, macName: String, connected: Boolean, onBack: () 
                 SecondaryButton("Stop", Modifier.fillMaxWidth(), tint = Palette.Coral) { PhoneSoundService.stop(context) }
             } else {
                 val canStart = connected && AudioShare.canSend && sending == null
-                PrimaryButton("Play on the Mac", Modifier.fillMaxWidth().alpha(if (canStart) 1f else 0.4f)) { if (canStart) startSending() }
+                PrimaryButton("Play on the $kind", Modifier.fillMaxWidth().alpha(if (canStart) 1f else 0.4f)) { if (canStart) startSending() }
             }
         }
-        if (AudioShare.canSend) {
+        if (isMac && AudioShare.canSend) {
             Spacer(Modifier.height(12.dp))
             GlassCard {
                 var withScreen by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(AudioShare.wantsSoundWithScreen(context)) }

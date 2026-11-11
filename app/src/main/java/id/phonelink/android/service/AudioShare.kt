@@ -18,7 +18,9 @@ import android.media.AudioTrack
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
@@ -175,7 +177,11 @@ private class MacSoundPlayer(rate: Int, private val channels: Int, private val m
  * Records what this phone plays from a MediaProjection and sends it to a Mac.
  * Used on its own by [PhoneSoundService], and together with the screen by [ScreenCaptureService], so one Android prompt covers both.
  */
-class PlaybackPump(private val peerId: String) {
+class PlaybackPump(
+    private val peerId: String,
+    /** Called on the recording thread when recording ends by itself (the recorder failed), with why. */
+    private val onEnded: ((String) -> Unit)? = null,
+) {
     @Volatile private var running = false
     private var recorder: AudioRecord? = null
 
@@ -211,7 +217,18 @@ class PlaybackPump(private val peerId: String) {
             var filled = 0
             while (running && filled < chunk.size) {
                 val read = record.read(chunk, filled, chunk.size - filled)
-                if (read <= 0) break
+                if (read < 0) {
+                    // The recorder is dead (projection ended, device lost): stop instead of spinning.
+                    if (!running) return
+                    val why = "Recording stopped (error $read)"
+                    stop(why)
+                    onEnded?.invoke(why)
+                    return
+                }
+                if (read == 0) {
+                    Thread.sleep(5)
+                    continue
+                }
                 filled += read
             }
             if (filled == chunk.size) send(Envelope(MessageType.AUDIO_FRAME, audio = java.util.Base64.getEncoder().encodeToString(chunk)))
@@ -238,6 +255,14 @@ class PhoneSoundService : Service() {
     private var projection: MediaProjection? = null
     private var pump: PlaybackPump? = null
     private var started = false
+    private val main = Handler(Looper.getMainLooper())
+
+    /** The user stopped the recording from the system (status bar chip, lock screen): end the share. */
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            main.post { stopSelf() }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -259,7 +284,11 @@ class PhoneSoundService : Service() {
             return START_NOT_STICKY
         }
         projection = capture
-        val sound = PlaybackPump(peer)
+        capture.registerCallback(projectionCallback, main)
+        val sound = PlaybackPump(peer) { why ->
+            AudioShare.setProblem(why)
+            main.post { stopSelf() }
+        }
         val failure = sound.start(capture)
         if (failure != null) {
             AudioShare.setProblem(failure)
@@ -287,9 +316,15 @@ class PhoneSoundService : Service() {
     }
 
     override fun onDestroy() {
+        // Tells the computer the sound ended (no-op if it already did).
         pump?.stop()
         pump = null
-        runCatching { projection?.stop() }
+        projection?.let { capture ->
+            runCatching { capture.unregisterCallback(projectionCallback) }
+            runCatching { capture.stop() }
+        }
+        projection = null
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 

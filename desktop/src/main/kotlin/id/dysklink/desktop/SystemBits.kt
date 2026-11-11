@@ -1,0 +1,237 @@
+package id.dysklink.desktop
+
+import id.phonelink.android.core.FileSink
+import id.phonelink.android.core.FileSinkFactory
+import java.awt.Toolkit
+import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.StringSelection
+import java.awt.image.BufferedImage
+import java.io.File
+import java.io.FileOutputStream
+import java.util.Properties
+import javax.sound.sampled.AudioFormat
+import javax.sound.sampled.AudioSystem
+import kotlin.concurrent.thread
+import kotlin.math.PI
+import kotlin.math.sin
+
+/** The system clipboard. Text set from a phone isn't sent back to it. */
+class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (ByteArray) -> Unit = {}) {
+    @Volatile private var last: String? = read()
+    @Volatile private var lastImage: String? = null
+    @Volatile var enabled = true
+    private var watcher: Thread? = null
+
+    private fun read(): String? = runCatching {
+        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+        if (clipboard.isDataFlavorAvailable(DataFlavor.stringFlavor)) clipboard.getData(DataFlavor.stringFlavor) as String else null
+    }.getOrNull()
+
+    /**
+     * A picture from another computer. It's remembered by its pixels, not its PNG bytes, because the watcher
+     * encodes it again differently and would otherwise send it straight back.
+     */
+    fun setImage(png: ByteArray): Boolean = runCatching {
+        val image = javax.imageio.ImageIO.read(png.inputStream()) ?: error("Not a picture")
+        lastImage = fingerprint(image)
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(ImageSelection(image), null)
+    }.isSuccess
+
+    /** The copied picture, when there's a picture and no text. */
+    private fun readImage(): BufferedImage? = runCatching {
+        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+        if (!clipboard.isDataFlavorAvailable(DataFlavor.imageFlavor)) return null
+        val image = clipboard.getData(DataFlavor.imageFlavor) as? java.awt.Image ?: return null
+        image as? BufferedImage ?: BufferedImage(image.getWidth(null), image.getHeight(null), BufferedImage.TYPE_INT_ARGB)
+            .also { it.createGraphics().apply { drawImage(image, 0, 0, null); dispose() } }
+    }.getOrNull()
+
+    fun set(text: String): Boolean = runCatching {
+        last = text
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
+    }.isSuccess
+
+    /** Neither Windows nor Linux tells apps when the clipboard changes in a portable way, so it's checked often. */
+    fun start() {
+        watcher = thread(isDaemon = true, name = "dysk-clipboard") {
+            while (!Thread.currentThread().isInterrupted) {
+                runCatching { Thread.sleep(700) }.onFailure { return@thread }
+                if (!enabled) continue
+                val now = read()
+                if (now == null) {
+                    // Pictures are only checked while there's no text, and only encoded and sent when their pixels change.
+                    val image = readImage() ?: continue
+                    val print = fingerprint(image)
+                    if (print != lastImage) {
+                        lastImage = print
+                        runCatching { java.io.ByteArrayOutputStream().also { javax.imageio.ImageIO.write(image, "png", it) }.toByteArray() }
+                            .getOrNull()?.let(onImage)
+                    }
+                    continue
+                }
+                if (now != last) {
+                    last = now
+                    if (now.isNotBlank()) onCopied(now)
+                }
+            }
+        }
+    }
+
+    fun stop() { watcher?.interrupt() }
+
+    companion object {
+        /** The size and a hash of every pixel as ARGB, which stays the same however the picture is stored or encoded. */
+        fun fingerprint(image: BufferedImage): String {
+            val width = image.width
+            val height = image.height
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val row = IntArray(width)
+            val bytes = java.nio.ByteBuffer.allocate(width * 4)
+            for (y in 0 until height) {
+                image.getRGB(0, y, width, 1, row, 0, width)
+                bytes.clear()
+                bytes.asIntBuffer().put(row)
+                digest.update(bytes.array())
+            }
+            return "${width}x$height:" + digest.digest().joinToString("") { "%02x".format(it) }
+        }
+    }
+
+    private class ImageSelection(private val image: java.awt.Image) : java.awt.datatransfer.Transferable {
+        override fun getTransferDataFlavors() = arrayOf(DataFlavor.imageFlavor)
+        override fun isDataFlavorSupported(flavor: DataFlavor) = flavor == DataFlavor.imageFlavor
+        override fun getTransferData(flavor: DataFlavor): Any =
+            if (flavor == DataFlavor.imageFlavor) image else throw java.awt.datatransfer.UnsupportedFlavorException(flavor)
+    }
+}
+
+/** Writes each file to a hidden temporary file first, and gives it a free name only when it's complete. */
+class DownloadSinks(private val folder: () -> File) : FileSinkFactory {
+    override fun open(name: String, size: Long): FileSink {
+        val dir = folder().apply { mkdirs() }
+        val temp = File.createTempFile(".dysklink-", ".part", dir)
+        val out = FileOutputStream(temp)
+        return object : FileSink {
+            override fun write(bytes: ByteArray) = out.write(bytes)
+            override fun commit(): String {
+                out.close()
+                return place(temp, dir, windowsSafe(name)).path
+            }
+            override fun abort() { runCatching { out.close() }; temp.delete() }
+        }
+    }
+
+    companion object {
+        private val RESERVED = setOf("CON", "PRN", "AUX", "NUL") + (1..9).flatMap { listOf("COM$it", "LPT$it") }
+
+        /**
+         * Windows can't create files named CON, NUL.txt, COM1.jpg, and so on (any extension), so those get a "_" in
+         * front. Done everywhere, so a file keeps the same name wherever it's received.
+         */
+        fun windowsSafe(name: String): String {
+            val stem = name.substringBefore('.').trimEnd(' ')
+            return if (stem.uppercase() in RESERVED) "_$name" else name
+        }
+
+        /**
+         * Moves [temp] to a free name in [dir] without ever replacing a file, even one that appears at the same
+         * moment, such as the same name arriving from two devices. A name taken meanwhile moves on to the next one.
+         */
+        fun place(temp: File, dir: File, name: String): File {
+            repeat(MAX_NAME_TRIES) {
+                val target = freeName(dir, name)
+                try {
+                    moveWithoutReplacing(temp.toPath(), target.toPath())
+                    return target
+                } catch (_: java.nio.file.FileAlreadyExistsException) {
+                    // Someone took that name just now: try the next one.
+                }
+            }
+            throw java.io.IOException("No free name for $name")
+        }
+
+        private fun moveWithoutReplacing(from: java.nio.file.Path, to: java.nio.file.Path) {
+            // A rename on Linux replaces silently, but a hard link fails if the name is taken, so it claims the name atomically.
+            if (!Platform.isWindows) {
+                val linked = try {
+                    java.nio.file.Files.createLink(to, from)
+                    true
+                } catch (taken: java.nio.file.FileAlreadyExistsException) {
+                    throw taken
+                } catch (_: Exception) {
+                    false // Some file systems, such as FAT on a USB stick, have no hard links.
+                }
+                if (linked) {
+                    java.nio.file.Files.deleteIfExists(from)
+                    return
+                }
+            }
+            // Without REPLACE_EXISTING this fails when the name is taken; on Windows it's one atomic MoveFileEx.
+            java.nio.file.Files.move(from, to)
+        }
+
+        private const val MAX_NAME_TRIES = 50
+
+        /** "photo.jpg", then "photo (1).jpg", so nothing is overwritten. */
+        fun freeName(dir: File, name: String): File {
+            var candidate = File(dir, name)
+            val base = name.substringBeforeLast('.', name)
+            val ext = name.substringAfterLast('.', "").let { if (it.isEmpty() || it == name) "" else ".$it" }
+            var n = 1
+            while (candidate.exists()) candidate = File(dir, "$base (${n++})$ext")
+            return candidate
+        }
+    }
+}
+
+/** A beeping sound while a phone looks for this PC. It stops by itself after 30 seconds, and then calls [onStopped]. */
+class Ringer(private val onStopped: () -> Unit = {}) {
+    @Volatile private var playing: Thread? = null
+
+    val isRinging get() = playing != null
+
+    fun start() {
+        if (playing != null) return
+        playing = thread(isDaemon = true, name = "dysk-ring") {
+            val me = Thread.currentThread()
+            val until = System.currentTimeMillis() + 30_000
+            runCatching {
+                val format = AudioFormat(44_100f, 16, 1, true, false)
+                val line = AudioSystem.getSourceDataLine(format).apply { open(format); start() }
+                val beep = tone(880.0, 0.25) + ByteArray(44_100 / 4 * 2) + tone(660.0, 0.25) + ByteArray(44_100 * 2 / 2)
+                while (playing === me && System.currentTimeMillis() < until) line.write(beep, 0, beep.size)
+                line.drain(); line.close()
+            }
+            // Without a speaker it stays "ringing" for the same time, so the banner still shows who's looking.
+            while (playing === me && System.currentTimeMillis() < until) runCatching { Thread.sleep(200) }
+            if (playing === me) {
+                playing = null
+                onStopped()
+            }
+        }
+    }
+
+    fun stop() { playing = null }
+
+    private fun tone(hz: Double, seconds: Double): ByteArray {
+        val count = (44_100 * seconds).toInt()
+        val out = ByteArray(count * 2)
+        for (i in 0 until count) {
+            val fade = minOf(1.0, i / 400.0, (count - i) / 400.0)
+            val value = (sin(2 * PI * hz * i / 44_100) * 0.5 * fade * Short.MAX_VALUE).toInt()
+            out[i * 2] = value.toByte(); out[i * 2 + 1] = (value shr 8).toByte()
+        }
+        return out
+    }
+}
+
+/** A few switches, kept in settings.properties next to the pairing keys. */
+class Settings(private val file: File) {
+    private val values = Properties().apply { runCatching { file.inputStream().use { load(it) } } }
+
+    fun bool(key: String, default: Boolean) = values.getProperty(key)?.toBooleanStrictOrNull() ?: default
+    fun set(key: String, value: Boolean) {
+        values.setProperty(key, value.toString())
+        runCatching { file.outputStream().use { values.store(it, "DyskLink") } }
+    }
+}

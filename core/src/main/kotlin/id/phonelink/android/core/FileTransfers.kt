@@ -68,6 +68,11 @@ class FileTransfers(
     private val sinks: FileSinkFactory,
     /** Finished transfers are kept here, so received files can still be opened after the app is closed. */
     private val historyFile: File? = null,
+    /**
+     * Sends a pre-encoded `file.chunk` frame behind live messages, waiting while the connection's file window is full.
+     * Must run [OutFrame.release] once, sent or not. Null encodes chunks as messages through [send] instead.
+     */
+    private val sendFrame: ((peerId: String, frame: OutFrame) -> Boolean)? = null,
     /** Returns false if the message can't be sent. */
     private val send: (peerId: String, envelope: Envelope) -> Boolean,
 ) {
@@ -127,17 +132,26 @@ class FileTransfers(
         if (!send(peerId, Envelope(MessageType.FILE_OFFER, file = offer))) return "Connection lost"
         val digest = MessageDigest.getInstance("SHA-256")
         var total = 0L
+        val frames = sendFrame?.let { ChunkFrames(id, it) }
+        // Without a frame sender, one reused buffer holds the Base64 text.
+        val text = if (frames == null) ByteArray(Base64Bytes.encodedLength(CHUNK_BYTES)) else null
         open().use { input ->
             val buffer = ByteArray(CHUNK_BYTES)
             while (scope.isActive) {
                 if (id in cancelled) return "Canceled by the receiver"
-                val count = input.read(buffer)
-                if (count < 0) break
+                val count = input.readUpTo(buffer)
+                if (count <= 0) break
                 digest.update(buffer, 0, count)
                 total += count
-                val data = Base64.getEncoder().encodeToString(buffer.copyOf(count))
-                val chunk = Envelope(MessageType.FILE_CHUNK, file = FileMessage(id, data = data))
-                if (!send(peerId, chunk)) return "Connection lost"
+                val sent = if (frames != null) {
+                    val frame = frames.take { scope.isActive && id !in cancelled } ?: continue
+                    frames.send(peerId, frame, buffer, count)
+                } else {
+                    val length = Base64Bytes.encode(buffer, 0, count, text!!, 0)
+                    val data = String(text, 0, length, Charsets.ISO_8859_1)
+                    send(peerId, Envelope(MessageType.FILE_CHUNK, file = FileMessage(id, data = data)))
+                }
+                if (!sent) return "Connection lost"
                 progress(id, total)
             }
         }
@@ -145,6 +159,50 @@ class FileTransfers(
         val hash = digest.digest().joinToString("") { "%02x".format(it) }
         val done = Envelope(MessageType.FILE_DONE, file = FileMessage(id, sha256 = hash))
         return if (send(peerId, done)) null else "Connection lost"
+    }
+
+    /** Fills [buffer] as far as the stream allows, so chunks are full size. Returns 0 at the end. */
+    private fun InputStream.readUpTo(buffer: ByteArray): Int {
+        var count = 0
+        while (count < buffer.size) {
+            val read = read(buffer, count, buffer.size - count)
+            if (read < 0) break
+            count += read
+        }
+        return count
+    }
+
+    /**
+     * A few chunk buffers for one upload, reused as the connection writes them. Each is the whole `file.chunk` frame,
+     * so a chunk costs no new arrays, Strings, or Envelopes.
+     */
+    private class ChunkFrames(id: String, private val sendFrame: (String, OutFrame) -> Boolean) {
+        private val prefix = FileChunkFrame.prefix(id)
+        private val capacity = FileChunkFrame.capacity(prefix, CHUNK_BYTES)
+        private val free = java.util.concurrent.ArrayBlockingQueue<ByteArray>(FRAMES_PER_UPLOAD)
+        private var made = 0
+
+        /** A free buffer, or null once [keepWaiting] says to give up. */
+        fun take(keepWaiting: () -> Boolean): ByteArray? {
+            free.poll()?.let { return it }
+            if (made < FRAMES_PER_UPLOAD) {
+                made++
+                return ByteArray(capacity)
+            }
+            while (keepWaiting()) {
+                free.poll(WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)?.let { return it }
+            }
+            return null
+        }
+
+        fun send(peerId: String, frame: ByteArray, data: ByteArray, count: Int): Boolean {
+            val length = FileChunkFrame.build(frame, prefix, data, count)
+            return sendFrame(peerId, OutFrame(frame, length) { free.offer(frame) })
+        }
+
+        private companion object {
+            const val WAIT_MS = 250L
+        }
     }
 
     /** Only called for paired devices. */
@@ -249,15 +307,30 @@ class FileTransfers(
         saveHistory()
     }
 
+    /** The newest byte count of each active transfer, and when the list last showed it. */
+    private class Progress(@Volatile var transferred: Long, @Volatile var shownAt: Long)
+    private val progressById = ConcurrentHashMap<String, Progress>()
+
+    /** At most about ten list updates a second for each transfer; the final state always shows. */
     private fun progress(id: String, transferred: Long) {
+        val now = System.nanoTime()
+        val item = progressById.getOrPut(id) { Progress(0, now - PROGRESS_INTERVAL_NS) }
+        item.transferred = transferred
+        if (now - item.shownAt < PROGRESS_INTERVAL_NS) return
+        item.shownAt = now
         _transfers.update { list -> list.map { if (it.id == id) it.copy(transferred = transferred) else it } }
     }
 
     private fun finish(id: String, status: TransferStatus, detail: String?, uri: String? = null) {
+        val latest = progressById.remove(id)?.transferred
         _transfers.update { list ->
             list.map {
                 // The receiver's result must not change a transfer that already failed on this side.
-                if (it.id == id && it.status == TransferStatus.Active) it.copy(status = status, detail = detail, uri = uri) else it
+                if (it.id == id && it.status == TransferStatus.Active) {
+                    it.copy(status = status, detail = detail, uri = uri, transferred = maxOf(it.transferred, latest ?: 0L))
+                } else {
+                    it
+                }
             }
         }
         saveHistory()
@@ -266,7 +339,11 @@ class FileTransfers(
 
     private companion object {
         private const val MAX_UPLOADS = 2
-        const val CHUNK_BYTES = 192 * 1024
+        /** Small, so live messages wait at most one chunk's write behind a big file. Receivers take any size. */
+        const val CHUNK_BYTES = 64 * 1024
+        /** Chunk buffers per upload: the connection's file window holds about three, and one is being filled. */
+        const val FRAMES_PER_UPLOAD = 5
         const val MAX_HISTORY = 500
+        const val PROGRESS_INTERVAL_NS = 100_000_000L
     }
 }

@@ -359,6 +359,7 @@ class CameraStreamService : Service() {
             val name = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peerId }?.name ?: "Your Mac"
             val intent = Intent(context, MainActivity::class.java)
                 .putExtra(MainActivity.EXTRA_CAMERA_PEER, peerId)
+                .putExtra(MainActivity.EXTRA_TOKEN, IntentTokens.shared.issue(IntentTokens.CAMERA, peerId))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             val notification = Notification.Builder(context, PhoneLinkService.SCREEN_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_logo_glyph)

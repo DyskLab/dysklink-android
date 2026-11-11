@@ -382,7 +382,9 @@ private fun AirPointerPad(sensors: SensorManager, gyroscope: Sensor, speed: Floa
     var holding by remember { mutableStateOf(false) }
     val mouse = remember(speed) { AirMouse(AirMouse.GAIN * speed) }
     val moved = remember { floatArrayOf(0f) }
-    DisposableEffect(sensors, gyroscope, mouse) {
+    // The gyroscope draws power at game rate, so the sensors run only while the pad is held.
+    DisposableEffect(sensors, gyroscope, mouse, holding) {
+        if (!holding) return@DisposableEffect onDispose {}
         var lastNanos = 0L
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {

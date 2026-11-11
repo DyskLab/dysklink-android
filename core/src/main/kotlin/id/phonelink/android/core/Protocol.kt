@@ -12,6 +12,8 @@ object PhoneLinkProtocol {
     /** 2: the code is random and typed on the device that asked to pair. */
     const val VERSION = 2
     const val SERVICE_TYPE = "_phonelink._tcp."
+    /** Platforms that act as a computer: phones serve them their data. Anything else is another phone. */
+    val COMPUTERS = setOf("macos", "windows", "linux")
     const val PORT = 47821
     /** The Mac runs `adb reverse` so this port on 127.0.0.1 leads to it over a USB cable. */
     const val USB_PORT = 47823
@@ -379,13 +381,18 @@ val protocolJson = Json {
 }
 
 object Frames {
-    fun write(output: DataOutputStream, envelope: Envelope) {
-        val payload = protocolJson.encodeToString(Envelope.serializer(), envelope).toByteArray()
+    /**
+     * Returns false, without sending, for a message bigger than [PhoneLinkProtocol.MAX_FRAME_BYTES]: the other side
+     * would drop the whole connection over it.
+     */
+    fun write(output: DataOutputStream, envelope: Envelope): Boolean {
+        val payload = FrameWriter.encode(envelope) ?: return false
         synchronized(output) {
             output.writeInt(payload.size)
             output.write(payload)
             output.flush()
         }
+        return true
     }
 
     /** Returns null for a corrupt message. The connection stays usable. */
@@ -396,9 +403,37 @@ object Frames {
         }
         val payload = ByteArray(length)
         input.readFully(payload)
-        return runCatching {
-            protocolJson.decodeFromString(Envelope.serializer(), payload.decodeToString())
-        }.getOrNull()
+        return decode(payload, length)
+    }
+
+    /**
+     * Null for a corrupt message. Through a String on purpose: measured with kotlinx.serialization 1.11,
+     * `decodeFromStream` was 2-3 times slower and allocated about twice as much for file chunks and video frames.
+     */
+    fun decode(payload: ByteArray, length: Int): Envelope? = runCatching {
+        protocolJson.decodeFromString(Envelope.serializer(), payload.decodeToString(0, length))
+    }.getOrNull()
+}
+
+/** Reads frames into one buffer that's reused, instead of a new array for every frame. */
+class FrameReader(private val input: DataInputStream) {
+    private var buffer = ByteArray(INITIAL_BYTES)
+
+    /** Returns null for a corrupt message. The connection stays usable. */
+    fun read(): Envelope? {
+        val length = input.readInt()
+        if (length <= 0 || length > PhoneLinkProtocol.MAX_FRAME_BYTES) {
+            throw IOException("Invalid frame size: $length")
+        }
+        if (length > buffer.size) {
+            buffer = ByteArray(maxOf(length, minOf(buffer.size * 2, PhoneLinkProtocol.MAX_FRAME_BYTES)))
+        }
+        input.readFully(buffer, 0, length)
+        return Frames.decode(buffer, length)
+    }
+
+    private companion object {
+        const val INITIAL_BYTES = 16 * 1024
     }
 }
 
