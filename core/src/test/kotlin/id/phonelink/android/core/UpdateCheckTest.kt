@@ -47,4 +47,13 @@ class UpdateCheckTest {
     fun nothingNewerGivesNothing() {
         assertNull(UpdateCheck.newest(releases, "0.1.10"))
     }
+
+    @Test
+    fun theLatestPageGivesTheReleaseItRedirectsTo() {
+        val release = UpdateCheck.fromTagPage("https://github.com/DyskLab/dysklink-android/releases/tag/v1.1.0", "1.0.0")
+        assertEquals("1.1.0", release?.version)
+        assertEquals("https://github.com/DyskLab/dysklink-android/releases/download/v1.1.0/DyskLink-android-1.1.0.apk", release?.apkUrl)
+        assertNull(UpdateCheck.fromTagPage("https://github.com/DyskLab/dysklink-android/releases/tag/v1.1.0", "1.1.0"))
+        assertNull(UpdateCheck.fromTagPage("https://github.com/DyskLab/dysklink-android/releases", "1.0.0"))
+    }
 }

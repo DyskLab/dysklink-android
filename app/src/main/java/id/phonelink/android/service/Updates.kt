@@ -105,9 +105,25 @@ object Updates {
         connection.setRequestProperty("Accept", "application/vnd.github+json")
         connection.setRequestProperty("User-Agent", "DyskLink-Android/$currentVersion")
         try {
-            if (connection.responseCode != 200) error("HTTP ${connection.responseCode}")
+            // GitHub allows 60 API reads an hour per network; past that, the release page still works.
+            if (connection.responseCode != 200) return fetchFromPage()
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             return UpdateCheck.newest(body, currentVersion)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun fetchFromPage(): AppRelease? {
+        val connection = URL(UpdateCheck.LATEST_PAGE_URL).openConnection() as HttpURLConnection
+        connection.connectTimeout = 20_000
+        connection.readTimeout = 20_000
+        connection.requestMethod = "HEAD"
+        connection.instanceFollowRedirects = true
+        connection.setRequestProperty("User-Agent", "DyskLink-Android/$currentVersion")
+        try {
+            if (connection.responseCode != 200) error("HTTP ${connection.responseCode}")
+            return UpdateCheck.fromTagPage(connection.url.toString(), currentVersion)
         } finally {
             connection.disconnect()
         }

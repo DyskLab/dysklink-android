@@ -14,6 +14,20 @@ data class AppRelease(val version: String, val pageUrl: String, val apkUrl: Stri
 object UpdateCheck {
     const val RELEASES_URL = "https://api.github.com/repos/DyskLab/dysklink-android/releases?per_page=10"
     const val PAGE_URL = "https://github.com/DyskLab/dysklink-android/releases"
+    /** Redirects to the newest full release (…/releases/tag/v1.2.3). Not rate limited like the API. */
+    const val LATEST_PAGE_URL = "https://github.com/DyskLab/dysklink-android/releases/latest"
+
+    /** The release a "latest" page redirected to, when it's newer than [current]. */
+    fun fromTagPage(url: String, current: String): AppRelease? {
+        val tag = url.substringBefore('?').trimEnd('/').substringAfter("/releases/tag/", "")
+        if (tag.isEmpty() || tag.contains('/') || version(tag) == null || !isNewer(tag, current)) return null
+        val version = clean(tag)
+        return AppRelease(
+            version = version,
+            pageUrl = url,
+            apkUrl = "https://github.com/DyskLab/dysklink-android/releases/download/$tag/DyskLink-android-$version.apk",
+        )
+    }
 
     @Serializable
     private data class Asset(
