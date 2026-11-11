@@ -23,7 +23,7 @@ You need both.
 > DyskLink is in early development, so expect rough edges.
 
 ## Download
-You need Android 8 or later.
+You need Android 8 or later. See [COMPATIBILITY.md](https://github.com/DyskLab/dysklink-mac/blob/main/COMPATIBILITY.md) (in Indonesian) for what each Mac supports.
 
 1. Download `DyskLink-android-0.1.1.apk` from the
    [latest release](https://github.com/DyskLab/dysklink-android/releases/latest) and open it on your phone. Android asks
