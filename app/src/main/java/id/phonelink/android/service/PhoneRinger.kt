@@ -23,7 +23,7 @@ import id.phonelink.android.R
 object PhoneRinger {
     private const val TAG = "PhoneLink"
     private const val CHANNEL_ID = "find_phone"
-    private const val NOTIFICATION_ID = 7
+    private const val NOTIFICATION_ID = NotificationIds.RINGER
     private const val RING_MS = 30_000L
     const val ACTION_STOP = "id.phonelink.android.STOP_RING"
 

@@ -80,6 +80,9 @@ internal fun historyGroups(transfers: List<Transfer>, today: LocalDate, zone: Zo
     return result + listOfNotNull(dated[null]?.let { "Earlier" to it })
 }
 
+/** A list key that stays unique when two devices happen to use the same transfer ID. */
+internal fun historyKey(transfer: Transfer): String = "${transfer.peerId}:${transfer.id}:${transfer.time}"
+
 internal fun formatSize(bytes: Long): String = when {
     bytes >= 1_000_000_000 -> "%.1f GB".format(bytes / 1e9)
     bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1e6)
@@ -225,8 +228,10 @@ fun FileHistoryScreen(
                     Text(label.uppercase(), color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp, modifier = Modifier.padding(top = 16.dp, bottom = 12.dp))
                 }
                 // One lazy row per transfer, drawn as slices of one card, so 500 entries don't all compose at once.
-                itemsIndexed(items, key = { _, transfer -> transfer.id }) { index, transfer ->
-                    Column(Modifier.cardSegment(first = index == 0, last = index == items.lastIndex)) {
+                // IDs come from other devices, so two can share one: the key also names the device and the time.
+                val rows = items.distinctBy(::historyKey)
+                itemsIndexed(rows, key = { _, transfer -> historyKey(transfer) }) { index, transfer ->
+                    Column(Modifier.cardSegment(first = index == 0, last = index == rows.lastIndex)) {
                         if (index > 0) Box(Modifier.fillMaxWidth().padding(vertical = 2.dp).height(1.dp).background(Palette.Stroke))
                         HistoryRow(
                             transfer = transfer,

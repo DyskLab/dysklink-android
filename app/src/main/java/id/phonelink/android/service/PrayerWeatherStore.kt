@@ -70,7 +70,7 @@ object PrayerWeatherStore {
     }
 
     private const val CHANNEL_ID = "prayer"
-    private const val NOTIFICATION_ID = 9
+    private const val NOTIFICATION_ID = NotificationIds.PRAYER
     private const val ALARM_CODE = 30
     private const val EXTRA_PRAYER = "prayer"
     private const val EXTRA_TIME = "time"

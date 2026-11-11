@@ -50,4 +50,26 @@ class IntentTokensTest {
         assertNotEquals(a, b)
         assertTrue(a.length == 32)
     }
+
+    @Test
+    fun aNewerRequestReplacesTheOlderToken() {
+        val tokens = IntentTokens()
+        val old = tokens.issue(IntentTokens.SCREEN, "mac-1")
+        val other = tokens.issue(IntentTokens.SCREEN, "mac-2")
+        val camera = tokens.issue(IntentTokens.CAMERA, "mac-1")
+        val newer = tokens.issue(IntentTokens.SCREEN, "mac-1")
+        assertFalse(tokens.consume(old, IntentTokens.SCREEN, "mac-1"), "The older notification's tap must not work")
+        assertTrue(tokens.consume(newer, IntentTokens.SCREEN, "mac-1"))
+        assertTrue(tokens.consume(other, IntentTokens.SCREEN, "mac-2"))
+        assertTrue(tokens.consume(camera, IntentTokens.CAMERA, "mac-1"))
+    }
+
+    @Test
+    fun tokensAreBounded() {
+        val tokens = IntentTokens()
+        val first = tokens.issue(IntentTokens.CAMERA, "mac-0")
+        repeat(IntentTokens.MAX_TOKENS * 3) { tokens.issue(IntentTokens.CAMERA, "mac-${it + 1}") }
+        assertTrue(tokens.size <= IntentTokens.MAX_TOKENS)
+        assertFalse(tokens.consume(first, IntentTokens.CAMERA, "mac-0"), "The oldest goes first")
+    }
 }

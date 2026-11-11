@@ -135,6 +135,8 @@ fun MacScreenScreen(
     val haptics = LocalHapticFeedback.current
     val main = remember { Handler(Looper.getMainLooper()) }
     val decoderHolder = remember { arrayOfNulls<MacScreenDecoder>(1) }
+    /** Stopped because the app went to the background; it starts again when the app returns. */
+    var paused by remember { mutableStateOf(false) }
 
     fun close() {
         link?.stop(peerId)
@@ -177,7 +179,8 @@ fun MacScreenScreen(
                         state = ViewState.Showing(info.width, info.height, envelope.text ?: macName, envelope.displays.orEmpty(), envelope.displayId)
                     }
                 }
-                MessageType.MACSCREEN_STOPPED -> main.post { state = ViewState.Stopped(envelope.error ?: "Viewing ended.") }
+                // The answer to stopping in the background isn't an ending: it starts again on return.
+                MessageType.MACSCREEN_STOPPED -> main.post { if (!paused) state = ViewState.Stopped(envelope.error ?: "Viewing ended.") }
             }
         }
         state = ViewState.Starting
@@ -190,6 +193,32 @@ fun MacScreenScreen(
                 id.phonelink.android.service.AudioShare.stopListening(peerId)
             }
         }
+    }
+
+    // In the background (another app, screen off) the Mac stops sending, so video doesn't stream to nobody;
+    // coming back asks for it again.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, link, peerId, connected) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> if (link != null && connected && state !is ViewState.Stopped) {
+                    paused = true
+                    // Also marks the viewer as not showing, so Wi-Fi leaves high-performance mode.
+                    link.stop(peerId)
+                    id.phonelink.android.service.PhoneLinkService.setMacScreenViewing(false)
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_START -> if (paused) {
+                    paused = false
+                    if (link != null && connected) {
+                        state = ViewState.Starting
+                        begin()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     DisposableEffect(landscape) {

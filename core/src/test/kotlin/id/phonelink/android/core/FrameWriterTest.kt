@@ -111,6 +111,40 @@ class FrameWriterTest {
     }
 
     @Test
+    fun closeWaitsForTheMessageBeingWritten() {
+        // The writer has taken the last message off the queue and is writing it when close() comes.
+        val writing = CountDownLatch(1)
+        val gate = CountDownLatch(1).also { gates += it }
+        val peer = object : OutputStream() {
+            val inner = Peer()
+            override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+            override fun write(b: ByteArray, off: Int, len: Int) {
+                writing.countDown()
+                gate.await()
+                inner.write(b, off, len)
+            }
+        }
+        val closedWith = LinkedBlockingQueue<List<String>>()
+        val writer = writer(peer) { closedWith.offer(peer.inner.log.toList()) }
+        assertTrue(writer.post(Envelope(MessageType.PAIR_REJECT, error = "bye")))
+        assertTrue(writing.await(2, TimeUnit.SECONDS))
+        writer.close()
+        // The socket must not close under the write.
+        assertEquals(null, closedWith.poll(200, TimeUnit.MILLISECONDS))
+        gate.countDown()
+        val written = assertNotNull(closedWith.poll(2, TimeUnit.SECONDS), "The socket should close once flushed")
+        assertEquals(listOf(MessageType.PAIR_REJECT), written)
+    }
+
+    @Test
+    fun closeWithNothingQueuedClosesAtOnce() {
+        val closed = CountDownLatch(1)
+        val writer = writer(Peer()) { closed.countDown() }
+        writer.close()
+        assertTrue(closed.await(300, TimeUnit.MILLISECONDS), "With nothing to write, close shouldn't wait for the grace timer")
+    }
+
+    @Test
     fun aStalledPeerDoesNotHoldUpAnother() {
         val (stuck, _) = stalled()
         val healthy = Peer()

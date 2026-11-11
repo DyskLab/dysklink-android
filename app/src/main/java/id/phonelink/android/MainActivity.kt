@@ -70,7 +70,8 @@ class MainActivity : ComponentActivity() {
     private val filePicker =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             val peerId = pickFilesFor ?: return@registerForActivityResult
-            PhoneLinkService.connectionManager.value?.let { sendUris(it, peerId, uris) }
+            val connections = PhoneLinkService.connectionManager.value ?: return@registerForActivityResult
+            lifecycleScope.launch { sendUris(connections, peerId, uris) }
         }
 
     private val featurePermissions =
@@ -108,10 +109,15 @@ class MainActivity : ComponentActivity() {
             cameraPeer = saved.getString(KEY_CAMERA_PEER)
             cameraFront = saved.getBoolean(KEY_CAMERA_FRONT)
         }
-        handleShare(intent)
-        handleScreenRequest(intent)
-        handleCameraRequest(intent)
-        handleOpen(intent)
+        // A recreated activity (rotation, process death) or one reopened from Recents still holds the old intent:
+        // acting on it again would send the same files twice or reuse a request.
+        val launchedFromHistory = (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (savedInstanceState == null && !launchedFromHistory) {
+            handleShare(intent)
+            handleScreenRequest(intent)
+            handleCameraRequest(intent)
+            handleOpen(intent)
+        }
         val localName = LocalDevice(this).name
         setContent {
             PhoneLinkTheme {
@@ -311,17 +317,54 @@ class MainActivity : ComponentActivity() {
     private fun isForeignContent(uri: Uri): Boolean =
         uri.scheme == "content" && uri.authority?.substringBefore('@')?.startsWith(packageName) != true
 
-    private fun sendUris(connections: ConnectionManager, peerId: String, uris: List<Uri>) {
+    private suspend fun sendUris(connections: ConnectionManager, peerId: String, uris: List<Uri>) {
+        var failed = 0
         uris.forEach { uri ->
-            val (name, size) = contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                if (!cursor.moveToFirst()) return@use null
-                cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) to
-                    cursor.getLong(cursor.getColumnIndexOrThrow(OpenableColumns.SIZE))
-            } ?: return@forEach toast("Can't read the file")
-            connections.fileTransfers.sendFile(peerId, name, size) {
-                contentResolver.openInputStream(uri) ?: error("Can't open the file")
+            // Providers differ: some leave out the name or size, some throw. One odd file doesn't stop the rest.
+            val sent = runCatching {
+                // Providers can be slow, and the size may have to be counted: not on the main thread.
+                val (name, size) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { describe(uri) } ?: return@runCatching false
+                connections.fileTransfers.sendFile(peerId, name, size) {
+                    contentResolver.openInputStream(uri) ?: error("Can't open the file")
+                }
+                true
+            }.getOrDefault(false)
+            if (!sent) failed++
+        }
+        if (failed > 0) toast(if (failed == 1) "Can't read the file" else "Can't read $failed files")
+    }
+
+    /** The shared file's name and size, from the provider when it says, otherwise from the URI or by reading it. */
+    private fun describe(uri: Uri): Pair<String, Long>? {
+        var name: String? = null
+        var size: Long? = null
+        runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameColumn >= 0 && !cursor.isNull(nameColumn)) name = cursor.getString(nameColumn)
+                    if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) size = cursor.getLong(sizeColumn).takeIf { it >= 0 }
+                }
             }
         }
+        val known = size ?: runCatching {
+            contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length.takeIf { length -> length >= 0 } }
+        }.getOrNull() ?: runCatching {
+            // Last resort: count the bytes. The size must be exact, as the receiver checks it.
+            contentResolver.openInputStream(uri)?.use { input ->
+                val buffer = ByteArray(64 * 1024)
+                var total = 0L
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    total += read
+                }
+                total
+            }
+        }.getOrNull() ?: return null
+        val fallback = uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "shared file"
+        return (name?.takeIf { it.isNotBlank() } ?: fallback) to known
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -388,7 +431,7 @@ class MainActivity : ComponentActivity() {
         intent.removeExtra(EXTRA_CAMERA_PEER)
         intent.removeExtra(EXTRA_TOKEN)
         // MainActivity is exported: only our own notification, with its one-time token, may start the camera.
-        if (!IntentTokens.shared.consume(token, IntentTokens.CAMERA, peerId)) return
+        if (!IntentTokens.shared.consume(token, IntentTokens.CAMERA, peerId)) return toast(IntentTokens.EXPIRED_MESSAGE)
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
             if (connections.peers.value.any { it.id == peerId && it.isPaired && it.isMac }) startCamera(peerId, false)
@@ -401,7 +444,7 @@ class MainActivity : ComponentActivity() {
         val token = intent.getStringExtra(EXTRA_TOKEN)
         intent.removeExtra(EXTRA_SCREEN_PEER)
         intent.removeExtra(EXTRA_TOKEN)
-        if (!IntentTokens.shared.consume(token, IntentTokens.SCREEN, peerId)) return
+        if (!IntentTokens.shared.consume(token, IntentTokens.SCREEN, peerId)) return toast(IntentTokens.EXPIRED_MESSAGE)
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
             if (connections.peers.value.any { it.id == peerId && it.isPaired }) askForScreen(peerId)
@@ -409,6 +452,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun askForScreen(peerId: String) {
+        // Android allows one recording: a second Mac is told instead of the user being asked for nothing.
+        val sharingWith = ScreenCaptureService.activePeer.value
+        if (sharingWith == peerId) return
+        if (sharingWith != null) {
+            val connections = PhoneLinkService.connectionManager.value
+            val other = connections?.peers?.value?.firstOrNull { it.id == sharingWith }?.name ?: "another computer"
+            connections?.post(peerId, id.phonelink.android.core.Envelope(id.phonelink.android.core.MessageType.SCREEN_STOPPED, error = "The phone is already sharing its screen with $other. Stop that first."))
+            toast("Already sharing the screen with $other")
+            return
+        }
         screenPeer = peerId
         // The phone's sound goes with the screen, which needs the audio permission before Android's recording dialog.
         if (id.phonelink.android.service.AudioShare.wantsSoundWithScreen(this) &&

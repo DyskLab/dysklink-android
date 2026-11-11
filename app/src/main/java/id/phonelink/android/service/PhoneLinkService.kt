@@ -51,6 +51,20 @@ class PhoneLinkService : Service() {
     /** Whether NSD should be looking now; set from the main thread. */
     @Volatile private var discoveryWanted = true
 
+    /** Whether the screen is on. Discovery pauses while it's off; turning it on looks again at once. */
+    private val screenOn = MutableStateFlow(true)
+    private val screenReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_ON -> {
+                    screenOn.value = true
+                    rescan.trySend(Unit)
+                }
+                Intent.ACTION_SCREEN_OFF -> screenOn.value = false
+            }
+        }
+    }
+
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             // A new network: scan again from the shortest wait, and look for services on it.
@@ -85,6 +99,16 @@ class PhoneLinkService : Service() {
         createWifiLock()
         ChargeReminder.start(this)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
+        // Screen on and off are only sent to receivers registered while running.
+        screenOn.value = getSystemService(PowerManager::class.java).isInteractive
+        ContextCompat.registerReceiver(
+            this, screenReceiver,
+            android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
 
         // Creating keys and reading files is slow, so it can't run on the main thread.
         scope.launch(Dispatchers.IO) {
@@ -110,10 +134,10 @@ class PhoneLinkService : Service() {
                 connections::addDiscovered,
                 connections::removeDiscovered,
             ).also { it.start() }
-            // Multicast discovery costs battery: stop it while every paired device is connected, unless the app is
-            // open (where a new device may be paired).
+            // Multicast discovery costs battery: stop it while the screen is off, and while every paired device is
+            // connected unless the app is open (where a new device may be paired).
             launch(Dispatchers.Main) {
-                combine(connections.peers.map(::allPairedConnected), uiVisible) { all, visible -> !all || visible }
+                combine(connections.peers.map(::allPairedConnected), uiVisible, screenOn) { all, visible, on -> on && (!all || visible) }
                     .distinctUntilChanged()
                     .collect { wanted ->
                         discoveryWanted = wanted
@@ -132,6 +156,13 @@ class PhoneLinkService : Service() {
                     }
             }
             launch { holdWifiLockWhileBusy(connections) }
+            // Sound to or from a Mac or PC that dropped off ends here too, instead of playing or recording for nobody.
+            launch(Dispatchers.Main) {
+                connections.peers
+                    .map { peers -> peers.filter { it.isConnected }.map { it.id }.toSet() }
+                    .distinctUntilChanged()
+                    .collect { connected -> AudioShare.keepOnly(this@PhoneLinkService, connected) }
+            }
 
             // Other phones: listen, and say so on the network while phone connections are on.
             launch {
@@ -264,6 +295,7 @@ class PhoneLinkService : Service() {
 
     override fun onDestroy() {
         getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback)
+        runCatching { unregisterReceiver(screenReceiver) }
         wifiLock?.takeIf { it.isHeld }?.release()
         ChargeReminder.stop(this)
         discovery?.stop()
@@ -329,11 +361,11 @@ class PhoneLinkService : Service() {
     companion object {
         const val SCREEN_CHANNEL_ID = "screen_request"
         const val SHARING_CHANNEL_ID = "screen_sharing"
-        const val SCREEN_REQUEST_NOTIFICATION_ID = 3
+        const val SCREEN_REQUEST_NOTIFICATION_ID = NotificationIds.SCREEN_REQUEST
         private const val CHANNEL_ID = "connection"
         private const val PAIRING_CHANNEL_ID = "pairing"
-        private const val NOTIFICATION_ID = 1
-        private const val PAIRING_NOTIFICATION_ID = 2
+        private const val NOTIFICATION_ID = NotificationIds.CONNECTION
+        private const val PAIRING_NOTIFICATION_ID = NotificationIds.PAIRING
         private const val INFO_INTERVAL_MS = 30_000L
         private const val HEARTBEAT_MS = 25_000L
         /** With every paired device connected the loop only wakes to re-check; a lost device wakes it sooner. */

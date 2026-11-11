@@ -316,8 +316,8 @@ class CameraStreamService : Service() {
         private const val ACTION_TORCH = "id.phonelink.android.TORCH_CAMERA"
         private const val EXTRA_PEER = "peer"
         private const val EXTRA_FRONT = "front"
-        private const val NOTIFICATION_ID = 6
-        const val REQUEST_NOTIFICATION_ID = 7
+        private const val NOTIFICATION_ID = NotificationIds.CAMERA
+        const val REQUEST_NOTIFICATION_ID = NotificationIds.CAMERA_REQUEST
         private const val FRAME_RATE = 30
         private const val KEY_FRAME_SECONDS = 3
         private const val BITS_PER_PIXEL = 5

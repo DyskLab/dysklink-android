@@ -18,6 +18,11 @@ class NsdDiscovery(
     private val executor = Executors.newSingleThreadExecutor()
     private var started = false
     private var listener: NsdManager.DiscoveryListener? = null
+    /** Looking is wanted: between [start] and [pause]. A failed start is retried only while this holds. */
+    private var wanted = false
+    private var failures = 0
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+    private val retry = Runnable { retryNow() }
 
     /** A listener can't be reused until Android has stopped the last discovery, so each start gets its own. */
     private fun newListener() = object : NsdManager.DiscoveryListener {
@@ -28,27 +33,59 @@ class NsdDiscovery(
         override fun onServiceLost(service: NsdServiceInfo) = onLost(service.serviceName)
         override fun onDiscoveryStarted(serviceType: String) {
             Log.i(TAG, "Discovery started: $serviceType")
+            synchronized(this@NsdDiscovery) { if (listener === this) failures = 0 }
         }
         override fun onDiscoveryStopped(serviceType: String) = Unit
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
             Log.w(TAG, "Discovery failed to start: $errorCode")
-            synchronized(this@NsdDiscovery) { if (listener === this) { started = false; listener = null } }
+            synchronized(this@NsdDiscovery) {
+                if (listener === this) {
+                    started = false
+                    listener = null
+                    scheduleRetry()
+                }
+            }
         }
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
     }
 
     @Synchronized
     fun start() {
+        wanted = true
+        main.removeCallbacks(retry)
         if (started) return
+        begin()
+    }
+
+    private fun begin() {
         val next = newListener()
         runCatching { manager.discoverServices(PhoneLinkProtocol.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, next) }
             .onSuccess { started = true; listener = next }
-            .onFailure { Log.w(TAG, "Can't start discovery", it) }
+            .onFailure {
+                Log.w(TAG, "Can't start discovery", it)
+                scheduleRetry()
+            }
+    }
+
+    @Synchronized
+    private fun retryNow() {
+        if (wanted && !started) begin()
+    }
+
+    /** Tries again after 5 seconds, then 30 seconds, then every 5 minutes, for as long as looking is wanted. */
+    private fun scheduleRetry() {
+        if (!wanted) return
+        val wait = NsdRetry.delayMs(failures++)
+        Log.i(TAG, "Discovery retry in ${wait / 1000} s")
+        main.removeCallbacks(retry)
+        main.postDelayed(retry, wait)
     }
 
     /** Stops looking (multicast costs battery) but keeps advertising; [start] looks again. */
     @Synchronized
     fun pause() {
+        wanted = false
+        main.removeCallbacks(retry)
         if (!started) return
         started = false
         listener?.let { runCatching { manager.stopServiceDiscovery(it) } }
@@ -124,4 +161,12 @@ class NsdDiscovery(
     private companion object {
         const val TAG = "PhoneLink"
     }
+}
+
+/** How long to wait before starting NSD discovery again after the system refused to start it. */
+object NsdRetry {
+    private val DELAYS_MS = longArrayOf(5_000L, 30_000L, 300_000L)
+
+    /** [failures] counts the failed starts before this one, from 0. */
+    fun delayMs(failures: Int): Long = DELAYS_MS[failures.coerceIn(0, DELAYS_MS.lastIndex)]
 }

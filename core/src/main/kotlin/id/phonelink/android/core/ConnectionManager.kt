@@ -137,7 +137,10 @@ class ConnectionManager(
     private val _manualTargets = MutableStateFlow<List<ManualTarget>>(emptyList())
     val manualTargets: StateFlow<List<ManualTarget>> = _manualTargets.asStateFlow()
 
-    val fileTransfers = FileTransfers(scope, fileSinks, File(directory, "transfers.json"), sendFrame = ::sendFrameTo, send = ::sendTo)
+    val fileTransfers = FileTransfers(
+        scope, fileSinks, File(directory, "transfers.json"),
+        linkFor = ::pairedConnection, post = ::postTo, send = ::sendTo,
+    )
 
     val phone = PhoneBridge(
         directory, scope, phoneData, fileTransfers,
@@ -301,18 +304,12 @@ class ConnectionManager(
             .getOrNull() ?: return
         server = socket
         _serverPort.value = socket.localPort
-        scope.launch(Dispatchers.IO) {
-            while (isActive && !socket.isClosed) {
-                val raw = runCatching { socket.accept() }.getOrNull() ?: break
-                launch {
-                    val host = raw.inetAddress.hostAddress ?: ""
-                    val connection = runCatching { PeerConnection.accept(raw, sslContext) }
-                        .onFailure { CoreLog.w(TAG, "A phone failed to connect", it) }
-                        .getOrNull() ?: return@launch
-                    runConnection(connection, host)
-                }
-            }
-        }
+        // Each phone reads on its own thread, not the shared IO pool; strangers are capped and must pair or go.
+        InboundServer(
+            socket, sslContext, scope, "phones",
+            isPaired = { id -> synchronized(lock) { records.containsKey(id) } },
+            isPairing = { id -> _prompt.value?.peerId == id },
+        ) { connection, host -> runConnection(connection, host) }.start()
     }
 
     private fun stopServer() {
@@ -384,7 +381,11 @@ class ConnectionManager(
             connection.close()
             return false
         }
-        replaced?.close()
+        replaced?.let { old ->
+            old.close()
+            // What moved over the old connection ends with it; its own cleanup below skips, as it's no longer current.
+            fileTransfers.onDisconnected(id)
+        }
         connection.send(greeting)
         try {
             connection.readLoop { handle(connection, it) }
@@ -392,7 +393,8 @@ class ConnectionManager(
             // Connection lost. Retries are handled by startTarget.
         } finally {
             connection.close()
-            fileTransfers.onDisconnected(id)
+            val current = synchronized(lock) { connections[id] === connection }
+            if (current) fileTransfers.onDisconnected(id)
             locked {
                 if (connections[id] === connection) {
                     connections.remove(id)
@@ -438,6 +440,12 @@ class ConnectionManager(
                 val hello = envelope.hello ?: return@locked
                 // One hello per connection. A second one could claim to be a different kind of device.
                 if (connection.hello != null) return@locked
+                // Computers never dial a phone, so whatever dialed in and calls itself one is hung up on.
+                if (connection.inbound && hello.platform in PhoneLinkProtocol.COMPUTERS) {
+                    CoreLog.w(TAG, "INBOUND_COMPUTER $id says ${hello.platform}")
+                    close(connection)
+                    return@locked
+                }
                 val record = records[id]
                 // Once paired, whether it's a phone or a computer comes from pairing. A device that now claims otherwise is hung up on.
                 if (record != null && (record.platform in PhoneLinkProtocol.COMPUTERS) != (hello.platform in PhoneLinkProtocol.COMPUTERS)) {
@@ -716,12 +724,6 @@ class ConnectionManager(
 
     /** Waits like a direct write (see [PeerConnection.send]). */
     private fun sendTo(peerId: String, envelope: Envelope): Boolean = pairedConnection(peerId)?.send(envelope) ?: false
-
-    private fun sendFrameTo(peerId: String, frame: OutFrame): Boolean {
-        val connection = pairedConnection(peerId)
-        if (connection == null) frame.release?.invoke()
-        return connection?.sendFrame(frame) ?: false
-    }
 
     /**
      * Queues on that device's own connection without waiting. Live messages go before file data, touchpad moves that

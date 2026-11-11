@@ -34,9 +34,8 @@ object Updates {
     )
 
     const val CHANNEL_ID = "updates"
-    private const val NOTIFICATION_ID = 4
-    private const val DAY_MS = 24L * 60 * 60 * 1000
-    private const val FIRST_DELAY_MS = 15_000L
+    private const val NOTIFICATION_ID = NotificationIds.UPDATES
+    private const val DAY_MS = UpdateSchedule.DAY_MS
 
     private val mutableState = MutableStateFlow(State())
     val state: StateFlow<State> = mutableState.asStateFlow()
@@ -59,8 +58,15 @@ object Updates {
     /** Runs for as long as the service does, checking once a day while automatic checks are on. */
     suspend fun runLoop(context: Context) {
         while (true) {
-            val last = prefs(context).getLong("lastCheck", 0)
-            delay(maxOf(FIRST_DELAY_MS, DAY_MS - (System.currentTimeMillis() - last)))
+            val prefs = prefs(context)
+            delay(
+                UpdateSchedule.delayMs(
+                    now = System.currentTimeMillis(),
+                    lastSuccess = prefs.getLong("lastCheck", 0),
+                    lastAttempt = prefs.getLong("lastAttempt", 0),
+                    failures = prefs.getInt("failures", 0),
+                ),
+            )
             if (state.value.auto) check(context, manual = false)
             else delay(DAY_MS)
         }
@@ -77,9 +83,13 @@ object Updates {
             mutableState.value = mutableState.value.copy(isChecking = true, status = if (manual) null else state.value.status)
             val result = runCatching { withContext(Dispatchers.IO) { fetch() } }
             val prefs = prefs(context)
+            // Every try counts, so a failing check backs off instead of trying again every few seconds.
+            val now = System.currentTimeMillis()
+            prefs.edit().putLong("lastAttempt", now)
+                .putInt("failures", if (result.isSuccess) 0 else prefs.getInt("failures", 0) + 1).apply()
             mutableState.value = result.fold(
                 onSuccess = { release ->
-                    prefs.edit().putLong("lastCheck", System.currentTimeMillis()).apply()
+                    prefs.edit().putLong("lastCheck", now).apply()
                     val skipped = prefs.getString("skipped", null)
                     if (release != null && (manual || release.version != skipped)) {
                         notifyOnce(context, release)
@@ -88,7 +98,7 @@ object Updates {
                         State(state.value.auto, null, false, if (manual) "DyskLink $currentVersion is the newest version." else null)
                     }
                 },
-                // A failed automatic check stays quiet and tries again tomorrow.
+                // A failed automatic check stays quiet and tries again in an hour, then once a day.
                 onFailure = {
                     state.value.copy(isChecking = false, status = if (manual) "Couldn't reach GitHub. Try again later." else state.value.status)
                 },
@@ -157,5 +167,24 @@ object Updates {
             .setAutoCancel(true)
             .build()
         runCatching { context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification) }
+    }
+}
+
+/** When the next automatic update check runs: a day after the last one that worked, sooner after a failure, never in a loop. */
+object UpdateSchedule {
+    const val DAY_MS = 24L * 60 * 60 * 1000
+    const val HOUR_MS = 60L * 60 * 1000
+    /** The service just started: wait a little so the check doesn't compete with connecting. */
+    const val FIRST_DELAY_MS = 15_000L
+
+    /** Times in epoch milliseconds, 0 for never. [failures] counts the failed checks since the last one that worked. */
+    fun delayMs(now: Long, lastSuccess: Long, lastAttempt: Long, failures: Int): Long {
+        val due = when {
+            failures <= 0 -> lastSuccess + DAY_MS
+            failures == 1 -> lastAttempt + HOUR_MS
+            else -> lastAttempt + DAY_MS
+        }
+        // A clock set back can't push the next check more than a day away.
+        return (due - now).coerceIn(FIRST_DELAY_MS, DAY_MS)
     }
 }

@@ -87,6 +87,10 @@ class ComputerHub(
     /** How often each connection gets a ping, well inside the other side's 75-second read timeout. */
     private val pingIntervalMs: Long = PING_INTERVAL_MS,
     private val pairingGuard: PairingGuard = PairingGuard(),
+    /** A device that connects must send hello this soon. */
+    private val helloTimeoutMs: Long = ConnectionLimiter.HELLO_TIMEOUT_MS,
+    /** An unpaired device with no pairing going on is hung up on after this long; it can dial again. */
+    private val unpairedIdleMs: Long = PhoneLinkProtocol.PAIRING_TIMEOUT_MS,
 ) {
     /**
      * [platform] is stored at pairing and decides what the device may do from then on, whatever its hello says.
@@ -136,7 +140,11 @@ class ComputerHub(
     /** Phones this computer is ringing now. */
     val ringing: StateFlow<Set<String>> = _ringing.asStateFlow()
 
-    val fileTransfers = FileTransfers(scope, fileSinks, File(directory, "transfers.json"), sendFrame = ::sendFrame) { id, envelope -> send(id, envelope) }
+    val fileTransfers = FileTransfers(
+        scope, fileSinks, File(directory, "transfers.json"),
+        linkFor = ::pairedConnection,
+        post = { id, envelope -> pairedConnection(id)?.post(envelope) ?: false },
+    ) { id, envelope -> send(id, envelope) }
 
     /** The port actually listened on, which differs from [port] when that was 0. */
     @Volatile var boundPort: Int = 0
@@ -153,17 +161,14 @@ class ComputerHub(
         }
         server = socket
         boundPort = socket.localPort
-        scope.launch(Dispatchers.IO) {
-            while (!socket.isClosed) {
-                val raw = runCatching { socket.accept() }.getOrNull() ?: break
-                launch(Dispatchers.IO) {
-                    val connection = runCatching { PeerConnection.accept(raw, sslContext) }
-                        .onFailure { CoreLog.w(TAG, "A phone failed to connect", it) }
-                        .getOrNull() ?: return@launch
-                    serve(connection)
-                }
-            }
-        }
+        // Each connection reads on its own thread; strangers are capped and must pair or go.
+        InboundServer(
+            socket, sslContext, scope, "hub",
+            isPaired = { id -> synchronized(lock) { records.containsKey(id) } },
+            isPairing = { id -> _pairing.value?.phoneId == id },
+            helloTimeoutMs = helloTimeoutMs,
+            idleMs = unpairedIdleMs,
+        ) { connection, _ -> serve(connection) }.start()
         CoreLog.i(TAG, "Listening on $boundPort")
         startPinging()
     }
@@ -197,19 +202,26 @@ class ComputerHub(
         } finally {
             connection.close()
             val id = connection.peerId
-            fileTransfers.onDisconnected(id)
-            clipImages.entries.removeIf { it.value.peerId == id }
-            synchronized(lock) {
-                if (connections[id] === connection) {
-                    connections.remove(id)
-                    _notifications.update { it - id }
-                    _ringing.update { it - id }
-                    if (soundFrom == id) { soundFrom = null; events.phoneSoundEnded(id) }
-                    if (_pairing.value?.phoneId == id) clearPairing()
-                    publish()
-                }
+            // A connection that was replaced cleans up nothing: its replacement already did, and owns the rest.
+            val current = synchronized(lock) {
+                if (connections[id] !== connection) return@synchronized false
+                connections.remove(id)
+                _notifications.update { it - id }
+                _ringing.update { it - id }
+                if (soundFrom == id) { soundFrom = null; events.phoneSoundEnded(id) }
+                if (_pairing.value?.phoneId == id) clearPairing()
+                publish()
+                true
             }
+            if (current) dropTransfers(id)
         }
+    }
+
+    /** Ends everything that was moving over [id]'s connection, which is gone or replaced. */
+    private fun dropTransfers(id: String) {
+        fileTransfers.onDisconnected(id)
+        clipImages.entries.removeIf { it.value.peerId == id }
+        sentClipImages.entries.removeIf { it.value == id }
     }
 
     // Incoming
@@ -279,7 +291,8 @@ class ComputerHub(
             MessageType.INPUT -> envelope.input?.takeIf { events.canControl }?.let { events.input(it, id) }
             MessageType.MEDIA -> envelope.media?.let { events.media(it, id) }
             MessageType.AUDIO_STARTED -> {
-                soundFrom?.takeIf { it != id }?.let { other -> send(other, Envelope(MessageType.AUDIO_STOP)) }
+                // Queued: this is the reading thread, which must not wait on another phone's connection.
+                soundFrom?.takeIf { it != id }?.let { other -> pairedConnection(other)?.post(Envelope(MessageType.AUDIO_STOP)) }
                 soundFrom = id
                 events.phoneSound(id, envelope.audioRate ?: 48_000, envelope.audioChannels ?: 2)
             }
@@ -292,26 +305,34 @@ class ComputerHub(
         }
     }
 
-    private fun hello(connection: PeerConnection, hello: Hello): Unit = locked {
+    private fun hello(connection: PeerConnection, hello: Hello) {
+        val replaced = helloLocked(connection, hello)
+        // The old connection's transfers can't go on over the new one.
+        if (replaced != null) dropTransfers(connection.peerId)
+    }
+
+    /** Returns the connection this one replaced, if any. */
+    private fun helloLocked(connection: PeerConnection, hello: Hello): PeerConnection? = locked {
         val id = connection.peerId
         // One hello per connection. A second one could claim to be a different kind of device.
-        if (connection.hello != null) return@locked
+        if (connection.hello != null) return@locked null
         val record = records[id]
         // Once paired, whether it's a phone or a computer comes from pairing. A device that now claims otherwise is hung up on.
         val stored = record?.platform
         if (stored != null && (stored in PhoneLinkProtocol.COMPUTERS) != (hello.platform in PhoneLinkProtocol.COMPUTERS)) {
             CoreLog.w(TAG, "HELLO_CLASS_CHANGED $id was $stored, says ${hello.platform}")
             close(connection)
-            return@locked
+            return@locked null
         }
         connection.hello = hello
         // Other computers only connect while that's turned on here, as with Other Macs on a Mac.
         if ((stored ?: hello.platform) in PhoneLinkProtocol.COMPUTERS && !computersOn) {
             close(connection)
-            return@locked
+            return@locked null
         }
         // The newest connection from a phone replaces the old one, as on the Mac.
-        connections.put(id, connection)?.takeIf { it !== connection }?.let { close(it) }
+        val replaced = connections.put(id, connection)?.takeIf { it !== connection }
+        replaced?.let { close(it) }
         if (record != null && !hello.paired) removeRecord(id)
         if (record != null && hello.paired) {
             records[id] = record.copy(name = hello.name, model = hello.model, platform = stored ?: hello.platform)
@@ -321,6 +342,7 @@ class ComputerHub(
         if (connection.inbound) send(connection, Envelope(MessageType.HELLO, hello = localHello(records.containsKey(id))))
         if (records.containsKey(id)) send(connection, Envelope(MessageType.INFO, info = localInfo()))
         publish()
+        replaced
     }
 
     /** Runs [block] under the lock and sends what it queued once the lock is released. */
@@ -371,7 +393,7 @@ class ComputerHub(
                 if (file.kind != CLIPBOARD_KIND) return false
                 val size = file.size ?: return true
                 if (size !in 0..MAX_CLIP_IMAGE_BYTES) {
-                    send(id, Envelope(MessageType.FILE_RESULT, file = FileMessage(file.id, ok = false, error = "The picture is too big")))
+                    post(id, Envelope(MessageType.FILE_RESULT, file = FileMessage(file.id, ok = false, error = "The picture is too big")))
                     return true
                 }
                 // An ID another computer is using stays theirs.
@@ -393,7 +415,7 @@ class ComputerHub(
                 val hash = item.digest.digest().joinToString("") { "%02x".format(it) }
                 val ok = item.bytes.size().toLong() == item.size && hash == file.sha256
                 if (ok) runCatching { events.clipboardImage(item.bytes.toByteArray(), id) }
-                send(id, Envelope(MessageType.FILE_RESULT, file = FileMessage(file.id, ok = ok, error = if (ok) null else "The picture was damaged")))
+                post(id, Envelope(MessageType.FILE_RESULT, file = FileMessage(file.id, ok = ok, error = if (ok) null else "The picture was damaged")))
             }
             MessageType.FILE_CANCEL -> {
                 val item = clipImages[file.id]?.takeIf { it.peerId == id } ?: return false
@@ -412,22 +434,27 @@ class ComputerHub(
         for ((id, connection) in targets) scope.launch(Dispatchers.IO) {
             val transfer = java.util.UUID.randomUUID().toString()
             sentClipImages[transfer] = id
-            if (!connection.send(Envelope(MessageType.FILE_OFFER, file = FileMessage(transfer, name = "Clipboard.png", size = png.size.toLong(), kind = CLIPBOARD_KIND)))) return@launch
-            // Straight into frames, behind live messages, without copying the picture or making Strings.
-            val prefix = FileChunkFrame.prefix(transfer)
-            val chunk = ByteArray(CHUNK_BYTES)
-            var offset = 0
-            while (offset < png.size) {
-                val count = minOf(CHUNK_BYTES, png.size - offset)
-                png.copyInto(chunk, 0, offset, offset + count)
-                val frame = ByteArray(FileChunkFrame.capacity(prefix, count))
-                val length = FileChunkFrame.build(frame, prefix, chunk, count)
-                if (!connection.sendFrame(OutFrame(frame, length))) return@launch
-                offset += count
-            }
-            connection.send(Envelope(MessageType.FILE_DONE, file = FileMessage(transfer, sha256 = hash)))
-            CoreLog.i(TAG, "CLIPBOARD_IMAGE_SENT ${png.size} to $id")
+            // Forgotten when it can't be sent; otherwise the answer (or the disconnect) removes it.
+            if (!sendClipImage(connection, transfer, png, hash)) sentClipImages.remove(transfer)
+            else CoreLog.i(TAG, "CLIPBOARD_IMAGE_SENT ${png.size} to $id")
         }
+    }
+
+    private fun sendClipImage(connection: PeerConnection, transfer: String, png: ByteArray, hash: String): Boolean {
+        if (!connection.send(Envelope(MessageType.FILE_OFFER, file = FileMessage(transfer, name = "Clipboard.png", size = png.size.toLong(), kind = CLIPBOARD_KIND)))) return false
+        // Straight into frames, behind live messages, without copying the picture or making Strings.
+        val prefix = FileChunkFrame.prefix(transfer)
+        val chunk = ByteArray(CHUNK_BYTES)
+        var offset = 0
+        while (offset < png.size) {
+            val count = minOf(CHUNK_BYTES, png.size - offset)
+            png.copyInto(chunk, 0, offset, offset + count)
+            val frame = ByteArray(FileChunkFrame.capacity(prefix, count))
+            val length = FileChunkFrame.build(frame, prefix, chunk, count)
+            if (!connection.sendFrame(OutFrame(frame, length))) return false
+            offset += count
+        }
+        return connection.send(Envelope(MessageType.FILE_DONE, file = FileMessage(transfer, sha256 = hash)))
     }
 
     /** Turns syncing with other computers on or off. Off closes their connections. */
@@ -483,7 +510,7 @@ class ComputerHub(
                 }
                 connection.send(Envelope(MessageType.HELLO, hello = localHello(synchronized(lock) { records.containsKey(id) })))
                 CoreLog.i(TAG, "Connected to computer $host:$port")
-                synchronized(lock) { dialing -= key }
+                // Still "dialing" until this connection ends, so no second dial races its hello.
                 serve(connection)
             } catch (error: Exception) {
                 CoreLog.w(TAG, "Can't reach computer $host:$port", error)
@@ -655,11 +682,8 @@ class ComputerHub(
     /** Waits like a direct write (see [PeerConnection.send]). */
     private fun send(id: String, envelope: Envelope): Boolean = pairedConnection(id)?.send(envelope) ?: false
 
-    private fun sendFrame(id: String, frame: OutFrame): Boolean {
-        val connection = pairedConnection(id)
-        if (connection == null) frame.release?.invoke()
-        return connection?.sendFrame(frame) ?: false
-    }
+    /** Queues without waiting, for the reading threads. */
+    private fun post(id: String, envelope: Envelope): Boolean = pairedConnection(id)?.post(envelope) ?: false
 
     // Records
 

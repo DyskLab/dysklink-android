@@ -15,17 +15,23 @@ class IntentTokens(
 ) {
     private data class Entry(val purpose: String, val peerId: String, val expires: Long)
 
-    private val issued = HashMap<String, Entry>()
+    /** In the order issued, so the oldest goes first when there are too many. */
+    private val issued = LinkedHashMap<String, Entry>()
 
+    /** A new token for this purpose and peer replaces the older one: only the newest request's tap works. */
     @Synchronized
     fun issue(purpose: String, peerId: String): String {
         val now = clock()
-        issued.entries.removeAll { it.value.expires <= now }
+        issued.entries.removeAll { it.value.expires <= now || (it.value.purpose == purpose && it.value.peerId == peerId) }
+        while (issued.size >= MAX_TOKENS) issued.remove(issued.keys.first())
         val bytes = ByteArray(16).also(random::nextBytes)
         val token = bytes.joinToString("") { "%02x".format(it) }
         issued[token] = Entry(purpose, peerId, now + lifetimeMillis)
         return token
     }
+
+    @get:Synchronized
+    val size: Int get() = issued.size
 
     /** True only once, for a live token issued for this purpose and peer. A wrong guess doesn't burn a real token. */
     @Synchronized
@@ -40,6 +46,10 @@ class IntentTokens(
     companion object {
         const val CAMERA = "camera"
         const val SCREEN = "screen"
+        /** Far more than the requests any number of Macs can have open at once. */
+        const val MAX_TOKENS = 32
+        /** Shown when a tap's token is missing, used, replaced, or expired. */
+        const val EXPIRED_MESSAGE = "Request expired. Ask again on the Mac."
         val shared = IntentTokens()
     }
 }

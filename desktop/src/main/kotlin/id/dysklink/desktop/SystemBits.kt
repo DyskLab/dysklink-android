@@ -17,8 +17,11 @@ import kotlin.math.sin
 
 /** The system clipboard. Text set from a phone isn't sent back to it. */
 class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (ByteArray) -> Unit = {}) {
-    @Volatile private var last: String? = read()
-    @Volatile private var lastImage: String? = null
+    /** Guarded by [changes]: what this side last saw or set, so it isn't sent back. */
+    private var last: String? = read()
+    private var lastImage: String? = null
+    private var lastQuick: String? = null
+    private val changes = ClipGeneration()
     @Volatile var enabled = true
     private var watcher: Thread? = null
 
@@ -33,7 +36,12 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
      */
     fun setImage(png: ByteArray): Boolean = runCatching {
         val image = javax.imageio.ImageIO.read(png.inputStream()) ?: error("Not a picture")
-        lastImage = fingerprint(image)
+        val print = fingerprint(image)
+        val quick = quickFingerprint(image)
+        changes.change {
+            lastImage = print
+            lastQuick = quick
+        }
         Toolkit.getDefaultToolkit().systemClipboard.setContents(ImageSelection(image), null)
     }.isSuccess
 
@@ -47,7 +55,7 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
     }.getOrNull()
 
     fun set(text: String): Boolean = runCatching {
-        last = text
+        changes.change { last = text }
         Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
     }.isSuccess
 
@@ -57,22 +65,29 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
             while (!Thread.currentThread().isInterrupted) {
                 runCatching { Thread.sleep(700) }.onFailure { return@thread }
                 if (!enabled) continue
+                // Anything set here while reading makes the read stale: it's dropped, and the next look sees the new value.
+                val seen = changes.current()
                 val now = read()
                 if (now == null) {
-                    // Pictures are only checked while there's no text, and only encoded and sent when their pixels change.
+                    // Pictures are only checked while there's no text. A cheap look at a sample of pixels comes first;
+                    // only when that changed is every pixel hashed, and only new pixels are encoded and sent.
                     val image = readImage() ?: continue
+                    val quick = quickFingerprint(image)
+                    val unchanged = changes.ifUnchanged(seen) { quick == lastQuick } ?: continue
+                    if (unchanged) continue
                     val print = fingerprint(image)
-                    if (print != lastImage) {
-                        lastImage = print
+                    val isNew = changes.ifUnchanged(seen) {
+                        lastQuick = quick
+                        (print != lastImage).also { if (it) lastImage = print }
+                    } ?: continue
+                    if (isNew) {
                         runCatching { java.io.ByteArrayOutputStream().also { javax.imageio.ImageIO.write(image, "png", it) }.toByteArray() }
                             .getOrNull()?.let(onImage)
                     }
                     continue
                 }
-                if (now != last) {
-                    last = now
-                    if (now.isNotBlank()) onCopied(now)
-                }
+                val isNew = changes.ifUnchanged(seen) { (now != last).also { if (it) last = now } } ?: continue
+                if (isNew && now.isNotBlank()) onCopied(now)
             }
         }
     }
@@ -95,6 +110,23 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
             }
             return "${width}x$height:" + digest.digest().joinToString("") { "%02x".format(it) }
         }
+
+        const val QUICK_SAMPLES = 1_000
+
+        /** The size and about a thousand pixels spread over the picture: cheap enough to take every time it's checked. */
+        fun quickFingerprint(image: BufferedImage): String {
+            val width = image.width
+            val height = image.height
+            val total = width.toLong() * height
+            var hash = -0x340d631b7bdddcdbL // FNV-1a offset basis
+            val count = minOf(total, QUICK_SAMPLES.toLong())
+            for (i in 0 until count) {
+                val at = i * total / count
+                val pixel = image.getRGB((at % width).toInt(), (at / width).toInt())
+                hash = (hash xor pixel.toLong()) * 0x100000001b3L
+            }
+            return "${width}x$height:" + java.lang.Long.toHexString(hash)
+        }
     }
 
     private class ImageSelection(private val image: java.awt.Image) : java.awt.datatransfer.Transferable {
@@ -103,6 +135,28 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
         override fun getTransferData(flavor: DataFlavor): Any =
             if (flavor == DataFlavor.imageFlavor) image else throw java.awt.datatransfer.UnsupportedFlavorException(flavor)
     }
+}
+
+/**
+ * Counts what this side sets on the clipboard, so the watcher can tell whether a read overlapped a change.
+ * The watcher takes [current] before reading and applies what it read only through [ifUnchanged].
+ */
+class ClipGeneration {
+    private var value = 0L
+
+    @Synchronized
+    fun current(): Long = value
+
+    /** Records a change made here, with [block] updating what the watcher compares against. */
+    @Synchronized
+    fun change(block: () -> Unit) {
+        value++
+        block()
+    }
+
+    /** Runs [block] if nothing changed since [seen]; null when something did, and what was read is stale. */
+    @Synchronized
+    fun <T> ifUnchanged(seen: Long, block: () -> T): T? = if (value == seen) block() else null
 }
 
 /** Writes each file to a hidden temporary file first, and gives it a free name only when it's complete. */

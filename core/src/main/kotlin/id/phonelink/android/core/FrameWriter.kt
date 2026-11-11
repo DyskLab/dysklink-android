@@ -118,17 +118,19 @@ internal class FrameWriter(output: OutputStream, name: String, private val close
     }
 
     /**
-     * Stops taking messages. Live messages already queued, such as a `pair.reject` before hanging up, still go out
-     * within a moment; queued file data is dropped. With nothing queued the socket closes right away.
+     * Stops taking messages. Live messages already queued, such as a `pair.reject` before hanging up, still go out,
+     * including one being written right now; queued file data is dropped. The writer closes the socket once it has
+     * flushed them, which is at once when nothing is queued. Only a peer that stopped reading makes it wait for
+     * the grace timer, which then closes the socket anyway.
      */
     fun close() {
-        val now = lock.withLock {
+        lock.withLock {
             if (closing) return
             closing = true
             changed.signalAll()
-            live.isEmpty()
+            if (closed) return
         }
-        if (now) closeSocket() else graceTimer.schedule({ closeSocket() }, CLOSE_GRACE_MS, TimeUnit.MILLISECONDS)
+        graceTimer.schedule({ closeSocket() }, CLOSE_GRACE_MS, TimeUnit.MILLISECONDS)
     }
 
     /** The next frame to write, live first, or null once closing with no live messages left. */

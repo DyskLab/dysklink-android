@@ -121,6 +121,17 @@ object AudioShare {
         }
     }
 
+    /** Ends sound with any device that isn't in [connected] any more: the player here, and the sound sent there. */
+    @Synchronized
+    fun keepOnly(context: Context, connected: Set<String>) {
+        _listening.value?.takeIf { it !in connected }?.let { endPlayer() }
+        val target = _sending.value
+        if (target != null && target !in connected) {
+            pump?.stop()
+            PhoneSoundService.stop(context)
+        }
+    }
+
     @Synchronized internal fun attach(sound: PlaybackPump, peerId: String) {
         pump?.takeIf { it !== sound }?.stop()
         pump = sound
@@ -213,6 +224,7 @@ class PlaybackPump(
 
     private fun pump(record: AudioRecord) {
         val chunk = ByteArray(AudioShare.CHUNK_BYTES)
+        var failures = 0
         while (running) {
             var filled = 0
             while (running && filled < chunk.size) {
@@ -231,7 +243,17 @@ class PlaybackPump(
                 }
                 filled += read
             }
-            if (filled == chunk.size) send(Envelope(MessageType.AUDIO_FRAME, audio = java.util.Base64.getEncoder().encodeToString(chunk)))
+            if (filled < chunk.size) continue
+            if (send(Envelope(MessageType.AUDIO_FRAME, audio = java.util.Base64.getEncoder().encodeToString(chunk)))) {
+                failures = 0
+            } else if (++failures >= MAX_SEND_FAILURES) {
+                // The Mac is gone: recording on for nobody only costs battery.
+                if (!running) return
+                val why = "The connection was lost"
+                stop(why)
+                onEnded?.invoke(why)
+                return
+            }
         }
     }
 
@@ -245,8 +267,12 @@ class PlaybackPump(
         AudioShare.detach(this)
     }
 
-    private fun send(envelope: Envelope) {
-        PhoneLinkService.connectionManager.value?.sendDirect(peerId, envelope)
+    private fun send(envelope: Envelope): Boolean =
+        PhoneLinkService.connectionManager.value?.sendDirect(peerId, envelope) ?: false
+
+    private companion object {
+        /** About two seconds of sound that couldn't be sent. */
+        const val MAX_SEND_FAILURES = 50
     }
 }
 
@@ -334,7 +360,7 @@ class PhoneSoundService : Service() {
         private const val EXTRA_DATA = "data"
         private const val EXTRA_PEER = "peer"
         private const val CHANNEL = "sound"
-        private const val NOTIFICATION_ID = 17
+        private const val NOTIFICATION_ID = NotificationIds.PHONE_SOUND
 
         fun start(context: Context, code: Int, data: Intent, peerId: String) {
             ContextCompat.startForegroundService(

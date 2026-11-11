@@ -30,7 +30,7 @@ data class ChargeSession(val start: Long, val startLevel: Int, val end: Long? = 
  */
 object ChargeReminder {
     private const val CHANNEL_ID = "charge_limit"
-    private const val NOTIFICATION_ID = 8
+    private const val NOTIFICATION_ID = NotificationIds.CHARGE_REMINDER
     private const val MAX_SESSIONS = 20
     val limitChoices = listOf(70, 75, 80, 85, 90, 95)
 

@@ -121,4 +121,35 @@ class DesktopTest {
         assertTrue(Clipboard.fingerprint(copy) != Clipboard.fingerprint(original))
         assertTrue(Clipboard.fingerprint(original).startsWith("40x30:"))
     }
+
+    @Test
+    fun aReadThatOverlapsAChangeIsDropped() {
+        val changes = ClipGeneration()
+        var last = "old"
+        val seen = changes.current()
+        // The phone's text lands while the watcher is still reading the old clipboard.
+        changes.change { last = "from phone" }
+        assertEquals(null, changes.ifUnchanged(seen) { last = "old"; true })
+        assertEquals("from phone", last)
+        // The next look starts after the change and goes through.
+        val next = changes.current()
+        assertEquals(true, changes.ifUnchanged(next) { true })
+    }
+
+    @Test
+    fun quickFingerprintSeesSizeAndSampledPixels() {
+        val image = java.awt.image.BufferedImage(400, 300, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val before = Clipboard.quickFingerprint(image)
+        assertEquals(before, Clipboard.quickFingerprint(image))
+        // The first pixel is always sampled.
+        image.setRGB(0, 0, 0xFF336699.toInt())
+        kotlin.test.assertNotEquals(before, Clipboard.quickFingerprint(image))
+        val bigger = java.awt.image.BufferedImage(401, 300, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        assertTrue(Clipboard.quickFingerprint(bigger).startsWith("401x300:"))
+        // A tiny picture has fewer pixels than samples and is still read fully.
+        val tiny = java.awt.image.BufferedImage(3, 2, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val tinyBefore = Clipboard.quickFingerprint(tiny)
+        tiny.setRGB(2, 1, -1)
+        kotlin.test.assertNotEquals(tinyBefore, Clipboard.quickFingerprint(tiny))
+    }
 }

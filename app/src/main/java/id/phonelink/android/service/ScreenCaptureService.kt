@@ -49,8 +49,9 @@ class ScreenCaptureService : Service() {
     private val thread = HandlerThread("dysk-screen").apply { start() }
     private val handler = Handler(thread.looper)
 
-    private var peerId: String? = null
-    private var projection: MediaProjection? = null
+    // Set on the recording thread and read on the main thread, which decides whether another request may start.
+    @Volatile private var peerId: String? = null
+    @Volatile private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var encoder: MediaCodec? = null
     private var surface: Surface? = null
@@ -282,7 +283,7 @@ class ScreenCaptureService : Service() {
         private const val EXTRA_CODE = "code"
         private const val EXTRA_DATA = "data"
         private const val EXTRA_PEER = "peer"
-        private const val NOTIFICATION_ID = 4
+        private const val NOTIFICATION_ID = NotificationIds.SCREEN_SHARING
         private const val MAX_LONG_SIDE = 1280
         private const val FRAME_RATE = 60
         /** Key frames are large, so frequent ones stutter. A dropped frame requests one when needed. */

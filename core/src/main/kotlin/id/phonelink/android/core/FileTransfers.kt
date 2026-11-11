@@ -63,6 +63,19 @@ object FileNames {
     }
 }
 
+/**
+ * One connection to a peer, as an upload sees it. Everything of an upload goes over the connection it was offered on,
+ * so an upload never carries on over a newer connection that has never heard of it.
+ */
+interface TransferLink {
+    /** Waits like [PeerConnection.send]. */
+    fun send(envelope: Envelope): Boolean
+    /** A pre-encoded `file.*` frame. Must run [OutFrame.release] once, sent or not. */
+    fun sendFrame(frame: OutFrame): Boolean
+    /** False once the connection is closing or closed. */
+    val isOpen: Boolean
+}
+
 class FileTransfers(
     private val scope: CoroutineScope,
     private val sinks: FileSinkFactory,
@@ -71,8 +84,13 @@ class FileTransfers(
     /**
      * Sends a pre-encoded `file.chunk` frame behind live messages, waiting while the connection's file window is full.
      * Must run [OutFrame.release] once, sent or not. Null encodes chunks as messages through [send] instead.
+     * Not used when [linkFor] is given.
      */
     private val sendFrame: ((peerId: String, frame: OutFrame) -> Boolean)? = null,
+    /** The peer's current connection, which an upload keeps to the end. Null sends by peer ID through [send]. */
+    private val linkFor: ((peerId: String) -> TransferLink?)? = null,
+    /** Queues a reply without waiting, for the reading thread. Null uses [send]. */
+    private val post: ((peerId: String, envelope: Envelope) -> Boolean)? = null,
     /** Returns false if the message can't be sent. */
     private val send: (peerId: String, envelope: Envelope) -> Boolean,
 ) {
@@ -81,8 +99,14 @@ class FileTransfers(
         var received = 0L
     }
 
+    /** An upload whose coroutine is still running. [stopReason] set means it must stop sending. */
+    private class Upload(val peerId: String) {
+        @Volatile var stopReason: String? = null
+    }
+
     private val incoming = ConcurrentHashMap<String, Incoming>()
-    private val cancelled = ConcurrentHashMap.newKeySet<String>()
+    /** Uploads still running, by transfer ID. Each removes itself when it ends, so this never outgrows them. */
+    private val outgoing = ConcurrentHashMap<String, Upload>()
 
     /** A large selection from the Mac waits its turn instead of all sending at once. */
     private val uploads = Semaphore(MAX_UPLOADS)
@@ -93,7 +117,8 @@ class FileTransfers(
     private fun loadHistory(): List<Transfer> {
         val file = historyFile ?: return emptyList()
         return runCatching { protocolJson.decodeFromString(ListSerializer(Transfer.serializer()), file.readText()) }
-            .getOrNull().orEmpty().filter { it.status != TransferStatus.Active }.take(MAX_HISTORY)
+            .getOrNull().orEmpty().filter { it.status != TransferStatus.Active }
+            .distinctBy { Triple(it.peerId, it.id, it.time) }.take(MAX_HISTORY)
     }
 
     private fun saveHistory() {
@@ -115,50 +140,84 @@ class FileTransfers(
         val id = UUID.randomUUID().toString()
         val clean = FileNames.sanitize(name)
         if (onFinished != null) finishedCallbacks[id] = onFinished
+        val upload = Upload(peerId)
+        outgoing[id] = upload
         add(Transfer(id, peerId, clean, size, 0, outgoing = true, status = TransferStatus.Active))
         scope.launch(Dispatchers.IO) {
-            val failure = runCatching { uploads.withPermit { upload(id, peerId, clean, size, kind, open) } }
-                .fold(onSuccess = { it }, onFailure = { it.message ?: "Failed to read the file" })
-            if (failure != null) {
-                send(peerId, Envelope(MessageType.FILE_CANCEL, file = FileMessage(id)))
-                finish(id, TransferStatus.Failed, failure)
+            try {
+                val failure = runCatching { uploads.withPermit { upload(id, upload, clean, size, kind, open) } }
+                    .fold(onSuccess = { it }, onFailure = { it.message ?: "Failed to read the file" })
+                if (failure != null) finish(id, TransferStatus.Failed, failure)
+            } finally {
+                outgoing.remove(id)
             }
         }
     }
 
-    /** Returns a failure message, or null if all data was sent. */
-    private fun upload(id: String, peerId: String, name: String, size: Long, kind: String?, open: () -> InputStream): String? {
+    /** The link for [peerId]: its current connection, or sending by peer ID when connections aren't tracked here. */
+    private fun currentLink(peerId: String): TransferLink? {
+        linkFor?.let { return it(peerId) }
+        return object : TransferLink {
+            override fun send(envelope: Envelope) = this@FileTransfers.send(peerId, envelope)
+            override fun sendFrame(frame: OutFrame): Boolean {
+                val sender = this@FileTransfers.sendFrame
+                if (sender == null) frame.release?.invoke()
+                return sender?.invoke(peerId, frame) ?: false
+            }
+            override val isOpen get() = true
+        }
+    }
+
+    private val usesFrames: Boolean get() = linkFor != null || sendFrame != null
+
+    /** Returns a failure message, or null if all data was sent. Tells the receiver on its own connection when it fails. */
+    private fun upload(id: String, state: Upload, name: String, size: Long, kind: String?, open: () -> InputStream): String? {
+        // Failed while it waited its turn, such as when the connection dropped: it never starts.
+        state.stopReason?.let { return it }
+        val link = currentLink(state.peerId) ?: return "Connection lost"
+        val failure = try {
+            sendOver(link, id, state, name, size, kind, open)
+        } catch (error: Exception) {
+            error.message ?: "Failed to read the file"
+        }
+        if (failure != null && link.isOpen) link.send(Envelope(MessageType.FILE_CANCEL, file = FileMessage(id)))
+        return failure
+    }
+
+    private fun sendOver(link: TransferLink, id: String, state: Upload, name: String, size: Long, kind: String?, open: () -> InputStream): String? {
+        fun stopped(): String? = state.stopReason ?: if (!link.isOpen) "Connection lost" else null
         val offer = FileMessage(id, name = name, size = size, kind = kind)
-        if (!send(peerId, Envelope(MessageType.FILE_OFFER, file = offer))) return "Connection lost"
+        if (!link.send(Envelope(MessageType.FILE_OFFER, file = offer))) return stopped() ?: "Connection lost"
         val digest = MessageDigest.getInstance("SHA-256")
         var total = 0L
-        val frames = sendFrame?.let { ChunkFrames(id, it) }
+        val frames = if (usesFrames) ChunkFrames(id, link) else null
         // Without a frame sender, one reused buffer holds the Base64 text.
         val text = if (frames == null) ByteArray(Base64Bytes.encodedLength(CHUNK_BYTES)) else null
         open().use { input ->
             val buffer = ByteArray(CHUNK_BYTES)
             while (scope.isActive) {
-                if (id in cancelled) return "Canceled by the receiver"
+                stopped()?.let { return it }
                 val count = input.readUpTo(buffer)
                 if (count <= 0) break
                 digest.update(buffer, 0, count)
                 total += count
                 val sent = if (frames != null) {
-                    val frame = frames.take { scope.isActive && id !in cancelled } ?: continue
-                    frames.send(peerId, frame, buffer, count)
+                    val frame = frames.take { scope.isActive && stopped() == null } ?: continue
+                    frames.send(frame, buffer, count)
                 } else {
                     val length = Base64Bytes.encode(buffer, 0, count, text!!, 0)
                     val data = String(text, 0, length, Charsets.ISO_8859_1)
-                    send(peerId, Envelope(MessageType.FILE_CHUNK, file = FileMessage(id, data = data)))
+                    link.send(Envelope(MessageType.FILE_CHUNK, file = FileMessage(id, data = data)))
                 }
-                if (!sent) return "Connection lost"
+                if (!sent) return stopped() ?: "Connection lost"
                 progress(id, total)
             }
         }
+        stopped()?.let { return it }
         if (total != size) return "File size changed while sending"
         val hash = digest.digest().joinToString("") { "%02x".format(it) }
         val done = Envelope(MessageType.FILE_DONE, file = FileMessage(id, sha256 = hash))
-        return if (send(peerId, done)) null else "Connection lost"
+        return if (link.send(done)) null else stopped() ?: "Connection lost"
     }
 
     /** Fills [buffer] as far as the stream allows, so chunks are full size. Returns 0 at the end. */
@@ -176,7 +235,7 @@ class FileTransfers(
      * A few chunk buffers for one upload, reused as the connection writes them. Each is the whole `file.chunk` frame,
      * so a chunk costs no new arrays, Strings, or Envelopes.
      */
-    private class ChunkFrames(id: String, private val sendFrame: (String, OutFrame) -> Boolean) {
+    private class ChunkFrames(id: String, private val link: TransferLink) {
         private val prefix = FileChunkFrame.prefix(id)
         private val capacity = FileChunkFrame.capacity(prefix, CHUNK_BYTES)
         private val free = java.util.concurrent.ArrayBlockingQueue<ByteArray>(FRAMES_PER_UPLOAD)
@@ -195,9 +254,9 @@ class FileTransfers(
             return null
         }
 
-        fun send(peerId: String, frame: ByteArray, data: ByteArray, count: Int): Boolean {
+        fun send(frame: ByteArray, data: ByteArray, count: Int): Boolean {
             val length = FileChunkFrame.build(frame, prefix, data, count)
-            return sendFrame(peerId, OutFrame(frame, length) { free.offer(frame) })
+            return link.sendFrame(OutFrame(frame, length) { free.offer(frame) })
         }
 
         private companion object {
@@ -213,7 +272,7 @@ class FileTransfers(
             MessageType.FILE_CHUNK -> onChunk(peerId, file)
             MessageType.FILE_DONE -> onDone(peerId, file)
             MessageType.FILE_CANCEL -> onCancel(peerId, file)
-            MessageType.FILE_RESULT -> onResult(file)
+            MessageType.FILE_RESULT -> onResult(peerId, file)
         }
     }
 
@@ -223,9 +282,15 @@ class FileTransfers(
             item.sink.abort()
             finish(id, TransferStatus.Failed, "Connection lost")
         }
+        // Uploads still sending, or waiting their turn, stop: none of them carries on over a newer connection.
+        outgoing.values.filter { it.peerId == peerId }.forEach { it.stopReason = "Connection lost" }
         _transfers.value.filter { it.peerId == peerId && it.outgoing && it.status == TransferStatus.Active }
             .forEach { finish(it.id, TransferStatus.Failed, "Connection lost") }
     }
+
+    /** An active upload of this ID to this peer; another device can't touch it. */
+    private fun isOutgoingTo(peerId: String, id: String) =
+        _transfers.value.any { it.id == id && it.peerId == peerId && it.outgoing && it.status == TransferStatus.Active }
 
     private fun onOffer(peerId: String, file: FileMessage) {
         val size = file.size ?: return
@@ -269,18 +334,20 @@ class FileTransfers(
     }
 
     private fun onCancel(peerId: String, file: FileMessage) {
-        cancelled.add(file.id)
+        outgoing[file.id]?.takeIf { it.peerId == peerId }?.stopReason = "Canceled by the receiver"
+        if (isOutgoingTo(peerId, file.id)) return finish(file.id, TransferStatus.Failed, "Canceled by the receiver")
         val item = incoming[file.id]?.takeIf { it.peerId == peerId } ?: return
         incoming.remove(file.id)
         item.sink.abort()
         finish(file.id, TransferStatus.Failed, "Canceled by the sender")
     }
 
-    private fun onResult(file: FileMessage) {
+    private fun onResult(peerId: String, file: FileMessage) {
+        if (!isOutgoingTo(peerId, file.id)) return
         if (file.ok == true) {
             finish(file.id, TransferStatus.Done, "Sent")
         } else {
-            cancelled.add(file.id)
+            outgoing[file.id]?.stopReason = "Rejected by the receiver"
             finish(file.id, TransferStatus.Failed, file.error ?: "Rejected by the receiver")
         }
     }
@@ -292,13 +359,18 @@ class FileTransfers(
         finish(id, TransferStatus.Failed, message)
     }
 
+    /** Queued, not waited on: this runs on the connection's reading thread. */
     private fun reply(peerId: String, id: String, ok: Boolean, error: String?) {
-        send(peerId, Envelope(MessageType.FILE_RESULT, file = FileMessage(id, ok = ok, error = error)))
+        (post ?: send)(peerId, Envelope(MessageType.FILE_RESULT, file = FileMessage(id, ok = ok, error = error)))
     }
 
     private fun add(transfer: Transfer) {
         val stamped = if (transfer.time > 0) transfer else transfer.copy(time = System.currentTimeMillis())
-        _transfers.update { (listOf(stamped) + it).take(MAX_HISTORY) }
+        // A finished entry with the same ID from the same device is replaced, so the list never holds it twice.
+        _transfers.update { list ->
+            (listOf(stamped) + list.filterNot { it.id == stamped.id && it.peerId == stamped.peerId && it.status != TransferStatus.Active })
+                .take(MAX_HISTORY)
+        }
     }
 
     /** Removes one finished transfer from the list. The file itself stays where it is. */
