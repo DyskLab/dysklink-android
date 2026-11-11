@@ -148,6 +148,10 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 If your default Java isn't 17, set `JAVA_HOME` to JDK 17 first.
 
+Official releases from 1.0 on are signed with the DyskLink release key by `scripts/release-apk.sh`. The key and its
+password stay on the maintainer's Mac (the password in the Keychain), never in this repository. A debug build you make
+yourself is signed with your own debug key, so it can't install over a release; uninstall first.
+
 Then [build the Mac app](https://github.com/DyskLab/dysklink-mac#build-and-run) and start it.
 
 ## How connecting works
@@ -173,8 +177,9 @@ Both apps speak the protocol in
 change to it needs a matching change in the Mac app.
 
 ## Current security limits
-Private keys are stored as files with restricted permissions in the app data folder, not yet in Android Keystore. The
-APK is a debug build, so its app data can be read through `adb run-as`.
+The private key used for pairing is kept in Android Keystore, where the app can use it but can't read it out.
+Installs from 0.2.0 or earlier move their key there on the first start, keeping their pairings.
+Releases up to 0.2.0 are debug builds, so their app data can be read through `adb run-as`; release builds can't be.
 
 ## Internal names
 The app's display name and application ID (`id.dysklink.android`, since 0.2.0) use DyskLink. The old name PhoneLink

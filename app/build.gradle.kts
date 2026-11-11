@@ -12,8 +12,32 @@ android {
         applicationId = "id.dysklink.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "1.0.0"
+    }
+
+    // The release key stays outside the repository. scripts/release-apk.sh passes its path and password,
+    // taken from the macOS Keychain, so they're never written to a file here.
+    val releaseStore = System.getenv("DYSKLINK_KEYSTORE")?.let(::file)?.takeIf { it.exists() }
+    signingConfigs {
+        if (releaseStore != null) {
+            create("release") {
+                storeFile = releaseStore
+                storePassword = System.getenv("DYSKLINK_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("DYSKLINK_KEY_ALIAS") ?: "dysklink"
+                keyPassword = System.getenv("DYSKLINK_KEYSTORE_PASSWORD")
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // Without the key the release APK comes out unsigned, which Android refuses to install.
+            signingConfig = signingConfigs.findByName("release")
+            isMinifyEnabled = false
+        }
     }
 
     buildFeatures {

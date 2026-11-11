@@ -11,3 +11,4 @@ local.properties
 *.keystore
 .claude/
 CLAUDE.md
+dist/

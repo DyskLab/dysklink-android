@@ -101,7 +101,9 @@ class ConnectionManager(
     phoneData: PhoneData,
 ) {
     private val lock = Any()
-    private val identity = LocalIdentity.loadOrCreate(directory)
+    private val identity = LocalIdentity.loadOrCreate(directory).also {
+        Log.i("PhoneLink", "IDENTITY keystore=${it.isHardwareBacked}")
+    }
     private val sslContext = identity.sslContext()
 
     private val targets = ConcurrentHashMap<String, Job>()
