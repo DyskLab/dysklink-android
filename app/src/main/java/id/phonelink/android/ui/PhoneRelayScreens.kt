@@ -75,81 +75,55 @@ class PhoneRelayLink(
     val stopHearing: (peerId: String, AudioKind) -> Unit,
 )
 
-/**
- * On another phone's page, what this phone does with it: its notifications here, hold to talk, and this phone's
- * sound there. Each shows only when that phone lists it; older ones get a note to update.
- */
+/** While that phone talks or plays its sound here: who, and Stop. Shown on its page. */
 @Composable
-fun PhoneRelayActions(
-    peer: Peer,
-    feed: MirrorFeed?,
-    link: PhoneRelayLink?,
-    onOpenNotifications: () -> Unit,
-    onStartSound: () -> Unit,
-) {
+fun IncomingAudioCard(peer: Peer, link: PhoneRelayLink?) {
+    val talking by PeerAudio.talking.collectAsStateWithLifecycle()
+    val hearing by PeerAudio.sound.collectAsStateWithLifecycle()
+    if (talking != peer.id && hearing != peer.id) return
+    Spacer(Modifier.height(12.dp))
+    GlassCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (talking == peer.id) "${peer.name} is talking" else "Playing sound from ${peer.name}",
+                color = Palette.Mint, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f),
+            )
+            SecondaryButton("Stop", tint = Palette.Coral) {
+                link?.stopHearing(peer.id, if (talking == peer.id) AudioKind.Talk else AudioKind.Sound)
+            }
+        }
+    }
+}
+
+/** This phone's sound, played on that phone. */
+@Composable
+fun PlaySoundCard(peer: Peer, onStartSound: () -> Unit) {
     val context = LocalContext.current
     val sending by AudioShare.sending.collectAsStateWithLifecycle()
     val soundProblem by AudioShare.problem.collectAsStateWithLifecycle()
-    val talking by PeerAudio.talking.collectAsStateWithLifecycle()
-    val hearing by PeerAudio.sound.collectAsStateWithLifecycle()
-
-    if (talking == peer.id || hearing == peer.id) {
-        Spacer(Modifier.height(10.dp))
-        GlassCard {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    if (talking == peer.id) "${peer.name} is talking" else "Playing sound from ${peer.name}",
-                    color = Palette.Mint, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f),
-                )
-                SecondaryButton("Stop", tint = Palette.Coral) {
-                    link?.stopHearing(peer.id, if (talking == peer.id) AudioKind.Talk else AudioKind.Sound)
-                }
-            }
-        }
-    }
-
-    if (peer.canNotify || peer.canPlaySound) {
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (peer.canNotify) {
-                val count = feed?.notifications?.size ?: 0
-                QuickAction(
-                    Icons.Rounded.Notifications, "Notifications", if (count == 0) "From ${peer.name}" else "$count from ${peer.name}",
-                    Palette.Violet, Modifier.weight(1f), onClick = onOpenNotifications,
-                )
-            }
-            if (peer.canPlaySound && AudioShare.canSend) {
-                val on = sending == peer.id
-                QuickAction(
-                    Icons.Rounded.Speaker, if (on) "Stop sound" else "Play sound there",
-                    if (on) "Playing on ${peer.name}" else "This phone's sound",
-                    if (on) Palette.Coral else Palette.Amber, Modifier.weight(1f), active = on,
-                ) { if (on) PhoneSoundService.stop(context) else onStartSound() }
-            }
+    val on = sending == peer.id
+    GlassCard {
+        Text(
+            if (on) "Playing on ${peer.name}" else "Play this phone's sound on ${peer.name}",
+            color = if (on) Palette.Mint else Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+        )
+        Text("Music and videos from here play on its speaker.", color = Palette.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+        Spacer(Modifier.height(12.dp))
+        if (on) {
+            SecondaryButton("Stop sound", Modifier.fillMaxWidth(), tint = Palette.Coral) { PhoneSoundService.stop(context) }
+        } else {
+            PrimaryButton("Play sound there", Modifier.fillMaxWidth(), onClick = onStartSound)
         }
         if (soundProblem != null && sending == null) {
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
             Text(soundProblem!!, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
         }
-    }
-
-    if (peer.canTalk) {
-        Spacer(Modifier.height(10.dp))
-        HoldToTalk(peer)
-    }
-
-    if (!(peer.canNotify && peer.canTalk && peer.canPlaySound)) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Update DyskLink on ${peer.name} for its notifications here, the walkie-talkie, and playing this phone's sound there.",
-            color = Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp,
-        )
     }
 }
 
 /** A big button: hold it and the microphone goes to the other phone, which plays it at once. */
 @Composable
-private fun HoldToTalk(peer: Peer) {
+internal fun HoldToTalk(peer: Peer, height: androidx.compose.ui.unit.Dp = 112.dp) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val to by Talk.to.collectAsStateWithLifecycle()
@@ -165,7 +139,7 @@ private fun HoldToTalk(peer: Peer) {
     Box(
         Modifier
             .fillMaxWidth()
-            .height(112.dp)
+            .height(height)
             .clip(shape)
             .background((if (active) Palette.Coral else Palette.Sky).copy(alpha = if (active) 0.3f else 0.12f))
             .border(1.dp, (if (active) Palette.Coral else Palette.Sky).copy(alpha = 0.6f), shape)
@@ -198,24 +172,16 @@ private fun HoldToTalk(peer: Peer) {
     }
 }
 
-/** The switches for voice and sound from that phone, under "What it can do here". */
+/** The switches for voice and sound from that phone, on its Permissions page. */
 @Composable
 fun PhoneVoiceSwitches(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -> Unit) {
     if (peer.canTalk) {
         Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).height(1.dp).background(Palette.Stroke))
-        SettingRow(
-            "Allow ${peer.name} to talk to this phone",
-            "Walkie-talkie: ${peer.name}'s voice plays here at once while they hold Talk.",
-            access.talk == true,
-        ) { on -> onChange(access.copy(talk = on)) }
+        PermissionRow("Talk", allowState(access.talk), access.talk == true) { on -> onChange(access.copy(talk = on)) }
     }
     if (peer.canPlaySound) {
         Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).height(1.dp).background(Palette.Stroke))
-        SettingRow(
-            "Play sound from ${peer.name}",
-            "Music and videos on ${peer.name} can play on this phone's speaker. ${peer.name} starts it, and either phone can stop it.",
-            access.sound == true,
-        ) { on -> onChange(access.copy(sound = on)) }
+        PermissionRow("Play sound", allowState(access.sound), access.sound == true) { on -> onChange(access.copy(sound = on)) }
     }
 }
 
@@ -233,11 +199,7 @@ fun PhoneSendCard(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -> Unit
     }
     var picking by remember { mutableStateOf(false) }
     GlassCard {
-        SettingRow(
-            "Send my notifications to ${peer.name}",
-            "They show on ${peer.name} while it's connected, and can be dismissed or answered from there. Notifications an app marks secret are never sent, as for a Mac.",
-            access.notify,
-        ) { on ->
+        PermissionRow("Notifications", if (access.notify) "Sent while connected. Secret ones never are." else "Off", access.notify) { on ->
             onChange(access.copy(notify = on))
             if (on && !listening) onGrant(PhoneFeature.Notifications)
         }
@@ -264,11 +226,7 @@ fun PhoneSendCard(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -> Unit
             SecondaryButton("Leave out an app", Modifier.fillMaxWidth()) { picking = true }
         }
         Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).height(1.dp).background(Palette.Stroke))
-        SettingRow(
-            "Send calls",
-            "Incoming calls show on ${peer.name} with the number, so it can be silenced there. Answer on this phone.",
-            access.calls,
-        ) { on ->
+        PermissionRow("Calls", if (access.calls) "Shown there with the number. Answer here." else "Off", access.calls) { on ->
             onChange(access.copy(calls = on))
             if (on && !callsGranted) onGrant(PhoneFeature.Calls)
         }

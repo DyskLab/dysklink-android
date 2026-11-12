@@ -12,8 +12,8 @@ android {
         applicationId = "id.dysklink.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "1.3.0"
+        versionCode = 10
+        versionName = "1.3.1"
     }
 
     // The release key stays outside the repository. scripts/release-apk.sh passes its path and password,

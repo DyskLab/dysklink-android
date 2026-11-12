@@ -76,62 +76,28 @@ class PhoneRemoteLink(
     val setMonitor: (peerId: String, MonitorSettings) -> Unit,
 )
 
+/** The answers that phone sent to this one's last asks, for its page and tiles. */
+@Composable
+fun remoteReplies(peer: Peer, link: PhoneRemoteLink?): Map<PeerAsk, Envelope> {
+    link ?: return emptyMap()
+    val all by link.replies.collectAsStateWithLifecycle()
+    return all[peer.id].orEmpty()
+}
+
 /**
- * On another phone's page: send it a link, control its music, watch its battery and screen time, silence it, and
- * find it. Each shows only when that phone lists it; older ones get a note to update.
+ * One of the remote cards for another phone (link, music, monitor, quiet, Locate), shown on its own page. Polling and
+ * asks stop when the page closes.
  */
 @Composable
-fun PhoneRemoteActions(
-    peer: Peer, link: PhoneRemoteLink?, isRinging: Boolean, onRing: (flash: Boolean) -> Unit,
-    onOpenSms: () -> Unit = {}, onOpenMove: () -> Unit = {},
-) {
-    if (peer.canSms || peer.canMove) {
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (peer.canSms) {
-                QuickAction(Icons.Rounded.Sms, "SMS", "Through ${peer.name}", Palette.Sky, Modifier.weight(1f), onClick = onOpenSms)
-            }
-            if (peer.canMove) {
-                QuickAction(Icons.Rounded.SwapHoriz, "Move here", "To ${peer.name}", Palette.Violet, Modifier.weight(1f), onClick = onOpenMove)
-            }
-        }
-    }
-    if (!(peer.canSms && peer.canMove && peer.canBackup)) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Update DyskLink on ${peer.name} to use its SMS from here, move this phone to it, and back up photos to it.",
-            color = Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp,
-        )
-    }
-    link ?: return
-    val all by link.replies.collectAsStateWithLifecycle()
-    val replies = all[peer.id].orEmpty()
-    if (peer.canOpen) {
-        Spacer(Modifier.height(10.dp))
-        SendLinkCard(peer, link, replies[PeerAsk.Links])
-    }
-    if (peer.canMedia) {
-        Spacer(Modifier.height(10.dp))
-        MusicRemoteCard(peer, link, replies[PeerAsk.Media])
-    }
-    if (peer.canMonitor) {
-        Spacer(Modifier.height(10.dp))
-        MonitorCard(peer, link, replies[PeerAsk.Usage])
-    }
-    if (peer.canQuiet) {
-        Spacer(Modifier.height(10.dp))
-        QuietCard(peer, link, replies[PeerAsk.Quiet])
-    }
-    if (peer.canLocate) {
-        Spacer(Modifier.height(10.dp))
-        LocateCard(peer, link, replies[PeerAsk.Locate], isRinging, onRing)
-    }
-    if (!(peer.canOpen && peer.canMedia && peer.canMonitor && peer.canQuiet && peer.canLocate)) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Update DyskLink on ${peer.name} to send it links, control its music, see its screen time, silence it, and locate it.",
-            color = Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp,
-        )
+internal fun PhoneRemoteCard(peer: Peer, link: PhoneRemoteLink, kind: PeerAsk, isRinging: Boolean, onRing: (flash: Boolean) -> Unit) {
+    val replies = remoteReplies(peer, link)
+    when (kind) {
+        PeerAsk.Links -> SendLinkCard(peer, link, replies[PeerAsk.Links])
+        PeerAsk.Media -> MusicRemoteCard(peer, link, replies[PeerAsk.Media])
+        PeerAsk.Usage -> MonitorCard(peer, link, replies[PeerAsk.Usage])
+        PeerAsk.Quiet -> QuietCard(peer, link, replies[PeerAsk.Quiet])
+        PeerAsk.Locate -> LocateCard(peer, link, replies[PeerAsk.Locate], isRinging, onRing)
+        else -> Unit
     }
 }
 
@@ -397,7 +363,7 @@ private fun LocateCard(peer: Peer, link: PhoneRemoteLink, reply: Envelope?, isRi
     }
 }
 
-/** On this phone (B): what the other phone (A) may do with it as a remote. Each asks the first time it's used. */
+/** On this phone (B): what the other phone (A) may do with it as a remote. Each asks the first time it's used (Ask first). */
 @Composable
 fun PhoneRemoteSwitches(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -> Unit) {
     val context = LocalContext.current
@@ -420,14 +386,14 @@ fun PhoneRemoteSwitches(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -
     }
     val name = peer.name
     val rows = listOfNotNull(
-        Triple(PeerAsk.Links, "Accept links from $name", "Links show as a notification with Open. Nothing opens or dials by itself.").takeIf { peer.canOpen },
-        Triple(PeerAsk.Media, "Let $name control music", "Play, pause, skip, and volume, and $name sees what plays. Needs notification access for the title.").takeIf { peer.canMedia },
-        Triple(PeerAsk.Usage, "Share screen time with $name", "Today's screen time and the most used apps. Needs Usage access. The battery is shared already.").takeIf { peer.canMonitor },
-        Triple(PeerAsk.Quiet, "Let $name silence this phone", "Silent, Vibrate, Normal, or Do Not Disturb, with a notification and Undo here each time. Needs Do Not Disturb access.").takeIf { peer.canQuiet },
-        Triple(PeerAsk.Locate, "Share location with $name", "Only when $name asks, while DyskLink runs. Uses the location while the app is in use, never in the background.").takeIf { peer.canLocate },
-        Triple(PeerAsk.Sms, "Let $name read and send SMS", "$name can read every SMS here, including one-time codes, and send SMS with this phone's number. You get a notification for each one it sends, at most 10 a minute.").takeIf { peer.canSms },
-        Triple(PeerAsk.Move, "Accept a phone move from $name", "Contacts, photos, and files from $name, to Pictures › DyskLink and Download › DyskLink here. Contacts are imported only when you tap Import.").takeIf { peer.canMove },
-        Triple(PeerAsk.Backup, "Accept photo backup from $name", "New photos from $name go to Pictures › DyskLink › $name here. It stops when less than 1 GB is free.").takeIf { peer.canBackup },
+        (PeerAsk.Media to "Music").takeIf { peer.canMedia },
+        (PeerAsk.Links to "Links").takeIf { peer.canOpen },
+        (PeerAsk.Usage to "Screen time").takeIf { peer.canMonitor },
+        (PeerAsk.Quiet to "Quiet").takeIf { peer.canQuiet },
+        (PeerAsk.Locate to "Location").takeIf { peer.canLocate },
+        (PeerAsk.Sms to "Messages").takeIf { peer.canSms },
+        (PeerAsk.Move to "Move").takeIf { peer.canMove },
+        (PeerAsk.Backup to "Photo backup").takeIf { peer.canBackup },
     )
     val askSms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh++ }
     askSmsPermission = { askSms.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS)) }
@@ -452,12 +418,13 @@ fun PhoneRemoteSwitches(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -
             dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmSms = false }) { Text("Cancel") } },
         )
     }
-    rows.forEach { (kind, title, description) ->
+    rows.forEach { (kind, title) ->
         Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).height(1.dp).background(Palette.Stroke))
-        val on = id.phonelink.android.core.PhoneRules.allowed(access, kind) == true
-        SettingRow(title, description, on) { checked ->
+        val state = id.phonelink.android.core.PhoneRules.allowed(access, kind)
+        val on = state == true
+        PermissionRow(title, allowState(state), on) { checked ->
             // SMS asks once more, with the warning, before it's turned on by hand.
-            if (checked && kind == PeerAsk.Sms) return@SettingRow run { confirmSms = true }
+            if (checked && kind == PeerAsk.Sms) return@PermissionRow run { confirmSms = true }
             onChange(id.phonelink.android.core.PhoneRules.withAllowed(access, kind, checked))
             if (checked && missing(kind)) grant(kind)
         }

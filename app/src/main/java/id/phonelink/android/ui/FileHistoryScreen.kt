@@ -301,18 +301,20 @@ fun DeviceFilesCard(
     onOpen: (Transfer) -> Unit,
     onShare: (Transfer) -> Unit,
     onRemove: (Transfer) -> Unit,
+    title: String = "FILES WITH THIS MAC",
+    limit: Int = 4,
 ) {
     var selected by remember { mutableStateOf<String?>(null) }
     val zone = ZoneId.systemDefault()
     val today = LocalDate.now(zone)
     val active = transfers.filter { it.status == TransferStatus.Active }
-    val shown = active + transfers.filter { it.status != TransferStatus.Active }.take(4)
+    val shown = active + transfers.filter { it.status != TransferStatus.Active }.take(limit)
     val received = transfers.count { !it.outgoing && it.status == TransferStatus.Done }
     val sent = transfers.count { it.outgoing && it.status == TransferStatus.Done }
     GlassCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("FILES WITH THIS MAC", color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                Text(title, color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
                 Text(
                     when {
                         active.isNotEmpty() -> "${active.size} in progress"

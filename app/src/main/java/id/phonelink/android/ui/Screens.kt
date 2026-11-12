@@ -13,6 +13,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -181,8 +182,8 @@ data class UiActions(
     val phoneMoreLink: PhoneMoreLink? = null,
 )
 
-/** Another phone's screen, camera, or notifications, opened from its page. */
-private enum class PhoneView { Screen, Camera, Notifications, Sms, Move }
+/** A page opened from another phone's page: its screen, camera, notifications, the remote tools, or Permissions. */
+internal enum class PhoneView { Screen, Camera, Notifications, Sms, Move, Talk, Sound, Music, Locate, Link, Quiet, Monitor, Backup, Permissions }
 
 @Composable
 fun PhoneLinkApp(state: UiState, actions: UiActions) {
@@ -258,12 +259,33 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
             PrayerScreen(onBack = { showPrayer = false }, openExactAlarms = actions.openExactAlarms)
         } else if (selected != null && phoneView != null) {
             val closeView = { phoneView = null }
-            when (phoneView) {
+            when (val view = phoneView!!) {
                 PhoneView.Screen -> PhoneScreenScreen(selected.id, selected.name, selected.isConnected, actions.phoneShareLink, closeView)
+                PhoneView.Camera -> RemoteCameraScreen(selected.id, selected.name, selected.isConnected, actions.phoneShareLink, closeView)
                 PhoneView.Notifications -> PhoneNotificationsScreen(selected, state.mirror[selected.id], actions.phoneRelayLink, closeView)
                 PhoneView.Sms -> PhoneSmsScreen(selected, actions.phoneMoreLink, closeView)
                 PhoneView.Move -> PhoneMoveScreen(selected, actions.phoneMoreLink, closeView)
-                else -> RemoteCameraScreen(selected.id, selected.name, selected.isConnected, actions.phoneShareLink, closeView)
+                PhoneView.Permissions -> PhonePermissionsScreen(
+                    selected,
+                    access = state.phoneAccess[selected.id] ?: id.phonelink.android.core.PeerAccess(),
+                    onSetAccess = { actions.setPhoneAccess(selected.id, it) },
+                    onOpenAccessibility = actions.openAccessibility,
+                    onGrant = actions.grantPhoneFeature,
+                    clipboardEnabled = state.clipboardEnabled,
+                    clipboardAuto = state.clipboardAuto,
+                    onToggleClipboard = actions.setClipboardEnabled,
+                    onToggleClipboardAuto = actions.setClipboardAuto,
+                    onBack = closeView,
+                )
+                else -> PhoneToolScreen(
+                    selected,
+                    view,
+                    remoteLink = actions.phoneRemoteLink,
+                    isRinging = selected.id in state.ringingMacs,
+                    onRingFlash = { on -> actions.ringPhone(selected.id, on, true) },
+                    onStartSound = { actions.startPhoneSound(selected.id) },
+                    onBack = closeView,
+                )
             }
         } else if (selected != null) {
             val closeFeature = { feature = null }
@@ -299,19 +321,11 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                             showHistory = true
                         },
                         access = state.phoneAccess[selected.id] ?: id.phonelink.android.core.PeerAccess(),
-                        onSetAccess = { actions.setPhoneAccess(selected.id, it) },
-                        onOpenAccessibility = actions.openAccessibility,
-                        onViewScreen = { phoneView = PhoneView.Screen },
-                        onUseCamera = { phoneView = PhoneView.Camera },
                         mirrorFeed = state.mirror[selected.id],
                         relayLink = actions.phoneRelayLink,
-                        onOpenNotifications = { phoneView = PhoneView.Notifications },
-                        onStartSound = { actions.startPhoneSound(selected.id) },
-                        onGrant = actions.grantPhoneFeature,
                         remoteLink = actions.phoneRemoteLink,
                         onRingFlash = { on -> actions.ringPhone(selected.id, on, true) },
-                        onOpenSms = { phoneView = PhoneView.Sms },
-                        onOpenMove = { phoneView = PhoneView.Move },
+                        onOpenPhoneView = { phoneView = it },
                         onUnpair = {
                             actions.unpair(selected.id)
                             selectedId = null
@@ -965,19 +979,11 @@ private fun DetailScreen(
     onWake: suspend () -> Boolean = { false },
     onMacAction: (String) -> Unit = {},
     access: id.phonelink.android.core.PeerAccess = id.phonelink.android.core.PeerAccess(),
-    onSetAccess: (id.phonelink.android.core.PeerAccess) -> Unit = {},
-    onOpenAccessibility: () -> Unit = {},
-    onViewScreen: () -> Unit = {},
-    onUseCamera: () -> Unit = {},
     mirrorFeed: id.phonelink.android.core.MirrorFeed? = null,
     relayLink: PhoneRelayLink? = null,
-    onOpenNotifications: () -> Unit = {},
-    onStartSound: () -> Unit = {},
-    onGrant: (PhoneFeature) -> Unit = {},
     remoteLink: PhoneRemoteLink? = null,
     onRingFlash: (Boolean) -> Unit = {},
-    onOpenSms: () -> Unit = {},
-    onOpenMove: () -> Unit = {},
+    onOpenPhoneView: (PhoneView) -> Unit = {},
 ) {
     val info = peer.info
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -1029,8 +1035,39 @@ private fun DetailScreen(
             if (peer.isConnected && peer.isMac && charge != null) ChargeRow(charge, onMacAction)
         }
 
-        // Other phones and Windows or Linux PCs share files, the clipboard, and ringing. Macs have more, below.
-        if (peer.isConnected && !peer.isMac) {
+        // Another phone: quick actions, one grid of tools, files, and Permissions.
+        if (peer.isPhone) {
+            PhonePeerActions(
+                peer,
+                isRinging = isRinging,
+                mirrorFeed = mirrorFeed,
+                relayLink = relayLink,
+                remoteLink = remoteLink,
+                onSendFiles = onSendFiles,
+                onRing = onRing,
+                onRingFlash = onRingFlash,
+                onSendClipboard = onSendClipboard,
+                onOpen = onOpenPhoneView,
+            )
+            if (peer.isConnected) {
+                Spacer(Modifier.height(16.dp))
+                DeviceFilesCard(
+                    transfers = transfers,
+                    peerName = peer.name,
+                    onSeeAll = onSeeAllFiles,
+                    onOpen = onOpenTransfer,
+                    onShare = onShareTransfer,
+                    onRemove = onRemoveTransfer,
+                    title = "FILES",
+                    limit = 2,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            PhonePermissionsRow(peer, access) { onOpenPhoneView(PhoneView.Permissions) }
+        }
+
+        // Windows or Linux PCs share files, the clipboard, and ringing. Macs have more, below.
+        if (peer.isConnected && peer.isComputer && !peer.isMac) {
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 QuickAction(FlatIcons.sendFile, "Send file", "To this $kind", Palette.Mint, Modifier.weight(1f), onClick = onSendFiles)
@@ -1053,25 +1090,6 @@ private fun DetailScreen(
                     onClick = onRing,
                 )
             }
-            if (peer.isPhone && (peer.canViewScreen || peer.canUseCamera)) {
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (peer.canViewScreen) {
-                        QuickAction(FlatIcons.shareScreen, "View screen", "See and control", Palette.Sky, Modifier.weight(1f), onClick = onViewScreen)
-                    }
-                    if (peer.canUseCamera) {
-                        QuickAction(Icons.Rounded.PhotoCamera, "Camera", "Remote shutter", Palette.Mint, Modifier.weight(1f), onClick = onUseCamera)
-                    }
-                }
-            } else if (peer.isPhone) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Update DyskLink on ${peer.name} to view its screen and use its camera from here.",
-                    color = Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp,
-                )
-            }
-            if (peer.isPhone) PhoneRelayActions(peer, mirrorFeed, relayLink, onOpenNotifications, onStartSound)
-            if (peer.isPhone) PhoneRemoteActions(peer, remoteLink, isRinging, onRingFlash, onOpenSms, onOpenMove)
             if (peer.isComputer) {
                 Spacer(Modifier.height(24.dp))
                 SectionLabel("CONTROL THE PC")
@@ -1143,6 +1161,7 @@ private fun DetailScreen(
             )
         }
 
+        if (!peer.isPhone) {
         Spacer(Modifier.height(24.dp))
         SectionLabel("CLIPBOARD")
         GlassCard {
@@ -1164,20 +1183,11 @@ private fun DetailScreen(
             }
         }
 
-        if (peer.isPhone) {
-            Spacer(Modifier.height(24.dp))
-            SectionLabel("WHAT ${peer.name.uppercase()} CAN DO HERE")
-            PhoneAccessCard(peer, access, onSetAccess, onOpenAccessibility)
-            if (peer.canNotify) {
-                Spacer(Modifier.height(24.dp))
-                SectionLabel("SEND TO ${peer.name.uppercase()}")
-                PhoneSendCard(peer, access, onSetAccess, onGrant)
-            }
         }
 
-        if (peer.isMac || peer.canBackup) {
+        if (peer.isMac) {
         Spacer(Modifier.height(24.dp))
-        SectionLabel(if (peer.isPhone) "PHOTO BACKUP" else "PHOTOS")
+        SectionLabel("PHOTOS")
         PhotoSyncCard(peer)
         }
 
@@ -1202,18 +1212,26 @@ private fun DetailScreen(
 
         }
 
+        if (peer.isPhone) {
+            Spacer(Modifier.height(12.dp))
+            var aboutOpen by rememberSaveable(peer.id) { mutableStateOf(false) }
+            GlassCard(onClick = { aboutOpen = !aboutOpen }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("About this phone", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(if (aboutOpen) "⌃" else "⌄", color = Palette.TextFaint, fontSize = 18.sp)
+                }
+                if (aboutOpen) {
+                    Spacer(Modifier.height(8.dp))
+                    AboutRows(info, peer.model)
+                }
+            }
+        } else {
         Spacer(Modifier.height(24.dp))
         SectionLabel("ABOUT THIS ${kind.uppercase()}")
         GlassCard {
-            DetailRow("System", info?.osVersion ?: "Unknown")
-            DetailRow("Network", info?.network ?: "Unknown")
-            val free = info?.storageFreeBytes
-            val total = info?.storageTotalBytes
-            DetailRow("Storage", if (free != null && total != null) "${formatBytes(free)} free of ${formatBytes(total)}" else "No data yet")
-            if (free != null && total != null) {
-                Spacer(Modifier.height(8.dp))
-                StorageBar(free, total)
-            }
+            AboutRows(info, null)
+        }
+
         }
 
         Spacer(Modifier.height(20.dp))
@@ -1229,6 +1247,20 @@ private fun DetailScreen(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         )
         Spacer(Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun AboutRows(info: id.phonelink.android.core.DeviceInfo?, model: String?) {
+    if (model != null) DetailRow("Model", info?.model ?: model)
+    DetailRow("System", info?.osVersion ?: "Unknown")
+    DetailRow("Network", info?.network ?: "Unknown")
+    val free = info?.storageFreeBytes
+    val total = info?.storageTotalBytes
+    DetailRow("Storage", if (free != null && total != null) "${formatBytes(free)} free of ${formatBytes(total)}" else "No data yet")
+    if (free != null && total != null) {
+        Spacer(Modifier.height(8.dp))
+        StorageBar(free, total)
     }
 }
 
@@ -1294,7 +1326,11 @@ private fun FeatureTile(feature: Feature, modifier: Modifier, onClick: () -> Uni
 }
 
 @Composable
-internal fun QuickAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, detail: String, color: Color, modifier: Modifier, active: Boolean = false, onClick: () -> Unit) {
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+internal fun QuickAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, detail: String, color: Color, modifier: Modifier,
+    active: Boolean = false, onLongClick: (() -> Unit)? = null, onClick: () -> Unit,
+) {
     val shape = RoundedCornerShape(18.dp)
     Column(
         modifier
@@ -1302,7 +1338,7 @@ internal fun QuickAction(icon: androidx.compose.ui.graphics.vector.ImageVector, 
             .clip(shape)
             .background(color.copy(alpha = if (active) 0.28f else 0.12f))
             .border(1.dp, color.copy(alpha = if (active) 0.8f else 0.3f), shape)
-            .clickable(onClick = onClick)
+            .then(Modifier.combinedClickable(onLongClick = onLongClick, onClick = onClick))
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -1314,58 +1350,9 @@ internal fun QuickAction(icon: androidx.compose.ui.graphics.vector.ImageVector, 
     }
 }
 
-/** The per-phone switches: what that phone may do with this phone's screen and camera. All off until turned on. */
+/** Turns photo sync on for one Mac or phone, asking to read photos first. */
 @Composable
-private fun PhoneAccessCard(
-    peer: Peer,
-    access: id.phonelink.android.core.PeerAccess,
-    onChange: (id.phonelink.android.core.PeerAccess) -> Unit,
-    onOpenAccessibility: () -> Unit,
-) {
-    val name = peer.name
-    // Accessibility can be turned on in Settings and back: read again each time this page shows.
-    var accessibility by remember { mutableStateOf(id.phonelink.android.service.DyskAccessibilityService.isRunning) }
-    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
-        accessibility = id.phonelink.android.service.DyskAccessibilityService.isRunning
-        onPauseOrDispose {}
-    }
-    GlassCard {
-        SettingRow(
-            "Allow $name to view this screen",
-            "$name can ask to see this screen. Android still asks here every time before sharing starts.",
-            access.screen == true,
-        ) { on -> onChange(access.copy(screen = on, control = access.control && on)) }
-        if (access.screen == true) {
-            Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).height(1.dp).background(Palette.Stroke))
-            SettingRow(
-                "Allow control",
-                "Taps, swipes, and Back, Home, and Recents from $name act on this phone while it views the screen.",
-                access.control,
-            ) { on -> onChange(access.copy(control = on)) }
-            if (access.control && !accessibility) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Control needs Accessibility for DyskLink. Until it's on, $name can only view.",
-                    color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp,
-                )
-                Spacer(Modifier.height(8.dp))
-                SecondaryButton("Open Accessibility settings", Modifier.fillMaxWidth(), onClick = onOpenAccessibility)
-            }
-        }
-        Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).height(1.dp).background(Palette.Stroke))
-        SettingRow(
-            "Allow $name to use the camera",
-            "$name can start this camera after you tap its request, then zoom, take photos, and record. They are saved here and sent to $name.",
-            access.camera == true,
-        ) { on -> onChange(access.copy(camera = on)) }
-        PhoneVoiceSwitches(peer, access, onChange)
-        PhoneRemoteSwitches(peer, access, onChange)
-    }
-}
-
-/** Turns photo sync on for one Mac, asking to read photos first. */
-@Composable
-private fun PhotoSyncCard(peer: Peer) {
+internal fun PhotoSyncCard(peer: Peer) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var on by remember(peer.id) { mutableStateOf(id.phonelink.android.service.PhotoSync.isOn(context, peer.id)) }
     var canRead by remember { mutableStateOf(id.phonelink.android.service.PhotoSync.canRead(context)) }
