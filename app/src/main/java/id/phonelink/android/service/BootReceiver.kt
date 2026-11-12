@@ -11,11 +11,13 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED -> {
                 PhoneLinkService.start(context)
                 PrayerWeatherStore.schedule(context)
+                PhoneToolsReceiver.restore(context)
             }
             // Alarms are set in real time, so a clock or zone change moves the next prayer reminder.
             Intent.ACTION_TIME_CHANGED, Intent.ACTION_TIMEZONE_CHANGED -> {
                 PrayerWeatherStore.schedule(context)
                 PrayerWidget.render(context)
+                PhoneToolsReceiver.restore(context)
             }
         }
     }

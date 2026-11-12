@@ -68,7 +68,7 @@ import id.phonelink.android.core.TerminalMessage
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
-/** How the terminal screen talks to the Mac. */
+/** How the terminal screen talks to the Mac or PC. */
 class TerminalLink(
     val events: Flow<Pair<String, Envelope>>,
     val send: (peerId: String, type: String, TerminalMessage) -> Unit,
@@ -146,7 +146,7 @@ fun TerminalScreen(peerId: String, macName: String, connected: Boolean, link: Te
             send(MessageType.TERMINAL_OPEN, TerminalMessage(id, cols = size.first, rows = size.second))
             kotlinx.coroutines.delay(8_000)
             if (state == TermState.Opening && sessionId == id) {
-                state = TermState.Closed("$macName didn't answer. Update DyskLink on the Mac, then try again.")
+                state = TermState.Closed("$macName didn't answer. Update DyskLink on it, then try again.")
                 sessionId = null
             }
         }

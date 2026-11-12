@@ -316,4 +316,38 @@ class DesktopTest {
         assertEquals(10, XdotoolTyper.timeoutSeconds("short"))
         assertEquals(30, XdotoolTyper.timeoutSeconds("x".repeat(1000)))
     }
+
+    @Test
+    fun clicksLandWhereThePictureIs() {
+        val math = id.dysklink.desktop.ui.VideoMath
+        // A 100×200 portrait picture in a 400×400 view: 200 tall... fitted to 200×400, centered at x 100..300.
+        assertEquals(listOf(100f, 0f, 200f, 400f), math.fit(400f, 400f, 100f, 200f, 0).toList())
+        assertEquals(0.5f to 0.5f, math.toPicture(200f, 200f, 400f, 400f, 100f, 200f, 0))
+        assertEquals(0f to 0f, math.toPicture(100f, 0f, 400f, 400f, 100f, 200f, 0))
+        assertEquals(null, math.toPicture(50f, 200f, 400f, 400f, 100f, 200f, 0), "Beside the picture")
+        assertEquals(0f to 0.5f, math.toPicture(50f, 200f, 400f, 400f, 100f, 200f, 0, clamp = true))
+        // Turned 90° clockwise it's 400×200: the picture's top-left corner is now at the top right.
+        val (x, y) = math.toPicture(399f, 101f, 400f, 400f, 100f, 200f, 90)!!
+        assertTrue(x < 0.02f && y < 0.02f, "($x, $y)")
+        val (x2, y2) = math.toPicture(1f, 101f, 400f, 400f, 100f, 200f, 270)!!
+        assertTrue(x2 > 0.98f && y2 < 0.02f, "Turned the other way, top-left shows the top-right: ($x2, $y2)")
+        assertEquals(1f to 1f, math.toPicture(100f, 0f, 400f, 400f, 100f, 200f, 180))
+        // Mirrored, left is right.
+        assertEquals(1f to 0f, math.toPicture(100f, 0f, 400f, 400f, 100f, 200f, 0, mirror = true))
+    }
+
+    @Test
+    fun smsGroupIntoConversations() {
+        val items = listOf(
+            id.phonelink.android.core.SmsItem(1, 7, "+6281100", "a", 1, false),
+            id.phonelink.android.core.SmsItem(2, 8, "BANK", "b", 5, false),
+            id.phonelink.android.core.SmsItem(3, 7, "+6281100", "c", 9, true),
+        )
+        val threads = id.dysklink.desktop.ui.smsThreads(items)
+        assertEquals(listOf(7L, 8L), threads.map { it.id })
+        assertEquals("c", threads[0].latest.body)
+        assertTrue(id.dysklink.desktop.ui.sameNumber("+62 812-3456-7890", "081234567890"))
+        assertTrue(!id.dysklink.desktop.ui.sameNumber("+62 812 3456 7890", "+62 812 3456 7891"))
+        assertTrue(id.dysklink.desktop.ui.sameNumber("BANK", "bank"))
+    }
 }

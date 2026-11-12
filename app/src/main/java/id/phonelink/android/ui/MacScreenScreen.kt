@@ -67,6 +67,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import id.phonelink.android.core.Envelope
 import id.phonelink.android.core.InputEvent
+import id.phonelink.android.core.JpegFrames
+import id.phonelink.android.core.JpegScreenDecoder
+import androidx.compose.ui.graphics.asImageBitmap
 import id.phonelink.android.core.MacScreenDecoder
 import id.phonelink.android.core.MacScreenMath
 import id.phonelink.android.core.MessageType
@@ -93,6 +96,8 @@ private sealed interface ViewState {
         val name: String,
         val displays: List<id.phonelink.android.core.DisplayChoice> = emptyList(),
         val displayId: Long? = null,
+        /** A Windows or Linux PC: whole JPEG pictures instead of the Mac's H.264. */
+        val jpeg: Boolean = false,
     ) : ViewState
     data class Stopped(val message: String) : ViewState
 }
@@ -107,6 +112,8 @@ fun MacScreenScreen(
     link: MacScreenLink?,
     onBack: () -> Unit,
     extend: Boolean = false,
+    /** False for a Windows or Linux PC, whose hints and shortcuts differ. */
+    isMac: Boolean = true,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -135,6 +142,8 @@ fun MacScreenScreen(
     val haptics = LocalHapticFeedback.current
     val main = remember { Handler(Looper.getMainLooper()) }
     val decoderHolder = remember { arrayOfNulls<MacScreenDecoder>(1) }
+    val jpegHolder = remember { arrayOfNulls<JpegScreenDecoder>(1) }
+    var picture by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
     /** Stopped because the app went to the background; it starts again when the app returns. */
     var paused by remember { mutableStateOf(false) }
 
@@ -148,7 +157,7 @@ fun MacScreenScreen(
     val showing = state as? ViewState.Showing
     DisposableEffect(surface, showing?.width, showing?.height) {
         val target = surface
-        if (target != null && showing != null) {
+        if (target != null && showing != null && !showing.jpeg) {
             decoderHolder[0] = MacScreenDecoder(target, showing.width, showing.height) { link?.sync(peerId) }.also {
                 runCatching { it.start() }.onFailure { error -> state = ViewState.Stopped("This phone can't play the video: ${error.message}") }
             }
@@ -157,6 +166,18 @@ fun MacScreenScreen(
         onDispose {
             decoderHolder[0]?.release()
             decoderHolder[0] = null
+        }
+    }
+
+    // A PC's JPEG pictures need no surface; the decoder lives while the picture shows.
+    DisposableEffect(showing?.jpeg) {
+        if (showing?.jpeg == true) {
+            jpegHolder[0] = JpegScreenDecoder { bitmap -> main.post { picture = bitmap.asImageBitmap() } }
+            link?.sync(peerId)
+        }
+        onDispose {
+            jpegHolder[0]?.release()
+            jpegHolder[0] = null
         }
     }
 
@@ -169,6 +190,8 @@ fun MacScreenScreen(
             if (id != peerId) return@setSink
             when (envelope.type) {
                 MessageType.MACSCREEN_FRAME -> {
+                    // A PC's whole pictures go to their own decoder, which keeps only the newest.
+                    if (envelope.format == JpegFrames.FORMAT) return@setSink jpegHolder[0]?.feed(envelope) ?: Unit
                     // Queued for the decoder's thread; this is the connection's reader and must not wait.
                     // A binary frame is raw already; base64 from an older Mac is decoded on the decoder's thread.
                     val frame: Any = envelope.raw ?: envelope.video ?: return@setSink
@@ -177,7 +200,10 @@ fun MacScreenScreen(
                 MessageType.MACSCREEN_STARTED -> {
                     val info = envelope.screen ?: return@setSink
                     main.post {
-                        state = ViewState.Showing(info.width, info.height, envelope.text ?: macName, envelope.displays.orEmpty(), envelope.displayId)
+                        state = ViewState.Showing(
+                            info.width, info.height, envelope.text ?: macName, envelope.displays.orEmpty(), envelope.displayId,
+                            jpeg = envelope.format == JpegFrames.FORMAT,
+                        )
                     }
                 }
                 // The answer to stopping in the background isn't an ending: it starts again on return.
@@ -336,7 +362,24 @@ fun MacScreenScreen(
             contentAlignment = Alignment.Center,
         ) {
             val s = state
-            if (s is ViewState.Showing) {
+            val shownPicture = picture
+            if (s is ViewState.Showing && s.jpeg) {
+                if (shownPicture != null) {
+                    androidx.compose.foundation.Image(
+                        shownPicture, contentDescription = "$macName screen",
+                        contentScale = androidx.compose.ui.layout.ContentScale.FillBounds,
+                        modifier = Modifier
+                            .aspectRatio(s.width.toFloat() / s.height, matchHeightConstraintsFirst = viewW / viewH.coerceAtLeast(1f) > s.width.toFloat() / s.height)
+                            .graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = panX; translationY = panY },
+                    )
+                } else {
+                    CircularProgressIndicator(color = Palette.Mint)
+                }
+                DisposableEffect(Unit) {
+                    activity?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    onDispose { activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+                }
+            } else if (s is ViewState.Showing) {
                 AndroidView(
                     factory = { ctx ->
                         SurfaceView(ctx).apply {
@@ -373,7 +416,8 @@ fun MacScreenScreen(
 
         if (state is ViewState.Showing && inputTrusted == false) {
             Text(
-                "Taps and typing need Accessibility for DyskLink on the Mac.",
+                if (isMac) "Taps and typing need Accessibility for DyskLink on the Mac."
+                else "Taps and typing need \"Phones can control this PC\" in DyskLink on the PC. On Linux they need an X11 session.",
                 color = Palette.Amber, fontSize = 12.sp, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(6.dp),
             )
@@ -399,8 +443,9 @@ fun MacScreenScreen(
                 if (hearing == peerId) id.phonelink.android.service.AudioShare.stopListening(peerId)
                 else id.phonelink.android.service.AudioShare.listen(peerId, fromScreen = true)
             }
-            ToolChip("⌘C") { link?.input(peerId, InputEvent("shortcut", key = "cmd+c")) }
-            ToolChip("⌘V") { link?.input(peerId, InputEvent("shortcut", key = "cmd+v")) }
+            // "cmd" is Ctrl on a PC.
+            ToolChip(if (isMac) "⌘C" else "Ctrl+C") { link?.input(peerId, InputEvent("shortcut", key = "cmd+c")) }
+            ToolChip(if (isMac) "⌘V" else "Ctrl+V") { link?.input(peerId, InputEvent("shortcut", key = "cmd+v")) }
             val shown = state as? ViewState.Showing
             if (!extend && shown != null && shown.displays.size > 1) {
                 // Steps through the Mac's displays.

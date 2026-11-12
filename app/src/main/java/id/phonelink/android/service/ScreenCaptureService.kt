@@ -9,8 +9,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
+import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -21,6 +25,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Surface
@@ -31,6 +36,8 @@ import androidx.core.content.IntentCompat
 import id.phonelink.android.MainActivity
 import id.phonelink.android.R
 import id.phonelink.android.core.Envelope
+import id.phonelink.android.core.JpegFrames
+import id.phonelink.android.core.JpegStreamer
 import id.phonelink.android.core.MessageType
 import id.phonelink.android.core.ScreenInfo
 import id.phonelink.android.core.ScreenStreamer
@@ -59,6 +66,14 @@ class ScreenCaptureService : Service() {
     private var size = ScreenInfo(0, 0)
     private var failure: String? = null
     private var sound: PlaybackPump? = null
+
+    // A Windows or Linux PC gets JPEG frames instead of H.264 (see PcRules), read from the screen through an ImageReader.
+    @Volatile private var jpeg = false
+    private var reader: ImageReader? = null
+    private var jpegStream: JpegStreamer? = null
+    private var bitmap: Bitmap? = null
+    private var drainPosted = false
+    private val drainLater = Runnable { drainPosted = false; drain() }
 
     private val projectionCallback = object : MediaProjection.Callback() {
         // Called when the user stops recording from the system, such as the status bar.
@@ -102,6 +117,7 @@ class ScreenCaptureService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0,
         )
         peerId = peer
+        jpeg = manager?.peers?.value?.firstOrNull { it.id == peer }?.pcScreen == true
         handler.post { begin(code, data, peer) }
         return START_NOT_STICKY
     }
@@ -112,7 +128,7 @@ class ScreenCaptureService : Service() {
                 ?: error("Recording permission is unavailable")
             capture.registerCallback(projectionCallback, handler)
             projection = capture
-            startEncoder()
+            if (jpeg) startJpeg() else startEncoder()
             display = capture.createVirtualDisplay(
                 "DyskLink", size.width, size.height, resources.displayMetrics.densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, handler,
@@ -142,7 +158,7 @@ class ScreenCaptureService : Service() {
     /** A phone viewing also learns whether its taps go through here. */
     private fun started(): Envelope {
         val canControl = peerId?.let { PhoneLinkService.connectionManager.value?.phoneControlAllowed(it) }
-        return Envelope(MessageType.SCREEN_STARTED, screen = size, canControl = canControl)
+        return Envelope(MessageType.SCREEN_STARTED, screen = size, canControl = canControl, format = if (jpeg) JpegFrames.FORMAT else null)
     }
 
     private fun sendStarted() {
@@ -171,6 +187,77 @@ class ScreenCaptureService : Service() {
         codec.start()
         encoder = codec
         streamer = stream
+    }
+
+    /** Pictures for a PC: the newest screen image as JPEG, as often as the PC's link keeps up (see JpegPacer). */
+    private fun startJpeg() {
+        size = captureSize()
+        val images = ImageReader.newInstance(size.width, size.height, PixelFormat.RGBA_8888, 2)
+        val stream = JpegStreamer(scope, ::send, MessageType.SCREEN_FRAME, clock = SystemClock::elapsedRealtime) {
+            handler.post { stopSelf() }
+        }
+        images.setOnImageAvailableListener({ drain() }, handler)
+        reader = images
+        surface = images.surface
+        jpegStream = stream
+    }
+
+    /** On the recording thread. Too soon: tries again when it's time, so the last change on a still screen still goes. */
+    private fun drain() {
+        val stream = jpegStream ?: return
+        val images = reader ?: return
+        if (!stream.due()) {
+            if (!drainPosted) {
+                drainPosted = true
+                handler.postDelayed(drainLater, stream.waitMs().coerceAtLeast(1))
+            }
+            return
+        }
+        val image = runCatching { images.acquireLatestImage() }.getOrNull() ?: return
+        try {
+            stream.offer(encodeJpeg(image, stream.quality))
+        } catch (error: Exception) {
+            Log.w(TAG, "Screen picture lost", error)
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun encodeJpeg(image: Image, quality: Int): ByteArray {
+        val plane = image.planes[0]
+        val width = image.width
+        val height = image.height
+        val rowPixels = plane.rowStride / plane.pixelStride
+        val picture = bitmap?.takeIf { it.width == rowPixels && it.height == height }
+            ?: Bitmap.createBitmap(rowPixels, height, Bitmap.Config.ARGB_8888).also { bitmap?.recycle(); bitmap = it }
+        val buffer = plane.buffer
+        buffer.rewind()
+        val needed = plane.rowStride * height
+        if (buffer.remaining() >= needed) {
+            picture.copyPixelsFromBuffer(buffer)
+        } else {
+            // Some phones leave out the padding after the last row.
+            val padded = ByteArray(needed)
+            buffer.get(padded, 0, buffer.remaining())
+            picture.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(padded))
+        }
+        val visible = if (rowPixels == width) picture else Bitmap.createBitmap(picture, 0, 0, width, height)
+        val out = java.io.ByteArrayOutputStream(128 * 1024)
+        visible.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        if (visible !== picture) visible.recycle()
+        return out.toByteArray()
+    }
+
+    private fun releaseJpeg() {
+        handler.removeCallbacks(drainLater)
+        drainPosted = false
+        jpegStream?.close(notify = false)
+        jpegStream = null
+        runCatching { reader?.close() }
+        if (reader != null) surface = null
+        reader = null
+        bitmap?.recycle()
+        bitmap = null
     }
 
     private inner class EncoderOutput(private val stream: ScreenStreamer) : MediaCodec.Callback() {
@@ -214,8 +301,7 @@ class ScreenCaptureService : Service() {
             if (captureSize() == size) return@post
             try {
                 target.surface = null
-                releaseEncoder()
-                startEncoder()
+                if (jpeg) { releaseJpeg(); startJpeg() } else { releaseEncoder(); startEncoder() }
                 target.resize(size.width, size.height, resources.displayMetrics.densityDpi)
                 target.surface = surface
                 sendStarted()
@@ -256,13 +342,24 @@ class ScreenCaptureService : Service() {
             this, 0, Intent(this, ScreenCaptureService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE,
         )
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val viewer = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peer }?.takeIf { it.isPhone }
+        val who = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peer }
+        val viewer = who?.takeIf { it.isPhone }
+        val pc = who?.takeIf { it.isComputer && !it.isMac }
         return Notification.Builder(this, PhoneLinkService.SHARING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo_glyph)
-            .setContentTitle(if (viewer != null) "Being viewed by ${viewer.name}" else "Screen shared with Mac")
+            .setContentTitle(
+                when {
+                    viewer != null -> "Being viewed by ${viewer.name}"
+                    pc != null -> "Screen shared with ${pc.name}"
+                    else -> "Screen shared with Mac"
+                },
+            )
             .setContentText(
-                if (viewer != null) "${viewer.name} sees everything on this screen. Tap Stop to end it."
-                else "Everything on your screen is visible on the Mac.",
+                when {
+                    viewer != null -> "${viewer.name} sees everything on this screen. Tap Stop to end it."
+                    pc != null -> "Everything on your screen is visible on ${pc.name}. Tap Stop to end it."
+                    else -> "Everything on your screen is visible on the Mac."
+                },
             )
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
@@ -285,6 +382,7 @@ class ScreenCaptureService : Service() {
         peerId = null
         val release = {
             runCatching { display?.release() }
+            releaseJpeg()
             releaseEncoder()
             runCatching {
                 projection?.unregisterCallback(projectionCallback)
@@ -336,7 +434,7 @@ class ScreenCaptureService : Service() {
         /** Tells a phone viewing this screen again whether its taps go through, after a switch changed. */
         fun refreshControl() {
             val service = current ?: return
-            service.handler.post { if (service.encoder != null) service.sendStarted() }
+            service.handler.post { if (service.encoder != null || service.jpegStream != null) service.sendStarted() }
         }
 
         fun requestSync(peerId: String) {

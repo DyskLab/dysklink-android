@@ -24,14 +24,21 @@ class DocScans(private val folder: File) {
             DocScan(pdf, text, pages)
         }
 
-    /** A name like "Scan 10 Nov 2026 21.30", with a number added when it is taken. */
-    fun newName(now: LocalDateTime = LocalDateTime.now()): String {
-        val base = "Scan " + now.format(DateTimeFormatter.ofPattern("d MMM yyyy HH.mm", java.util.Locale.ENGLISH))
-        if (!File(folder, "$base.pdf").exists()) return base
-        var number = 2
-        while (File(folder, "$base ($number).pdf").exists()) number++
-        return "$base ($number)"
-    }
+    /** A name like "Scan 2026-11-10 2130", with a number added when it is taken. */
+    fun newName(now: LocalDateTime = LocalDateTime.now()): String = uniqueName(baseName(now)) { File(folder, "$it.pdf").exists() }
+
+    /** JPEG copies of the pages, kept next to the PDF when the user asked for them. */
+    fun images(scan: DocScan): List<File> = folder.listFiles { file ->
+        file.extension == "jpg" && file.name.startsWith("${scan.name} page ")
+    }.orEmpty().sortedBy { it.nameWithoutExtension.substringAfterLast(' ').toIntOrNull() ?: 0 }
+
+    /** Copies page [number] (from 1) into the folder next to [scan]. */
+    fun saveImage(scan: DocScan, number: Int, write: (File) -> Unit): File =
+        File(folder, "${scan.name} page $number.jpg").also(write)
+
+    private fun related(name: String): List<File> =
+        listOf("pdf", "txt", "pages").map { File(folder, "$name.$it") } +
+            folder.listFiles { file -> file.extension == "jpg" && file.name.startsWith("$name page ") }.orEmpty()
 
     fun save(name: String, pdf: (File) -> Unit, pages: Int, text: String): DocScan {
         val target = File(folder, "${clean(name)}.pdf")
@@ -46,17 +53,28 @@ class DocScans(private val folder: File) {
         val wanted = clean(to)
         if (wanted.isEmpty() || wanted == scan.name) return null
         if (File(folder, "$wanted.pdf").exists()) return null
-        listOf("pdf", "txt", "pages").forEach { ext ->
-            File(folder, "${scan.name}.$ext").takeIf { it.exists() }?.renameTo(File(folder, "$wanted.$ext"))
+        related(scan.name).filter { it.exists() }.forEach { file ->
+            file.renameTo(File(folder, wanted + file.name.removePrefix(scan.name)))
         }
         return list().firstOrNull { it.name == wanted }
     }
 
     fun delete(scan: DocScan) {
-        listOf("pdf", "txt", "pages").forEach { File(folder, "${scan.name}.$it").delete() }
+        related(scan.name).forEach { it.delete() }
     }
 
     companion object {
+        /** "Scan yyyy-MM-dd HHmm", the name a new scan starts with. */
+        fun baseName(now: LocalDateTime): String = "Scan " + now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HHmm", java.util.Locale.ENGLISH))
+
+        /** [base], or "[base] (2)", "[base] (3)", … when [taken]. */
+        fun uniqueName(base: String, taken: (String) -> Boolean): String {
+            if (!taken(base)) return base
+            var number = 2
+            while (taken("$base ($number)")) number++
+            return "$base ($number)"
+        }
+
         /** Keeps a file name that works on the phone, the Mac, and Windows. */
         fun clean(name: String): String = name.replace(Regex("""[\\/:*?"<>|\u0000-\u001f]"""), " ")
             .replace(Regex("""\s+"""), " ").trim().trimStart('.').take(80).trim()

@@ -83,6 +83,8 @@ fun DeckScreen(
     sendInput: (InputEvent) -> Unit,
     sendMedia: (String) -> Unit,
     runCommand: (String) -> Unit,
+    /** "Mac", or "PC" for a Windows or Linux PC that serves the deck (`pc-deck`): Cmd works as Ctrl there. */
+    kind: String = "Mac",
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
@@ -125,7 +127,7 @@ fun DeckScreen(
                 !Deck.isValid(button) -> "This button isn't finished. Tap Edit to fix it."
                 button.kind == DeckKind.Obs && obs.status != ObsState.Status.Connected -> "Not connected to OBS. Connect in the OBS card below."
                 button.kind == DeckKind.Obs -> "OBS doesn't have this anymore. Tap Edit to pick it again."
-                macName == null -> "No Mac is connected. Open DyskLink on the Mac."
+                macName == null -> "No $kind is connected. Open DyskLink on the $kind."
                 !connected -> "Not connected to $macName."
                 button.kind == DeckKind.Command -> "This command isn't on $macName anymore."
                 else -> "Can't run this button."
@@ -134,7 +136,7 @@ fun DeckScreen(
             return
         }
         if (macTrusted == false && button.kind in setOf(DeckKind.Shortcut, DeckKind.Text)) {
-            android.widget.Toast.makeText(context, "Accessibility is off for DyskLink on the Mac, so the Mac ignores keys.", android.widget.Toast.LENGTH_LONG).show()
+            android.widget.Toast.makeText(context, "Accessibility is off for DyskLink on the $kind, so the $kind ignores keys.", android.widget.Toast.LENGTH_LONG).show()
         }
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         pressed = button.id
@@ -153,7 +155,7 @@ fun DeckScreen(
                 Text(
                     when {
                         editing -> "Tap a button to change it."
-                        macName == null -> "No Mac connected. OBS buttons still work."
+                        macName == null -> "No $kind connected. OBS buttons still work."
                         connected -> "Buttons run on $macName."
                         else -> "Not connected to $macName. OBS buttons still work."
                     },
@@ -218,8 +220,14 @@ fun DeckScreen(
                 }
             }
             Text(
-                "Shortcuts and typing need Accessibility permission for DyskLink on the Mac. Mac commands are the ones " +
-                    "added in DyskLink on the Mac. Buttons are saved on this phone and work with any paired Mac.",
+                if (kind == "Mac") {
+                    "Shortcuts and typing need Accessibility permission for DyskLink on the Mac. Mac commands are the ones " +
+                        "added in DyskLink on the Mac. Buttons are saved on this phone and work with any paired Mac."
+                } else {
+                    "On a PC, Cmd works as Ctrl and Option as Alt, and Mac shortcuts such as Spotlight or a screenshot run " +
+                        "their Windows or Linux match. PC commands are the ones added in DyskLink on the PC. Buttons are saved " +
+                        "on this phone and work with any paired computer."
+                },
                 color = Palette.TextFaint,
                 fontSize = 12.sp,
                 lineHeight = 17.sp,
@@ -240,6 +248,7 @@ fun DeckScreen(
         val index = buttons.indexOfFirst { it.id == current.id }
         ButtonEditor(
             initial = current,
+            computer = kind,
             isNew = index < 0,
             commands = commands,
             obs = obs,
@@ -403,6 +412,7 @@ private fun ButtonEditor(
     onSave: (DeckButton) -> Unit,
     onDelete: () -> Unit,
     onMove: (Int) -> Unit,
+    computer: String = "Mac",
 ) {
     var label by remember { mutableStateOf(initial.label) }
     var icon by remember { mutableStateOf(initial.icon) }
@@ -504,7 +514,7 @@ private fun ButtonEditor(
                     }
                 }
                 when (kind) {
-                    DeckKind.Shortcut -> ShortcutPicker(value) { shortcut, name ->
+                    DeckKind.Shortcut -> ShortcutPicker(value, computer) { shortcut, name ->
                         value = shortcut
                         if (name != null && (label.isBlank() || Deck.commonShortcuts.any { it.first == label })) label = name
                         if (name != null && icon.isEmpty()) icon = shortcutIcon(name)
@@ -534,7 +544,7 @@ private fun ButtonEditor(
                     }
                     DeckKind.Command -> if (commands.isEmpty()) {
                         Text(
-                            "This Mac has no commands yet. Add them in DyskLink on the Mac, under Commands.",
+                            "This $computer has no commands yet. Add them in DyskLink on the $computer, under Commands.",
                             color = Palette.Amber,
                             fontSize = 12.sp,
                             lineHeight = 16.sp,
@@ -667,7 +677,7 @@ private fun ObsCard(obs: ObsState, prefs: android.content.SharedPreferences, cli
             Spacer(Modifier.height(10.dp))
             Text(
                 "In OBS, open Tools > WebSocket Server Settings, turn on Enable WebSocket server, and press Show Connect Info " +
-                    "for the address, port, and password. OBS can be on this Mac or any computer on the same Wi-Fi.",
+                    "for the address, port, and password. OBS can be on this computer or any other on the same Wi-Fi.",
                 color = Palette.TextSecondary,
                 fontSize = 12.sp,
                 lineHeight = 17.sp,
@@ -725,7 +735,7 @@ private fun ObsCard(obs: ObsState, prefs: android.content.SharedPreferences, cli
  * except a letter or number.
  */
 @Composable
-private fun ShortcutPicker(value: String, onChange: (shortcut: String, name: String?) -> Unit) {
+private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: String, name: String?) -> Unit) {
     val split = Deck.splitShortcut(value)
     var modifiers by remember { mutableStateOf(split?.first ?: emptySet()) }
     var key by remember { mutableStateOf(split?.second ?: "") }
@@ -739,7 +749,7 @@ private fun ShortcutPicker(value: String, onChange: (shortcut: String, name: Str
 
     val preview = Deck.normalizeShortcut(value)
     Text(
-        preview?.let { "On the Mac: " + Deck.describeShortcut(it) } ?: "Pick a ready-made shortcut, or tap the keys below.",
+        preview?.let { (if (kind == "Mac") "On the Mac: " else "On a Mac: ") + Deck.describeShortcut(it) } ?: "Pick a ready-made shortcut, or tap the keys below.",
         color = if (preview != null) Palette.Mint else Palette.TextSecondary,
         fontSize = if (preview != null) 16.sp else 12.sp,
         fontWeight = if (preview != null) FontWeight.Bold else FontWeight.Normal,
@@ -834,7 +844,7 @@ private fun missing(button: DeckButton): String? = when {
     button.kind == DeckKind.Shortcut && Deck.normalizeShortcut(button.value) == null -> "Pick a shortcut or a key."
     button.kind == DeckKind.Media && Deck.media.none { it.first == button.value } -> "Pick a media action."
     button.kind == DeckKind.Text && button.value.isEmpty() -> "Write the text to type."
-    button.kind == DeckKind.Command && button.value.isBlank() -> "Pick a Mac command."
+    button.kind == DeckKind.Command && button.value.isBlank() -> "Pick a command."
     button.kind == DeckKind.Obs && ObsAction.decode(button.value) == null -> "Pick an OBS action."
     button.label.isBlank() -> "Give the button a name."
     else -> "Something is missing."

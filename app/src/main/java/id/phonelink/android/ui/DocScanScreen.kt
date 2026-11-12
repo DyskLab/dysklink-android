@@ -1,6 +1,11 @@
 package id.phonelink.android.ui
 
 import android.app.Activity
+import android.content.ContentValues
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import id.phonelink.android.core.Peer
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -84,15 +89,17 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
 /**
- * Scans paper with Google's document scanner (edges, crop, and filters), reads the text in it, and sends
- * the PDF to the Mac. Scans stay in DyskLink's own folder until deleted.
+ * Scans paper with Google's document scanner (edges, crop, and filters), reads the text in it, and keeps the PDF
+ * in DyskLink's own folder until deleted. From there it can be saved to Documents, shared, or sent to a computer
+ * (with kind "scan", so the Mac adds a text layer) or another phone. Opened from the Tools tab, or from a Mac's
+ * page with that Mac picked as [preselected].
  */
 @Composable
 fun DocScanScreen(
-    macName: String,
-    connected: Boolean,
+    peers: List<Peer>,
+    preselected: String?,
     onBack: () -> Unit,
-    sendFile: (File) -> Unit,
+    sendFile: (peerId: String, File, kind: String?) -> Unit,
     sendText: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -102,7 +109,20 @@ fun DocScanScreen(
     var busy by remember { mutableStateOf<String?>(null) }
     val prefs = remember { context.getSharedPreferences("docscan", Context.MODE_PRIVATE) }
     var autoSend by remember { mutableStateOf(prefs.getBoolean("autoSend", true)) }
+    var keepJpeg by remember { mutableStateOf(prefs.getBoolean("jpeg", false)) }
     var opened by remember { mutableStateOf<DocScan?>(null) }
+    val unavailable = remember { playServicesProblem(context) }
+    var target by remember { mutableStateOf(preselected) }
+    val targets = scanTargets(peers, preselected)
+    val targetPeer = targets.firstOrNull { it.id == target }
+    val computers = peers.filter { it.isPaired && it.isComputer && it.isConnected }
+    val phones = peers.filter { it.isPaired && it.isPhone && it.isConnected }
+
+    fun send(peer: Peer, scan: DocScan) {
+        // A PC without `pc-scan` gets a plain file, which it keeps in Downloads.
+        sendFile(peer.id, scan.pdf, if (peer.isComputer && peer.canTakeScans) "scan" else null)
+        Toast.makeText(context, "Sending to ${peer.name}", Toast.LENGTH_SHORT).show()
+    }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
@@ -113,18 +133,22 @@ fun DocScanScreen(
             busy = "Reading the text…"
             val text = readText(context, pages)
             val saved = withContext(Dispatchers.IO) {
-                store.save(store.newName(), { target ->
+                val saved = store.save(store.newName(), { target ->
                     context.contentResolver.openInputStream(pdf.uri)?.use { input -> target.outputStream().use { input.copyTo(it) } }
                 }, pdf.pageCount, text)
+                if (keepJpeg) pages.forEachIndexed { index, uri ->
+                    runCatching {
+                        store.saveImage(saved, index + 1) { file ->
+                            context.contentResolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
+                        }
+                    }
+                }
+                saved
             }
             busy = null
             scans = store.list()
-            if (autoSend && connected) {
-                sendFile(saved.pdf)
-                Toast.makeText(context, "Sending to $macName", Toast.LENGTH_SHORT).show()
-            } else {
-                opened = saved
-            }
+            val peer = targetPeer
+            if (autoSend && peer != null && peer.isConnected) send(peer, saved) else opened = saved
         }
     }
 
@@ -143,7 +167,7 @@ fun DocScanScreen(
             }
     }
 
-    FeatureScaffold("Scan documents", onBack) {
+    FeatureScaffold("Scan document", onBack) {
         LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
                 GlassCard {
@@ -156,34 +180,52 @@ fun DocScanScreen(
                         )
                     }
                     Spacer(Modifier.height(14.dp))
-                    PrimaryButton(busy ?: "Scan a document", Modifier.fillMaxWidth()) { if (busy == null) startScan() }
+                    if (unavailable != null) {
+                        Text(unavailable, color = Palette.Amber, fontSize = 12.5.sp, lineHeight = 17.sp)
+                    } else {
+                        PrimaryButton(busy ?: "Scan a document", Modifier.fillMaxWidth()) { if (busy == null) startScan() }
+                    }
                     Spacer(Modifier.height(12.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Send to $macName right away", color = Palette.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                if (connected) "The PDF goes to Downloads/DyskLink on the Mac." else "$macName isn't connected, so scans wait here.",
-                                color = Palette.TextFaint, fontSize = 11.5.sp,
-                            )
+                    ToggleRow(
+                        "Also keep pages as JPEG",
+                        "Saved next to the PDF, and copied with it when you save to Documents.",
+                        keepJpeg,
+                    ) {
+                        keepJpeg = it
+                        prefs.edit().putBoolean("jpeg", it).apply()
+                    }
+                }
+            }
+            if (targets.isNotEmpty()) item {
+                GlassCard {
+                    ScanTargetPicker("SEND NEW SCANS TO", targets, target) { target = it }
+                    targetPeer?.let { peer ->
+                        Spacer(Modifier.height(12.dp))
+                        ToggleRow(
+                            "Send to ${peer.name} right away",
+                            if (peer.isConnected) "The PDF goes to Downloads/DyskLink there." else "${peer.name} isn't connected, so scans wait here.",
+                            autoSend,
+                        ) {
+                            autoSend = it
+                            prefs.edit().putBoolean("autoSend", it).apply()
                         }
-                        Switch(
-                            checked = autoSend,
-                            onCheckedChange = {
-                                autoSend = it
-                                prefs.edit().putBoolean("autoSend", it).apply()
-                            },
-                            colors = SwitchDefaults.colors(checkedTrackColor = Palette.Mint, checkedThumbColor = Palette.Ink),
-                        )
                     }
                 }
             }
             if (scans.isNotEmpty()) {
                 item {
-                    Text("SCANS ON THIS PHONE", color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp,
+                    Text("RECENT SCANS", color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp,
                         modifier = Modifier.padding(top = 6.dp, start = 2.dp))
                 }
             }
-            items(scans, key = { it.pdf.path }) { scan -> ScanRow(scan) { opened = scan } }
+            items(scans, key = { it.pdf.path }) { scan ->
+                ScanRow(
+                    scan,
+                    onOpen = { opened = scan },
+                    onView = { openFile(context, scan.pdf, "application/pdf") },
+                    onShare = { share(context, store, scan) },
+                )
+            }
             item { Spacer(Modifier.height(12.dp)) }
         }
     }
@@ -191,12 +233,19 @@ fun DocScanScreen(
     opened?.let { scan ->
         ScanSheet(
             scan = scan,
-            macName = macName,
-            connected = connected,
+            computers = computers,
+            phones = phones,
             onDismiss = { opened = null },
-            onSend = { sendFile(scan.pdf); Toast.makeText(context, "Sending to $macName", Toast.LENGTH_SHORT).show() },
-            onSendText = { sendText(scan.readText()) },
-            onShare = { share(context, scan) },
+            onSend = { send(it, scan) },
+            onSendText = if (computers.isNotEmpty()) ({ sendText(scan.readText()) }) else null,
+            onView = { openFile(context, scan.pdf, "application/pdf") },
+            onShare = { share(context, store, scan) },
+            onSave = { name ->
+                scope.launch {
+                    val where = withContext(Dispatchers.IO) { runCatching { saveToDocuments(context, scan, store.images(scan), name) }.getOrNull() }
+                    Toast.makeText(context, where?.let { "Saved to $it" } ?: "The scan couldn't be saved.", Toast.LENGTH_LONG).show()
+                }
+            },
             onRename = { name ->
                 store.rename(scan, name)?.let { opened = it } ?: Toast.makeText(context, "That name can't be used.", Toast.LENGTH_SHORT).show()
                 scans = store.list()
@@ -208,6 +257,63 @@ fun DocScanScreen(
             },
         )
     }
+}
+
+@Composable
+private fun ToggleRow(title: String, detail: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Palette.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(detail, color = Palette.TextFaint, fontSize = 11.5.sp)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(checkedTrackColor = Palette.Mint, checkedThumbColor = Palette.Ink),
+        )
+    }
+}
+
+/** The folder scans are saved to, under Documents. */
+private const val PUBLIC_FOLDER = "DyskLink/Scans"
+
+/**
+ * Copies the PDF (and any JPEG pages) to Documents/DyskLink/Scans through MediaStore on Android 10 and newer,
+ * or to the app's own Documents folder on older phones. Returns where it went.
+ */
+private fun saveToDocuments(context: Context, scan: DocScan, images: List<File>, wanted: String): String {
+    val name = DocScans.clean(wanted).ifEmpty { scan.name }
+    val files = listOf(scan.pdf to "$name.pdf") + images.mapIndexed { index, file -> file to "$name page ${index + 1}.jpg" }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = context.contentResolver
+        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        files.forEach { (file, display) ->
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, display)
+                put(MediaStore.MediaColumns.MIME_TYPE, if (display.endsWith(".pdf")) "application/pdf" else "image/jpeg")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOCUMENTS}/$PUBLIC_FOLDER/")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(collection, values) ?: error("MediaStore refused $display")
+            try {
+                resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } } ?: error("No stream for $display")
+                resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            } catch (error: Exception) {
+                resolver.delete(uri, null, null)
+                throw error
+            }
+        }
+        return "${Environment.DIRECTORY_DOCUMENTS}/$PUBLIC_FOLDER"
+    }
+    val folder = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: File(context.filesDir, "Documents"), PUBLIC_FOLDER)
+    folder.mkdirs()
+    files.forEach { (file, display) ->
+        val base = display.substringBeforeLast('.')
+        val ext = display.substringAfterLast('.')
+        val unique = DocScans.uniqueName(base) { File(folder, "$it.$ext").exists() }
+        file.copyTo(File(folder, "$unique.$ext"))
+    }
+    return "DyskLink's Documents folder (Android/data/${context.packageName}/files/Documents/$PUBLIC_FOLDER)"
 }
 
 private suspend fun <T> Task<T>.awaitResult(): T = suspendCancellableCoroutine { continuation ->
@@ -225,11 +331,14 @@ private suspend fun readText(context: Context, pages: List<Uri>): String {
     }
 }
 
-private fun share(context: Context, scan: DocScan) {
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", scan.pdf)
-    val send = Intent(Intent.ACTION_SEND).setType("application/pdf").putExtra(Intent.EXTRA_STREAM, uri)
+/** Shares the PDF, and its JPEG pages when they were kept. */
+private fun share(context: Context, store: DocScans, scan: DocScan) {
+    val images = store.images(scan)
+    if (images.isEmpty()) return shareFile(context, scan.pdf, "application/pdf", scan.name)
+    val uris = ArrayList((listOf(scan.pdf) + images).map { FileProvider.getUriForFile(context, "${context.packageName}.files", it) })
+    val send = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    context.startActivity(Intent.createChooser(send, scan.name))
+    startSafely(context, Intent.createChooser(send, scan.name))
 }
 
 /** The first page of the PDF, drawn small. */
@@ -260,7 +369,7 @@ private fun PdfThumb(file: File, width: Int = 52, height: Int = 68) {
 }
 
 @Composable
-private fun ScanRow(scan: DocScan, onOpen: () -> Unit) {
+private fun ScanRow(scan: DocScan, onOpen: () -> Unit, onView: () -> Unit, onShare: () -> Unit) {
     val dates = remember { SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()) }
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Palette.Panel.copy(alpha = 0.8f))
@@ -281,8 +390,13 @@ private fun ScanRow(scan: DocScan, onOpen: () -> Unit) {
                 color = if (preview.isEmpty()) Palette.TextFaint else Palette.TextSecondary,
                 fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScanAction("Open", Palette.Mint, onView)
+                ScanAction("Share", onClick = onShare)
+                ScanAction("More", onClick = onOpen)
+            }
         }
-        Text("  ›", color = Palette.TextFaint, fontSize = 16.sp)
     }
 }
 
@@ -290,12 +404,14 @@ private fun ScanRow(scan: DocScan, onOpen: () -> Unit) {
 @Composable
 private fun ScanSheet(
     scan: DocScan,
-    macName: String,
-    connected: Boolean,
+    computers: List<Peer>,
+    phones: List<Peer>,
     onDismiss: () -> Unit,
-    onSend: () -> Unit,
-    onSendText: () -> Unit,
+    onSend: (Peer) -> Unit,
+    onSendText: (() -> Unit)?,
+    onView: () -> Unit,
     onShare: () -> Unit,
+    onSave: (String) -> Unit,
     onRename: (String) -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -303,6 +419,7 @@ private fun ScanSheet(
     val text = remember(scan.pdf.path, scan.created) { scan.readText() }
     var name by remember(scan.pdf.path) { mutableStateOf(scan.name) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var saveAs by remember { mutableStateOf<String?>(null) }
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -329,10 +446,16 @@ private fun ScanSheet(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PrimaryButton(if (connected) "Send PDF to Mac" else "Mac not connected", Modifier.weight(1f).then(if (connected) Modifier else Modifier.background(Color.Transparent))) {
-                    if (connected) onSend() else Toast.makeText(context, "Open DyskLink on $macName first.", Toast.LENGTH_SHORT).show()
-                }
+                PrimaryButton("Save to phone", Modifier.weight(1f)) { saveAs = name.trim().ifEmpty { scan.name } }
                 SecondaryButton("Share", Modifier.weight(0.6f), onClick = onShare)
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScanAction("Open", Palette.Mint, onView)
+                computers.forEach { peer -> ScanAction("Send to ${peer.name}", Palette.Sky) { onSend(peer) } }
+                phones.forEach { peer -> ScanAction("Send to ${peer.name}", Palette.Violet) { onSend(peer) } }
+            }
+            if (computers.isNotEmpty()) {
+                Text("A computer adds a text layer to the PDF, so it can be searched there.", color = Palette.TextFaint, fontSize = 11.5.sp)
             }
             Text("TEXT IN THE SCAN", color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
             if (text.isEmpty()) {
@@ -353,7 +476,7 @@ private fun ScanSheet(
                         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(scan.name, text))
                         Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
                     }
-                    if (connected) SecondaryButton("Text to Mac clipboard", onClick = onSendText)
+                    if (onSendText != null) SecondaryButton("Text to computer clipboard", onClick = onSendText)
                 }
             }
             Text("Delete this scan", color = Palette.Coral, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
@@ -364,9 +487,32 @@ private fun ScanSheet(
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete ${scan.name}?") },
-            text = { Text("It's removed from the phone. A copy already sent to the Mac stays there.") },
+            text = { Text("It's removed from DyskLink. Copies saved to Documents or sent to other devices stay there.") },
             confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete", color = Palette.Coral) } },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        )
+    }
+    saveAs?.let { value ->
+        AlertDialog(
+            onDismissRequest = { saveAs = null },
+            title = { Text("Save to Documents") },
+            text = {
+                Column {
+                    Text("Saved in Documents/DyskLink/Scans, where file managers and other apps can find it.", fontSize = 13.sp)
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = { saveAs = it.take(80) },
+                        label = { Text("File name") },
+                        suffix = { Text(".pdf") },
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = DocScans.clean(value).isNotEmpty(), onClick = { saveAs = null; onSave(value) }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { saveAs = null }) { Text("Cancel") } },
         )
     }
 }

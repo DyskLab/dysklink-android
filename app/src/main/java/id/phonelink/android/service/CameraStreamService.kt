@@ -12,6 +12,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.ImageFormat
 import android.graphics.Rect
+import android.graphics.YuvImage
+import android.media.Image
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -30,6 +32,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.view.OrientationEventListener
@@ -41,6 +44,9 @@ import id.phonelink.android.R
 import id.phonelink.android.core.CameraMath
 import id.phonelink.android.core.CameraState
 import id.phonelink.android.core.Envelope
+import id.phonelink.android.core.JpegFrames
+import id.phonelink.android.core.JpegStreamer
+import id.phonelink.android.core.Yuv
 import id.phonelink.android.core.ShotQueue
 import id.phonelink.android.core.MessageType
 import id.phonelink.android.core.ScreenInfo
@@ -94,6 +100,13 @@ class CameraStreamService : Service() {
     private var videoFormat: MediaFormat? = null
     private var recording: Recording? = null
 
+    // A Windows or Linux PC gets JPEG frames instead of H.264 (see PcRules), made from YUV pictures.
+    private var forPc = false
+    private var yuv: ImageReader? = null
+    private var jpegStream: JpegStreamer? = null
+    private var drainPosted = false
+    private val drainLater = Runnable { drainPosted = false; drain() }
+
     private class Recording(val video: RemoteCaptures.Video, val muxer: MediaMuxer, val track: Int) {
         var firstUs = -1L
         var waitingForKey = true
@@ -128,6 +141,7 @@ class CameraStreamService : Service() {
         val manager = PhoneLinkService.connectionManager.value
         val who = manager?.peers?.value?.firstOrNull { it.id == peer }
         forPhone = who?.isPhone == true
+        forPc = who?.pcCamera == true
         peerName = who?.name ?: if (forPhone) "the other phone" else "Your Mac"
         // A phone only gets the camera once it's allowed here, whatever started this.
         if (forPhone && manager?.phoneAccess?.of(peer)?.camera != true) {
@@ -149,7 +163,7 @@ class CameraStreamService : Service() {
                 handler.post {
                     deviceDegrees = value
                     val rotation = CameraMath.rotation(sensorOrientation, deviceDegrees, front)
-                    if (rotation != sentRotation && encoder != null) sendStarted()
+                    if (rotation != sentRotation && (encoder != null || jpegStream != null)) sendStarted()
                 }
             }
         }.also { if (it.canDetectOrientation()) it.enable() }
@@ -173,7 +187,8 @@ class CameraStreamService : Service() {
             front = chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
             sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: error("The camera has no video sizes")
-            val sizes = map.getOutputSizes(MediaCodec::class.java).orEmpty().map { it.width to it.height }
+            val sizes = (if (forPc) map.getOutputSizes(ImageFormat.YUV_420_888) else map.getOutputSizes(MediaCodec::class.java))
+                .orEmpty().map { it.width to it.height }
             val (width, height) = CameraMath.pickSize(sizes) ?: error("The camera has no video sizes")
             hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
             activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
@@ -191,7 +206,7 @@ class CameraStreamService : Service() {
                     }
                 }
             }
-            startEncoder(width, height)
+            if (forPc) startJpeg(width, height) else startEncoder(width, height)
             manager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
                     camera = device
@@ -412,14 +427,75 @@ class CameraStreamService : Service() {
         send(started(rotation))
     }
 
-    /** A phone also gets zoom, torch, and recording; a Mac gets what it always did. */
+    /** A phone also gets zoom, torch, and recording; a PC gets JPEG and the torch; a Mac gets what it always did. */
     private fun started(rotation: Int): Envelope = Envelope(
         MessageType.CAMERA_STARTED, screen = size, text = if (front) "front" else "back", rotation = rotation,
-        cameraState = if (!forPhone) null else CameraState(
-            zoom = zoom, maxZoom = maxZoom, flash = hasFlash && !front, torch = torch && !front,
-            recording = recording != null, stills = stills != null,
-        ),
+        cameraState = when {
+            forPhone -> CameraState(
+                zoom = zoom, maxZoom = maxZoom, flash = hasFlash && !front, torch = torch && !front,
+                recording = recording != null, stills = stills != null,
+            )
+            forPc -> CameraState(flash = hasFlash && !front, torch = torch && !front)
+            else -> null
+        },
+        format = if (forPc) JpegFrames.FORMAT else null,
     )
+
+    /** Pictures for a PC: YUV from the camera, made JPEG as often as the PC's link keeps up (see JpegPacer). */
+    private fun startJpeg(width: Int, height: Int) {
+        size = ScreenInfo(width, height)
+        val images = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 3)
+        val stream = JpegStreamer(scope, ::send, MessageType.CAMERA_FRAME, clock = SystemClock::elapsedRealtime) {
+            handler.post { stopSelf() }
+        }
+        images.setOnImageAvailableListener({ drain() }, handler)
+        yuv = images
+        surface = images.surface
+        jpegStream = stream
+    }
+
+    /** On the camera thread. Pictures that come too soon are skipped; the newest one is taken when it's time. */
+    private fun drain() {
+        val stream = jpegStream ?: return
+        val images = yuv ?: return
+        if (!stream.due()) {
+            // The camera keeps sending at 30 fps: older pictures are dropped so the camera never stalls.
+            runCatching { images.acquireLatestImage() }.getOrNull()?.let { latest ->
+                latest.close()
+            }
+            if (!drainPosted) {
+                drainPosted = true
+                handler.postDelayed(drainLater, stream.waitMs().coerceAtLeast(1))
+            }
+            return
+        }
+        val image = runCatching { images.acquireLatestImage() }.getOrNull() ?: return
+        try {
+            stream.offer(encodeJpeg(image, stream.quality))
+        } catch (error: Exception) {
+            Log.w(TAG, "Camera picture lost", error)
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun encodeJpeg(image: Image, quality: Int): ByteArray {
+        val (y, u, v) = image.planes
+        val nv21 = Yuv.nv21(image.width, image.height, y.buffer, y.rowStride, u.buffer, v.buffer, v.rowStride, v.pixelStride)
+        val out = java.io.ByteArrayOutputStream(96 * 1024)
+        YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null).compressToJpeg(Rect(0, 0, image.width, image.height), quality, out)
+        return out.toByteArray()
+    }
+
+    private fun releaseJpeg() {
+        handler.removeCallbacks(drainLater)
+        drainPosted = false
+        jpegStream?.close(notify = false)
+        jpegStream = null
+        if (yuv != null) surface = null
+        runCatching { yuv?.close() }
+        yuv = null
+    }
 
     private fun send(envelope: Envelope): Boolean {
         val peer = peerId ?: return false
@@ -483,10 +559,12 @@ class CameraStreamService : Service() {
     }
 
     private fun toggleTorch() {
-        if (front || (forPhone && !hasFlash)) return
+        if (front || ((forPhone || forPc) && !hasFlash)) return
         torch = !torch
         repeat()
         updateStatus()
+        // A PC shows whether the torch is on.
+        if (forPc) sendStarted()
     }
 
     private fun updateStatus() {
@@ -508,6 +586,7 @@ class CameraStreamService : Service() {
     }
 
     private fun releaseEncoder() {
+        releaseJpeg()
         stopRecording()
         videoFormat = null
         streamer?.close(notify = false)
@@ -526,10 +605,19 @@ class CameraStreamService : Service() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, PhoneLinkService.SHARING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo_glyph)
-            .setContentTitle(if (forPhone) "Camera used by $peerName" else "Camera shared with Mac")
+            .setContentTitle(
+                when {
+                    forPhone -> "Camera used by $peerName"
+                    forPc -> "Camera shared with $peerName"
+                    else -> "Camera shared with Mac"
+                },
+            )
             .setContentText(
-                if (forPhone) "$peerName sees what this camera sees and can take photos. Tap Stop to end it."
-                else "The Mac sees what this camera sees.",
+                when {
+                    forPhone -> "$peerName sees what this camera sees and can take photos. Tap Stop to end it."
+                    forPc -> "$peerName sees what this camera sees. Tap Stop to end it."
+                    else -> "The Mac sees what this camera sees."
+                },
             )
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())

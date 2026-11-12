@@ -19,18 +19,18 @@ import id.phonelink.android.service.PhoneSoundService
 
 /** Sound both ways: the Mac's sound on this phone, or this phone's sound on the Mac. */
 @Composable
-fun SoundScreen(peerId: String, macName: String, connected: Boolean, isMac: Boolean, onBack: () -> Unit, startSending: () -> Unit) {
+fun SoundScreen(peerId: String, macName: String, connected: Boolean, isMac: Boolean, onBack: () -> Unit, canListen: Boolean = isMac, startSending: () -> Unit) {
     val context = LocalContext.current
     val listening by AudioShare.listening.collectAsState()
     val sending by AudioShare.sending.collectAsState()
     val problem by AudioShare.problem.collectAsState()
     val kind = if (isMac) "Mac" else "PC"
     FeatureScaffold("Sound sharing", onBack) {
-        // Windows and Linux can't send their sound yet.
-        if (isMac) GlassCard {
+        // A Mac, and a Windows or Linux PC whose DyskLink sends its sound (pc-sound-out).
+        if (canListen) GlassCard {
             Text("Hear $macName on this phone", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "Music and videos on the Mac play here, on the speaker or earphones. Turn on \"Let phones hear this Mac\" on the Mac first. " +
+                "Music and videos on the $kind play here, on the speaker or earphones. Turn on \"Let phones hear this $kind\" on the $kind first. " +
                     "The sound is about a quarter of a second behind, so it suits music more than videos.",
                 color = Palette.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp,
             )
@@ -41,7 +41,7 @@ fun SoundScreen(peerId: String, macName: String, connected: Boolean, isMac: Bool
                 PrimaryButton("Listen", Modifier.fillMaxWidth().alpha(if (connected) 1f else 0.4f)) { if (connected) AudioShare.listen(peerId) }
             }
         }
-        if (isMac) Spacer(Modifier.height(12.dp))
+        if (canListen) Spacer(Modifier.height(12.dp))
         GlassCard {
             Text("Play this phone on $macName", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Text(

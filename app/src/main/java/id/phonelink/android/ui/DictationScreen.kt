@@ -51,7 +51,7 @@ import id.phonelink.android.core.DictationLanguage
 import id.phonelink.android.core.InputEvent
 
 @Composable
-fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, send: (InputEvent) -> Unit) {
+fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, kind: String = "Mac", send: (InputEvent) -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("dictation", Context.MODE_PRIVATE) }
     var language by remember {
@@ -158,7 +158,7 @@ fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, sen
         if (granted) start() else problem = "DyskLink needs the microphone to hear you. Allow it in the app's settings."
     }
 
-    FeatureScaffold("Voice typing to Mac", onBack) {
+    FeatureScaffold("Voice typing to $kind", onBack) {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             GlassCard {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -259,7 +259,7 @@ fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, sen
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         SecondaryButton("Clear", Modifier.weight(1f)) { draft = "" }
                         if (connected) {
-                            PrimaryButton("Send to Mac", Modifier.weight(1f)) {
+                            PrimaryButton("Send to $kind", Modifier.weight(1f)) {
                                 if (draft.isNotBlank()) {
                                     Dictation.events(draft).forEach(send)
                                     typed = draft.takeLast(200)

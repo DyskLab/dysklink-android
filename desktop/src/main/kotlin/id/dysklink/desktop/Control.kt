@@ -98,9 +98,20 @@ class PcInput(private val pasteText: (String) -> Boolean) {
                 }
                 "text" -> type(robot, event.text.orEmpty())
                 "key" -> Keys.named[event.key]?.let { tap(robot, it, emptyList()) }
-                "shortcut" -> Keys.parse(event.key.orEmpty())?.let { (key, mods) -> tap(robot, key, mods) }
+                // The phone speaks Mac shortcuts (the Stream Deck's Spotlight, Lock screen...): those become this PC's own.
+                "shortcut" -> MacShortcuts.forPc(event.key.orEmpty(), Platform.isWindows)?.let(Keys::parse)?.let { (key, mods) -> tap(robot, key, mods) }
             }
         }.onFailure { CoreLog.w("DyskLink", "Input failed", it) }
+    }
+
+    /**
+     * A tap or drag on this PC's screen from the phone viewing it, at [x], [y] in desktop pixels, as the Mac's
+     * `macscreen.pointer`: `down`, `drag`, and `up` hold the left button; `double` is the second click of a double-click.
+     */
+    fun pointerAt(kind: String, x: Int, y: Int) {
+        val robot = robot ?: return
+        runCatching { PointerSteps.of(kind).forEach { step -> step.apply(robot, x, y) } }
+            .onFailure { CoreLog.w("DyskLink", "Pointer failed", it) }
     }
 
     private fun tap(robot: Robot, key: Int, modifiers: List<Int>) {
@@ -130,6 +141,32 @@ class PcInput(private val pasteText: (String) -> Boolean) {
     }
 }
 
+/** What a `macscreen.pointer` kind does with the pointer and buttons, in order. */
+enum class PointerStep {
+    MOVE, LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP;
+
+    fun apply(robot: Robot, x: Int, y: Int) = when (this) {
+        MOVE -> robot.mouseMove(x, y)
+        LEFT_DOWN -> robot.mousePress(AwtInput.BUTTON1_DOWN_MASK)
+        LEFT_UP -> robot.mouseRelease(AwtInput.BUTTON1_DOWN_MASK)
+        RIGHT_DOWN -> robot.mousePress(AwtInput.BUTTON3_DOWN_MASK)
+        RIGHT_UP -> robot.mouseRelease(AwtInput.BUTTON3_DOWN_MASK)
+    }
+}
+
+object PointerSteps {
+    fun of(kind: String): List<PointerStep> = when (kind) {
+        "move", "drag" -> listOf(PointerStep.MOVE)
+        "down" -> listOf(PointerStep.MOVE, PointerStep.LEFT_DOWN)
+        "up" -> listOf(PointerStep.MOVE, PointerStep.LEFT_UP)
+        "click" -> listOf(PointerStep.MOVE, PointerStep.LEFT_DOWN, PointerStep.LEFT_UP)
+        // The first tap was a click already; a second one soon after is a double-click to Windows and X11.
+        "double" -> listOf(PointerStep.MOVE, PointerStep.LEFT_DOWN, PointerStep.LEFT_UP)
+        "right" -> listOf(PointerStep.MOVE, PointerStep.RIGHT_DOWN, PointerStep.RIGHT_UP)
+        else -> emptyList()
+    }
+}
+
 /** Key names and shortcuts the phone sends. "cmd" means Ctrl here, so the phone's Copy and Paste work. */
 object Keys {
     val named: Map<String, Int> = buildMap {
@@ -145,6 +182,7 @@ object Keys {
         put("-", KeyEvent.VK_MINUS); put("=", KeyEvent.VK_EQUALS); put("[", KeyEvent.VK_OPEN_BRACKET); put("]", KeyEvent.VK_CLOSE_BRACKET)
         put("\\", KeyEvent.VK_BACK_SLASH); put(";", KeyEvent.VK_SEMICOLON); put("'", KeyEvent.VK_QUOTE); put(",", KeyEvent.VK_COMMA)
         put(".", KeyEvent.VK_PERIOD); put("/", KeyEvent.VK_SLASH); put("`", KeyEvent.VK_BACK_QUOTE)
+        put("printscreen", KeyEvent.VK_PRINTSCREEN)
     }
 
     private val modifiers: Map<String, Int> = mapOf(
@@ -153,10 +191,11 @@ object Keys {
         "win" to KeyEvent.VK_WINDOWS, "super" to KeyEvent.VK_WINDOWS, "meta" to KeyEvent.VK_WINDOWS,
     )
 
-    /** "cmd+shift+t" → T with Ctrl and Shift held, or null for anything not on the lists. */
+    /** "cmd+shift+t" → T with Ctrl and Shift held, or null for anything not on the lists. "win" alone taps that key. */
     fun parse(text: String): Pair<Int, List<Int>>? {
         val parts = text.lowercase().trim().split('+').map { it.trim() }.filter { it.isNotEmpty() }
         if (parts.isEmpty()) return null
+        if (parts.size == 1) modifiers[parts[0]]?.let { return it to emptyList() }
         val key = named[parts.last()] ?: return null
         val mods = parts.dropLast(1).map { modifiers[it] ?: return null }.distinct()
         return key to mods
@@ -174,6 +213,84 @@ object Keys {
         c in SHIFTED -> named[UNSHIFTED[SHIFTED.indexOf(c)].toString()]?.let { it to true }
         else -> named[c.toString()]?.let { it to false }
     }
+}
+
+/**
+ * The Stream Deck on the phone (and its other remotes) send Mac shortcuts, normalized as `fn`, `ctrl`, `opt`, `shift`,
+ * `cmd` and a key. Most are the same with Command as Ctrl (Copy, Save, New tab). The ones that only mean something on
+ * a Mac become what does the same here: Spotlight opens the Start menu or the Activities search, Lock screen is
+ * Win+L, Screenshot area is Win+Shift+S, and so on. The result is for [Keys.parse].
+ */
+object MacShortcuts {
+    private val order = listOf("fn", "ctrl", "opt", "shift", "cmd")
+
+    /** A Mac shortcut as this PC's, or null when it means nothing here. */
+    fun forPc(shortcut: String, windows: Boolean): String? {
+        val parts = shortcut.lowercase().replace(" ", "").split('+').filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return null
+        val key = parts.last()
+        val mods = parts.dropLast(1).map {
+            when (it) { "command" -> "cmd"; "option", "alt" -> "opt"; "control" -> "ctrl"; "super", "meta" -> "win"; else -> it }
+        }.toSet()
+        if (mods.any { it !in order && it != "win" }) return null
+        val normal = (order.filter { it in mods } + key).joinToString("+")
+        (if (windows) WINDOWS[normal] else LINUX[normal])?.let { return it.ifEmpty { null } }
+        // Anything else: Command is Ctrl (Command and Control together are one Ctrl), Option is Alt, fn is dropped.
+        val pc = buildList {
+            if ("ctrl" in mods || "cmd" in mods) add("ctrl")
+            if ("opt" in mods) add("alt")
+            if ("shift" in mods) add("shift")
+            if ("win" in mods) add("win")
+            add(key)
+        }
+        return pc.joinToString("+")
+    }
+
+    /** Mac shortcut, as the phone normalizes it, to the Windows one. Empty: nothing to do here. */
+    val WINDOWS: Map<String, String> = mapOf(
+        "cmd+space" to "win",
+        "ctrl+up" to "win+tab",
+        "ctrl+down" to "win+tab",
+        "ctrl+left" to "ctrl+win+left",
+        "ctrl+right" to "ctrl+win+right",
+        "fn+f11" to "win+d",
+        "shift+cmd+3" to "win+printscreen",
+        "shift+cmd+4" to "win+shift+s",
+        "shift+cmd+5" to "win+shift+s",
+        "ctrl+cmd+space" to "win+.",
+        "opt+cmd+escape" to "ctrl+shift+escape",
+        "ctrl+cmd+q" to "win+l",
+        "cmd+q" to "alt+f4",
+        "cmd+tab" to "alt+tab",
+        "shift+cmd+tab" to "alt+shift+tab",
+        "cmd+h" to "win+down",
+        "cmd+m" to "win+down",
+        "ctrl+cmd+f" to "f11",
+        "opt+space" to "",
+    )
+
+    /** The same for Linux desktops (GNOME, KDE, Xfce and the like, which mostly agree on these). */
+    val LINUX: Map<String, String> = mapOf(
+        "cmd+space" to "win",
+        "ctrl+up" to "win",
+        "ctrl+down" to "win",
+        "ctrl+left" to "ctrl+alt+left",
+        "ctrl+right" to "ctrl+alt+right",
+        "fn+f11" to "win+d",
+        "shift+cmd+3" to "printscreen",
+        "shift+cmd+4" to "shift+printscreen",
+        "shift+cmd+5" to "printscreen",
+        "ctrl+cmd+space" to "ctrl+.",
+        "opt+cmd+escape" to "ctrl+alt+escape",
+        "ctrl+cmd+q" to "win+l",
+        "cmd+q" to "alt+f4",
+        "cmd+tab" to "alt+tab",
+        "shift+cmd+tab" to "alt+shift+tab",
+        "cmd+h" to "win+h",
+        "cmd+m" to "win+h",
+        "ctrl+cmd+f" to "f11",
+        "opt+space" to "",
+    )
 }
 
 /** Play, skip, and volume from the phone's media remote. */

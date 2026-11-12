@@ -75,6 +75,8 @@ class PhoneBridge(
     private val data: PhoneData,
     private val files: FileTransfers,
     private val pairedPeers: () -> List<String>,
+    /** The computers that get new SMS as they arrive: Macs, and PCs that read SMS. */
+    private val smsPeers: () -> List<String> = pairedPeers,
     /** Forwards to other phones, by their own switches. Null when there are none (tests, the desktop). */
     private val relay: NotificationRelay? = null,
     /** New SMS for the phones that read this phone's SMS, by their own switch. */
@@ -242,7 +244,7 @@ class PhoneBridge(
         val fresh = data.readSms(SMS_PUSH_LIMIT, afterId = lastSmsId)
         val newest = fresh.maxOfOrNull { it.id } ?: return@onIo
         lastSmsId = newest
-        pairedPeers().forEach { send(it, Envelope(MessageType.SMS_NEW, sms = fresh)) }
+        smsPeers().forEach { send(it, Envelope(MessageType.SMS_NEW, sms = fresh)) }
     }
 
     fun callStateChanged(state: String, number: String?) {

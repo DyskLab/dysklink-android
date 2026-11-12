@@ -198,11 +198,25 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
     var showDeck by remember { mutableStateOf(false) }
     var showWebFiles by remember { mutableStateOf(false) }
     var showPhoneTools by remember { mutableStateOf(false) }
+    var showBarcodes by remember { mutableStateOf(false) }
+    var showDocScan by remember { mutableStateOf(false) }
+    var showTodo by remember { mutableStateOf(false) }
+    var showWater by remember { mutableStateOf(false) }
+    var showPomodoro by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var homeTab by rememberSaveable { mutableStateOf(HomeTab.Devices) }
     /** Set when the history is opened from a Mac's page, to show only that Mac's files at first. */
     var historyPeer by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(state.prayerRequest) { if (state.prayerRequest > 0) showPrayer = true }
+    // A Water or Pomodoro notification was tapped.
+    val toolRequest by id.phonelink.android.service.PhoneToolsNav.request.collectAsStateWithLifecycle()
+    LaunchedEffect(toolRequest) {
+        val tool = toolRequest?.first ?: return@LaunchedEffect
+        id.phonelink.android.service.PhoneToolsNav.request.value = null
+        showTodo = tool == id.phonelink.android.service.PhoneToolsNav.TODO
+        showWater = tool == id.phonelink.android.service.PhoneToolsNav.WATER
+        showPomodoro = tool == id.phonelink.android.service.PhoneToolsNav.POMODORO
+    }
     LaunchedEffect(state.featureRequest) {
         val name = state.featureRequest?.first ?: return@LaunchedEffect
         val mac = state.peers.firstOrNull { it.isMac && it.isPaired && it.isConnected }
@@ -211,6 +225,7 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
         if (name == "Deck") { showDeck = true; return@LaunchedEffect }
         Feature.entries.firstOrNull { it.name == name }?.let {
             showPrayer = false; showNetwork = false; showHistory = false; showPhoneTools = false; showWebFiles = false
+            showBarcodes = false; showDocScan = false; showTodo = false; showWater = false; showPomodoro = false
             selectedId = mac.id
             feature = it
         }
@@ -232,6 +247,27 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                 onClear = actions.clearTransfers,
                 onOpenFolder = actions.openReceivedFolder,
             )
+        } else if (showBarcodes) {
+            BackHandler { showBarcodes = false }
+            ScanScreen(state.peers, null, onBack = { showBarcodes = false }, send = actions.sendInput)
+        } else if (showDocScan) {
+            BackHandler { showDocScan = false }
+            DocScanScreen(
+                state.peers,
+                null,
+                onBack = { showDocScan = false },
+                sendFile = actions.sendLocalFile,
+                sendText = actions.sendClipboardText,
+            )
+        } else if (showTodo) {
+            BackHandler { showTodo = false }
+            TodoScreen(onBack = { showTodo = false })
+        } else if (showWater) {
+            BackHandler { showWater = false }
+            WaterScreen(onBack = { showWater = false })
+        } else if (showPomodoro) {
+            BackHandler { showPomodoro = false }
+            PomodoroScreen(onBack = { showPomodoro = false }, openExactAlarms = actions.openExactAlarms)
         } else if (showPhoneTools) {
             BackHandler { showPhoneTools = false }
             PhoneToolsScreen(onBack = { showPhoneTools = false }, onAllowFiles = { actions.grantPhoneFeature(PhoneFeature.Files) })
@@ -339,6 +375,7 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                     state.commands[selected.id].orEmpty(),
                     state.commandResult,
                     closeFeature,
+                    kind = if (selected.isMac) "Mac" else "PC",
                 ) { actions.runCommand(selected.id, it) }
                 Feature.Notch -> NotchScreen(
                     selected.name,
@@ -349,6 +386,7 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                     send = { actions.notchAction(selected.id, it) },
                     setFocusDnd = actions.setFocusDnd,
                     openDndSettings = actions.openDndSettings,
+                    kind = if (selected.isComputer && !selected.isMac) "PC" else "Mac",
                 )
                 Feature.Deck -> DeckScreen(
                     selected.name,
@@ -359,21 +397,22 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                     sendInput = { actions.sendInput(selected.id, it) },
                     sendMedia = { actions.sendMedia(selected.id, it) },
                     runCommand = { actions.runCommand(selected.id, it) },
+                    kind = if (selected.isComputer && !selected.isMac) "PC" else "Mac",
                 )
-                Feature.Scan -> ScanScreen(selected.name, selected.isConnected, closeFeature) { actions.sendInput(selected.id, it) }
+                Feature.Scan -> ScanScreen(state.peers, selected.id, closeFeature, send = actions.sendInput)
                 Feature.Terminal -> TerminalScreen(selected.id, selected.name, selected.isConnected, actions.terminalLink, closeFeature)
-                Feature.Sound -> SoundScreen(selected.id, selected.name, selected.isConnected, selected.isMac, closeFeature) { actions.startPhoneSound(selected.id) }
+                Feature.Sound -> SoundScreen(selected.id, selected.name, selected.isConnected, selected.isMac, closeFeature, canListen = selected.canHear) { actions.startPhoneSound(selected.id) }
                 Feature.Camera -> CameraScreen(selected.id, selected.name, selected.isConnected, actions.startCamera, closeFeature)
-                Feature.MacScreen -> MacScreenScreen(selected.id, selected.name, selected.isConnected, selected.info?.inputTrusted, actions.macScreenLink, closeFeature)
-                Feature.SecondDisplay -> MacScreenScreen(selected.id, selected.name, selected.isConnected, selected.info?.inputTrusted, actions.macScreenLink, closeFeature, extend = true)
+                Feature.MacScreen -> MacScreenScreen(selected.id, selected.name, selected.isConnected, selected.info?.inputTrusted, actions.macScreenLink, closeFeature, isMac = selected.isMac)
+                Feature.SecondDisplay -> MacScreenScreen(selected.id, selected.name, selected.isConnected, selected.info?.inputTrusted, actions.macScreenLink, closeFeature, extend = true, isMac = selected.isMac)
                 Feature.DocScan -> DocScanScreen(
-                    selected.name,
-                    selected.isConnected,
+                    state.peers,
+                    selected.id,
                     closeFeature,
-                    sendFile = { actions.sendLocalFile(selected.id, it, "scan") },
+                    sendFile = actions.sendLocalFile,
                     sendText = actions.sendClipboardText,
                 )
-                Feature.Dictation -> DictationScreen(selected.name, selected.isConnected, closeFeature) { actions.sendInput(selected.id, it) }
+                Feature.Dictation -> DictationScreen(selected.name, selected.isConnected, closeFeature, kind = if (selected.isComputer && !selected.isMac) "PC" else "Mac") { actions.sendInput(selected.id, it) }
                 Feature.Sharing -> SharingScreen(
                     state.phoneEnabled,
                     state.phoneActive,
@@ -415,6 +454,11 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                 onOpenDeck = { showDeck = true },
                 onOpenWebFiles = { showWebFiles = true },
                 onOpenPhoneTools = { showPhoneTools = true },
+                onOpenBarcodes = { showBarcodes = true },
+                onOpenDocScan = { showDocScan = true },
+                onOpenTodo = { showTodo = true },
+                onOpenWater = { showWater = true },
+                onOpenPomodoro = { showPomodoro = true },
                 tab = homeTab,
                 onTab = { homeTab = it },
                 actions = actions,
@@ -450,6 +494,11 @@ private fun HomeScreen(
     onOpenDeck: () -> Unit,
     onOpenWebFiles: () -> Unit,
     onOpenPhoneTools: () -> Unit,
+    onOpenBarcodes: () -> Unit,
+    onOpenDocScan: () -> Unit,
+    onOpenTodo: () -> Unit,
+    onOpenWater: () -> Unit,
+    onOpenPomodoro: () -> Unit,
     tab: HomeTab,
     onTab: (HomeTab) -> Unit,
     actions: UiActions,
@@ -500,6 +549,16 @@ private fun HomeScreen(
                     }
                 }
             }
+            Spacer(Modifier.height(12.dp))
+            BarcodeHomeCard(onOpenBarcodes)
+            Spacer(Modifier.height(12.dp))
+            DocScanHomeCard(onOpenDocScan)
+            Spacer(Modifier.height(12.dp))
+            TodoHomeCard(onOpenTodo)
+            Spacer(Modifier.height(12.dp))
+            WaterHomeCard(onOpenWater)
+            Spacer(Modifier.height(12.dp))
+            PomodoroHomeCard(onOpenPomodoro)
             Spacer(Modifier.height(12.dp))
             PhoneToolsHomeCard(onOpenPhoneTools)
             Spacer(Modifier.height(12.dp))
@@ -1093,9 +1152,9 @@ private fun DetailScreen(
             if (peer.isComputer) {
                 Spacer(Modifier.height(24.dp))
                 SectionLabel("CONTROL THE PC")
-                PC_FEATURES.chunked(2).forEach { row ->
+                pcFeatures(peer).chunked(2).forEach { row ->
                     Row(Modifier.padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        row.forEach { item -> FeatureTile(item, Modifier.weight(1f)) { onOpenFeature(item) } }
+                        row.forEach { item -> FeatureTile(item, Modifier.weight(1f), item.pcTitle, item.pcBlurb(peer)) { onOpenFeature(item) } }
                         if (row.size == 1) Spacer(Modifier.weight(1f))
                     }
                 }
@@ -1316,12 +1375,12 @@ private val Feature.blurb: String
     }
 
 @Composable
-private fun FeatureTile(feature: Feature, modifier: Modifier, onClick: () -> Unit) {
+private fun FeatureTile(feature: Feature, modifier: Modifier, title: String = feature.title, blurb: String = feature.blurb, onClick: () -> Unit) {
     GlassCard(modifier, onClick = onClick) {
         FlatIcon(feature.icon, feature.tint)
         Spacer(Modifier.height(10.dp))
-        Text(feature.title, color = Palette.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2, lineHeight = 18.sp, overflow = TextOverflow.Ellipsis)
-        Text(feature.blurb, color = Palette.TextFaint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(title, color = Palette.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2, lineHeight = 18.sp, overflow = TextOverflow.Ellipsis)
+        Text(blurb, color = Palette.TextFaint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1670,3 +1729,42 @@ private fun ManualSheet(onDismiss: () -> Unit, onSubmit: (String, Int) -> Unit) 
 
 /** What a Windows or Linux PC can do for now. */
 private val PC_FEATURES = listOf(Feature.Touchpad, Feature.Media, Feature.Presentation, Feature.Sound)
+
+/**
+ * What a Windows or Linux PC offers: Commands, Terminal, its screen, the second display, the deck, its tools, scanning
+ * codes and voice typing, and document scans only from a DyskLink that serves them (`pc-commands`, `pc-terminal`,
+ * `pc-screen-out`, `pc-display`, `pc-deck`, `pc-notch`, `pc-type`, `pc-scan`).
+ */
+private fun pcFeatures(peer: id.phonelink.android.core.Peer): List<Feature> =
+    PC_FEATURES + listOfNotNull(
+        Feature.MacScreen.takeIf { peer.canSeeComputerScreen },
+        Feature.SecondDisplay.takeIf { peer.canExtend },
+        Feature.Commands.takeIf { peer.canRunCommands },
+        Feature.Terminal.takeIf { peer.canOpenTerminal },
+        Feature.Deck.takeIf { peer.canDeck },
+        Feature.Notch.takeIf { peer.canNotch },
+        Feature.Scan.takeIf { peer.canType },
+        Feature.Dictation.takeIf { peer.canType },
+        Feature.DocScan.takeIf { peer.canTakeScans },
+    )
+
+private val Feature.pcTitle: String
+    get() = when (this) {
+        Feature.Commands -> "PC commands"
+        Feature.MacScreen -> "PC screen"
+        Feature.Notch -> "PC tools"
+        else -> title
+    }
+
+private fun Feature.pcBlurb(peer: id.phonelink.android.core.Peer): String = when (this) {
+    Feature.Commands -> "Run commands set on the PC"
+    Feature.Terminal -> "A shell on the PC"
+    Feature.MacScreen -> "See and tap the PC's screen"
+    Feature.SecondDisplay -> "Extend the PC onto this phone"
+    Feature.Notch -> "Focus, water, and tasks"
+    Feature.Scan -> "Type codes on the PC"
+    Feature.DocScan -> "Paper to PDF on the PC"
+    Feature.Dictation -> "Speak, the PC types"
+    Feature.Sound -> if (peer.canHear) "Hear the PC here, or this phone there" else "This phone on the PC"
+    else -> blurb
+}

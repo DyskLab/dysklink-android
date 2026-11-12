@@ -455,16 +455,18 @@ fun CommandsScreen(
     commands: List<CommandItem>,
     result: CommandResult?,
     onBack: () -> Unit,
+    kind: String = "Mac",
     onRun: (String) -> Unit,
 ) {
-    FeatureScaffold(Feature.Commands.title, onBack) {
+    FeatureScaffold(if (kind == "Mac") Feature.Commands.title else "$kind commands", onBack) {
         Column(
             Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (commands.isEmpty()) {
                 Text(
-                    "No commands yet. Add them from the DyskLink app on the Mac.",
+                    if (kind == "Mac") "No commands yet. Add them from the DyskLink app on the Mac."
+                    else "No commands yet. On the PC, add them in DyskLink Settings and turn on \"Let this phone run commands\" on this phone's page.",
                     color = Palette.TextSecondary,
                     fontSize = 14.sp,
                 )

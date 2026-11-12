@@ -29,11 +29,17 @@ object Platform {
     val downloadsDir: File
         get() = (System.getenv("DYSKLINK_DOWNLOAD_DIR")?.let(::File) ?: File(xdgDownloads() ?: File(home, "Downloads"), "DyskLink"))
 
-    private fun xdgDownloads(): File? {
+    /** Document scans from phones go to Documents/DyskLink/Scans. */
+    val scansDir: File
+        get() = System.getenv("DYSKLINK_SCANS_DIR")?.let(::File) ?: File(File(xdgDir("DOCUMENTS") ?: File(home, "Documents"), "DyskLink"), "Scans")
+
+    private fun xdgDownloads(): File? = xdgDir("DOWNLOAD")
+
+    private fun xdgDir(name: String): File? {
         if (isWindows || isMac) return null
-        // Linux desktops in other languages rename Downloads, and say where in user-dirs.dirs.
+        // Linux desktops in other languages rename Downloads and Documents, and say where in user-dirs.dirs.
         val dirs = File(System.getenv("XDG_CONFIG_HOME") ?: "$home/.config", "user-dirs.dirs")
-        val line = runCatching { dirs.readLines() }.getOrNull()?.firstOrNull { it.startsWith("XDG_DOWNLOAD_DIR=") } ?: return null
+        val line = runCatching { dirs.readLines() }.getOrNull()?.firstOrNull { it.startsWith("XDG_${name}_DIR=") } ?: return null
         val path = line.substringAfter('=').trim('"').replace("\$HOME", home.path)
         return File(path).takeIf { it.isDirectory }
     }

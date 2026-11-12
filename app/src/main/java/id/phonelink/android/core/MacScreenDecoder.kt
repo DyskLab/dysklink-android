@@ -147,6 +147,42 @@ class MacScreenDecoder(private val surface: Surface, private val width: Int, pri
     }
 }
 
+/**
+ * Shows a Windows or Linux PC's screen, which comes as whole JPEG pictures (`format: "jpeg"`). Only the newest picture
+ * waits: one that arrives while another is decoded replaces it, so the picture never falls behind. Pictures are
+ * decoded on this class's own thread, never on the connection's reader.
+ */
+class JpegScreenDecoder(private val onPicture: (android.graphics.Bitmap) -> Unit) {
+    private val waiting = java.util.concurrent.ArrayBlockingQueue<id.phonelink.android.core.Envelope>(1)
+    private val running = AtomicBoolean(true)
+    @Volatile var framesShown = 0
+        private set
+
+    init {
+        thread(isDaemon = true, name = "pcscreen-jpeg") {
+            while (running.get()) {
+                val envelope = runCatching { waiting.poll(200, TimeUnit.MILLISECONDS) }.getOrNull() ?: continue
+                val jpeg = JpegFrames.pictureOf(envelope) ?: continue
+                val bitmap = runCatching { android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) }.getOrNull() ?: continue
+                if (!running.get()) break
+                framesShown++
+                onPicture(bitmap)
+            }
+        }
+    }
+
+    /** Called on the connection's reading thread. Returns at once. */
+    fun feed(envelope: id.phonelink.android.core.Envelope) {
+        if (!running.get()) return
+        while (!waiting.offer(envelope)) waiting.poll()
+    }
+
+    fun release() {
+        running.set(false)
+        waiting.clear()
+    }
+}
+
 /** Maps a touch on the shown picture to 0…1 on the Mac's screen, with zoom and pan applied. */
 object MacScreenMath {
     /** The picture's box when it fits the view, keeping its shape. Returns left, top, width, height. */

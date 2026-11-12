@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.rounded.Mosque
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -68,6 +69,9 @@ fun PrayerHomeCard(onOpen: () -> Unit) {
     val upcoming = state.schedule?.upcoming(Instant.ofEpochMilli(now))
     GlassCard(onClick = onOpen) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // Same leading icon as the other tools in this tab.
+            FlatIcon(androidx.compose.material.icons.Icons.Rounded.Mosque, Palette.Mint)
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 if (saved.location == null && saved.place == null) {
                     Text("Prayer times & weather", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)

@@ -1,6 +1,7 @@
 package id.dysklink.desktop
 
 import id.phonelink.android.core.FileSink
+import id.phonelink.android.core.FileOrigin
 import id.phonelink.android.core.FileSinkFactory
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
@@ -246,16 +247,29 @@ class ClipGeneration {
 }
 
 /** Writes each file to a hidden temporary file first, and gives it a free name only when it's complete. */
-class DownloadSinks(private val folder: () -> File) : FileSinkFactory {
-    override fun open(name: String, size: Long): FileSink {
-        val dir = folder().apply { mkdirs() }
+class DownloadSinks(
+    /** Where document scans from phones go (`kind: "scan"`); null keeps them in [folder] too. */
+    private val scans: (() -> File)? = null,
+    /** A scan was saved, at this place, from this phone. */
+    private val onScan: (File, FileOrigin) -> Unit = { _, _ -> },
+    private val folder: () -> File,
+) : FileSinkFactory {
+    override fun open(name: String, size: Long): FileSink = sink(folder(), name) {}
+
+    override fun open(name: String, size: Long, origin: FileOrigin): FileSink {
+        val scanFolder = scans?.takeIf { origin.kind == "scan" } ?: return open(name, size)
+        return sink(scanFolder(), name) { saved -> runCatching { onScan(saved, origin) } }
+    }
+
+    private fun sink(folder: File, name: String, saved: (File) -> Unit): FileSink {
+        val dir = folder.apply { mkdirs() }
         val temp = File.createTempFile(".dysklink-", ".part", dir)
         val out = FileOutputStream(temp)
         return object : FileSink {
             override fun write(bytes: ByteArray) = out.write(bytes)
             override fun commit(): String {
                 out.close()
-                return place(temp, dir, windowsSafe(name)).path
+                return place(temp, dir, windowsSafe(name)).also(saved).path
             }
             override fun abort() { runCatching { out.close() }; temp.delete() }
         }
@@ -370,8 +384,13 @@ class Settings(private val file: File) {
     private val values = Properties().apply { runCatching { file.inputStream().use { load(it) } } }
 
     fun bool(key: String, default: Boolean) = values.getProperty(key)?.toBooleanStrictOrNull() ?: default
-    fun set(key: String, value: Boolean) {
-        values.setProperty(key, value.toString())
+    fun set(key: String, value: Boolean) = set(key, value.toString())
+    fun string(key: String): String? = values.getProperty(key)
+    fun int(key: String): Int? = values.getProperty(key)?.toIntOrNull()
+
+    @Synchronized
+    fun set(key: String, value: String) {
+        values.setProperty(key, value)
         runCatching { file.outputStream().use { values.store(it, "DyskLink") } }
     }
 }

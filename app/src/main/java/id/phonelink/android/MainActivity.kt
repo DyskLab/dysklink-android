@@ -332,6 +332,9 @@ class MainActivity : ComponentActivity() {
         intent.removeExtra(EXTRA_OPEN)
         when {
             open == OPEN_PRAYER -> prayerRequest.value += 1
+            // From a Water or Pomodoro notification.
+            open.startsWith(OPEN_TOOL_PREFIX) ->
+                id.phonelink.android.service.PhoneToolsNav.request.value = open.removePrefix(OPEN_TOOL_PREFIX) to System.nanoTime()
             // From a widget: a feature of the connected Mac.
             open.startsWith(OPEN_FEATURE_PREFIX) -> featureRequest.value = open.removePrefix(OPEN_FEATURE_PREFIX) to System.nanoTime()
         }
@@ -517,7 +520,8 @@ class MainActivity : ComponentActivity() {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
             val peer = connections.peers.value.firstOrNull { it.id == peerId && it.isPaired } ?: return@launch
             when {
-                peer.isMac -> startCamera(peerId, false)
+                // A Mac, or a PC that listed pc-camera: the connection only passes camera requests from those.
+                peer.isComputer -> startCamera(peerId, false)
                 peer.isPhone -> askPhoneFirst(connections, peer, camera = true) { startCamera(peerId, false) }
             }
         }
@@ -722,6 +726,7 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_TOKEN = "id.phonelink.android.TOKEN"
         const val OPEN_PRAYER = "prayer"
         const val OPEN_FEATURE_PREFIX = "feature:"
+        const val OPEN_TOOL_PREFIX = "tool:"
         private const val KEY_SCREEN_PEER = "screenPeer"
         private const val KEY_PICK_FILES_FOR = "pickFilesFor"
         private const val KEY_SOUND_PEER = "soundPeer"

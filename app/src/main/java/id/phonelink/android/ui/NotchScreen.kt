@@ -70,15 +70,17 @@ fun NotchScreen(
     send: (NotchAction) -> Unit,
     setFocusDnd: (Boolean) -> Unit,
     openDndSettings: () -> Unit,
+    /** "Mac", or "PC" for a Windows or Linux PC with the tools page (`pc-notch`). */
+    kind: String = "Mac",
 ) {
-    FeatureScaffold(Feature.Notch.title, onBack) {
+    FeatureScaffold(if (kind == "Mac") Feature.Notch.title else "PC tools", onBack) {
         Column(
             Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             if (snapshot == null) {
                 Text(
-                    "Waiting for $macName. This needs DyskLink 0.2.0 or later on the Mac.",
+                    if (kind == "Mac") "Waiting for $macName. This needs DyskLink 0.2.0 or later on the Mac." else "Waiting for $macName.",
                     color = Palette.TextSecondary,
                     fontSize = 14.sp,
                     lineHeight = 20.sp,
@@ -91,7 +93,11 @@ fun NotchScreen(
             NoteCard(snapshot.state.note, snapshot.receivedAt, send)
             TodoCard(snapshot.state.todos, send)
             Text(
-                "These are the same as in the notch on $macName. The Mac keeps the data, so changes here show up there at once.",
+                if (kind == "Mac") {
+                    "These are the same as in the notch on $macName. The Mac keeps the data, so changes here show up there at once."
+                } else {
+                    "These are the same as on the Tools page of DyskLink on $macName. The PC keeps the data, so changes here show up there at once."
+                },
                 color = Palette.TextFaint,
                 fontSize = 12.sp,
                 lineHeight = 17.sp,

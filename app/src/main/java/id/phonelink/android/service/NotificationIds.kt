@@ -46,10 +46,14 @@ object NotificationIds {
     const val PHONE_MOVE = 33
     /** Photo backup to another phone stopped. */
     const val PHOTO_BACKUP = 34
+    /** "Time to drink water", from the phone's own Water tool. */
+    const val WATER = 35
+    /** The phone's own Pomodoro countdown. */
+    const val POMODORO = 36
 
     val all = listOf(
         CONNECTION, PAIRING, SCREEN_REQUEST, SCREEN_SHARING, CAMERA, CAMERA_REQUEST, CHARGE_REMINDER, PRAYER, UPDATES, RINGER, PHONE_SOUND,
         TALK, TALK_HERE, PEER_SOUND, PHONE_ASK, MIRROR, MIRROR_CALL, PHONE_LINK, PHONE_QUIET, PHONE_BATTERY, PHONE_SETUP,
-        PHONE_SMS_SENT, PHONE_SMS, PHONE_LOW_SPACE, PHONE_MOVE, PHOTO_BACKUP,
+        PHONE_SMS_SENT, PHONE_SMS, PHONE_LOW_SPACE, PHONE_MOVE, PHOTO_BACKUP, WATER, POMODORO,
     )
 }

@@ -159,6 +159,10 @@
         <receiver
             android:name=".service.PrayerAlarmReceiver"
             android:exported="false" />
+        <!-- Water reminders, the Pomodoro's end-of-step alarm, and their notification buttons. -->
+        <receiver
+            android:name=".service.PhoneToolsReceiver"
+            android:exported="false" />
         <receiver
             android:name=".service.PrayerWidget"
             android:exported="false"

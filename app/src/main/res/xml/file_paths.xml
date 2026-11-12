@@ -3,6 +3,8 @@
     <external-files-path name="received" path="DyskLink/" />
     <files-path name="received_internal" path="DyskLink/" />
     <files-path name="scans" path="scans/" />
+    <!-- The barcode history, shared as a CSV file. -->
+    <cache-path name="exports" path="exports/" />
     <!-- Phone tools: opening a found file in another app to look at it before deleting. -->
     <external-path name="storage" path="." />
 </paths>

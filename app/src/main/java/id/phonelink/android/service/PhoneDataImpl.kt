@@ -180,10 +180,14 @@ class PhoneDataImpl(context: Context) : PhoneData {
             .notify(PhoneLinkService.SCREEN_REQUEST_NOTIFICATION_ID, notification)
     }
 
-    /** A phone asking is named; a Mac keeps the title it always had. */
+    /** A phone or PC asking is named; a Mac keeps the title it always had. */
     private fun screenRequestTitle(peerId: String): String {
         val peer = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peerId }
-        return if (peer?.isPhone == true) "${peer.name} wants to view this screen" else "Mac is requesting the phone screen"
+        return when {
+            peer?.isPhone == true -> "${peer.name} wants to view this screen"
+            peer?.isComputer == true && !peer.isMac -> "${peer.name} is requesting the phone screen"
+            else -> "Mac is requesting the phone screen"
+        }
     }
 
     override fun syncScreen(peerId: String) = ScreenCaptureService.requestSync(peerId)

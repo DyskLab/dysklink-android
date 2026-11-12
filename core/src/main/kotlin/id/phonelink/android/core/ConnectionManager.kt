@@ -80,6 +80,28 @@ data class Peer(
     val canMove: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_MOVE in caps
     /** A phone that keeps this phone's photo backup (1.6 and newer). */
     val canBackup: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_BACKUP in caps
+    /** A Windows or Linux PC that shows this phone's screen, sent to it as JPEG frames (see [PcRules]). */
+    val pcScreen: Boolean get() = PcRules.jpeg(platform, caps, PhoneLinkProtocol.CAP_PC_SCREEN)
+    /** A Windows or Linux PC that shows this phone's camera, sent to it as JPEG frames. */
+    val pcCamera: Boolean get() = PcRules.jpeg(platform, caps, PhoneLinkProtocol.CAP_PC_CAMERA)
+    /** A Mac, or a PC that sends its sound to this phone (`pc-sound-out`). */
+    val canHear: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_SOUND_OUT)
+    /** A Mac, or a PC that lists commands to run (`pc-commands`). */
+    val canRunCommands: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_COMMANDS)
+    /** A Mac, or a PC that opens a terminal (`pc-terminal`). */
+    val canOpenTerminal: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_TERMINAL)
+    /** A Mac, or a PC that shows its own screen here as JPEG frames (`pc-screen-out`). */
+    val canSeeComputerScreen: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_SCREEN_OUT)
+    /** A Mac, or a PC that uses this phone as an extra display (`pc-display`, which no PC build lists yet). */
+    val canExtend: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_DISPLAY)
+    /** A Mac, or a PC that runs the Stream Deck's shortcuts as its own (`pc-deck`). */
+    val canDeck: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_DECK)
+    /** A Mac, or a PC with the notch tools: Todo, water, and Pomodoro (`pc-notch`). */
+    val canNotch: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_NOTCH)
+    /** A Mac, or a PC that types scanned codes and voice typing (`pc-type`). */
+    val canType: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_TYPE)
+    /** A Mac, or a PC that keeps document scans (`pc-scan`). */
+    val canTakeScans: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_SCAN)
 }
 
 data class PairingPrompt(
@@ -245,6 +267,14 @@ class ConnectionManager(
     val phone = PhoneBridge(
         directory, scope, phoneData, fileTransfers,
         pairedPeers = { synchronized(lock) { connections.keys.filter { it in records && !isPhone(it) } } },
+        // New SMS go to Macs, and to PCs that read SMS (pc-sms); older PC builds never asked for them.
+        smsPeers = {
+            synchronized(lock) {
+                connections.filter { (id, connection) ->
+                    id in records && !isPhone(connection) && PcRules.receives(records[id]?.platform, connection.hello?.caps, PhoneLinkProtocol.CAP_PC_SMS)
+                }.keys.toList()
+            }
+        },
         relay = relay,
         smsShare = smsShare,
         send = { peerId, envelope -> postTo(peerId, envelope) },
@@ -468,6 +498,13 @@ class ConnectionManager(
         platform != null && platform !in PhoneLinkProtocol.COMPUTERS
     }
 
+    /** Macs get everything they always did; a PC needs the `pc-*` cap for the messages [PcRules] lists. */
+    private fun computerAllows(connection: PeerConnection, type: String): Boolean {
+        if (PcRules.capFor(type) == null) return true
+        val platform = synchronized(lock) { records[connection.peerId]?.platform ?: connection.hello?.platform }
+        return PcRules.allows(platform, connection.hello?.caps, type)
+    }
+
     private fun isPhone(id: String): Boolean = synchronized(lock) {
         connections[id]?.let(::isPhone) ?: (records[id]?.platform?.let { it !in PhoneLinkProtocol.COMPUTERS } == true)
     }
@@ -548,6 +585,9 @@ class ConnectionManager(
         if (fromPhone && !PHONE_MESSAGES.contains(envelope.type) && !envelope.type.startsWith("file.") && envelope.type !in PhoneRules.ALL) return
         if (fromPhone && !_phonesEnabled.value) return connection.close()
         if (fromPhone && envelope.type in PhoneRules.ALL) return handlePhoneShare(connection, envelope)
+        // A Windows or Linux PC only gets the screen, camera, gallery, and SMS, and only sends commands and the
+        // terminal, when its hello listed that cap.
+        if (!fromPhone && !computerAllows(connection, envelope.type)) return
         // Files are written outside the lock so disk writes don't hold up other messages and actions.
         if (envelope.type.startsWith("file.")) {
             if (synchronized(lock) { records.containsKey(connection.peerId) }) {

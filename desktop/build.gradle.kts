@@ -21,6 +21,9 @@ dependencies {
     // Typing from the phone on any keyboard layout: SendInput with Unicode on Windows, Xlib and XTest on X11.
     // Only the core jar (about 2 MB, native parts for every OS inside), not jna-platform.
     implementation("net.java.dev.jna:jna:5.17.0")
+    // The terminal from the phone: a real pseudo terminal (ConPTY on Windows, a pty on Linux), so colors, Ctrl-C,
+    // and full-screen programs work. About 2.8 MB with natives for every OS; brings jna-platform (1.4 MB) and slf4j-api.
+    implementation("org.jetbrains.pty4j:pty4j:0.13.13")
 
     testImplementation(kotlin("test-junit"))
 }

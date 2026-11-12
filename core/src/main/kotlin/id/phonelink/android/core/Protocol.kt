@@ -54,12 +54,62 @@ object PhoneLinkProtocol {
     const val CAP_P2P_MOVE = "p2p-move"
     /** A phone that keeps another phone's photo backup (`file.offer` with `kind: "photo"`). Since 1.6. */
     const val CAP_P2P_BACKUP = "p2p-backup"
-    /** What the Android app advertises: [CAPS] and the phone-to-phone features. Computers never list these. */
+    /**
+     * A Windows or Linux computer that shows the phone's screen as JPEG frames and controls it (see [PcRules]). The
+     * phone lists it too, meaning it serves that to PCs. Macs never list the `pc-*` caps and keep H.264.
+     */
+    const val CAP_PC_SCREEN = "pc-screen"
+    /** A Windows or Linux computer that shows the phone's camera as JPEG frames. */
+    const val CAP_PC_CAMERA = "pc-camera"
+    /** A Windows or Linux computer that browses the phone's gallery (`gallery.*`). */
+    const val CAP_PC_GALLERY = "pc-gallery"
+    /** A Windows or Linux computer that reads and sends the phone's SMS (`sms.*`). */
+    const val CAP_PC_SMS = "pc-sms"
+    /** A Windows or Linux computer that reads the phone's contacts (`contacts.list`). */
+    const val CAP_PC_CONTACTS = "pc-contacts"
+    /** A Windows or Linux computer that browses the phone's files and downloads them (`fs.list`, `fs.get`). */
+    const val CAP_PC_FILES = "pc-files"
+    val PC_FEATURE_CAPS: List<String> = listOf(CAP_PC_SCREEN, CAP_PC_CAMERA, CAP_PC_GALLERY, CAP_PC_SMS, CAP_PC_CONTACTS, CAP_PC_FILES)
+    /** A Windows or Linux computer that sends its own sound to a phone that asks (`audio.listen`). */
+    const val CAP_PC_SOUND_OUT = "pc-sound-out"
+    /** A Windows or Linux computer that lists commands a phone may run (`commands.list`, `command.*`). */
+    const val CAP_PC_COMMANDS = "pc-commands"
+    /** A Windows or Linux computer that opens a terminal for a phone (`terminal.*`). */
+    const val CAP_PC_TERMINAL = "pc-terminal"
+    /** A Windows or Linux computer that a Mac's mouse and keyboard can move into (`remote.*`). */
+    const val CAP_PC_SHARED_INPUT = "pc-shared-input"
+    /** A Windows or Linux computer that shows its own screen on a phone (`macscreen.*`, as JPEG frames). */
+    const val CAP_PC_SCREEN_OUT = "pc-screen-out"
+    /**
+     * A Windows or Linux computer that uses the phone as an extra display (`macscreen.start` with `extend`). Not listed
+     * by any build yet: Windows needs an indirect display driver and Linux a virtual output for that.
+     */
+    const val CAP_PC_DISPLAY = "pc-display"
+    /** A Windows or Linux computer that runs the phone's Stream Deck: Mac shortcuts made PC ones, media, and typing. */
+    const val CAP_PC_DECK = "pc-deck"
+    /** A Windows or Linux computer with the notch tools: Todo, water, and Pomodoro (`notch.state`, `notch.action`). */
+    const val CAP_PC_NOTCH = "pc-notch"
+    /** A Windows or Linux computer that types what the phone scans or hears (barcodes and voice typing, `input`). */
+    const val CAP_PC_TYPE = "pc-type"
+    /** A Windows or Linux computer that keeps document scans (`file.offer` with `kind: "scan"`) in its own folder. */
+    const val CAP_PC_SCAN = "pc-scan"
+    /**
+     * What a PC serves, as opposed to what it shows from the phone. Only the desktop app lists these; the phone shows
+     * Hear the PC, Commands, Terminal, Stream Deck, the notch tools, and scanning and voice typing to the PC for a PC
+     * that lists the matching one.
+     */
+    val PC_SERVICE_CAPS: List<String> = listOf(
+        CAP_PC_SOUND_OUT, CAP_PC_COMMANDS, CAP_PC_TERMINAL, CAP_PC_SHARED_INPUT, CAP_PC_SCREEN_OUT,
+        CAP_PC_DECK, CAP_PC_NOTCH, CAP_PC_TYPE, CAP_PC_SCAN,
+    )
+    /** What DyskLink for Windows and Linux advertises: [CAPS], the phone features it shows, and what it serves. */
+    val PC_CAPS: List<String> = CAPS + PC_FEATURE_CAPS + PC_SERVICE_CAPS
+    /** What the Android app advertises: [CAPS], the phone-to-phone features, and the PC features it serves. */
     val PHONE_CAPS: List<String> = CAPS + listOf(
         CAP_P2P_SCREEN, CAP_P2P_CAMERA, CAP_P2P_NOTIFY, CAP_P2P_TALK, CAP_P2P_SOUND,
         CAP_P2P_OPEN, CAP_P2P_MEDIA, CAP_P2P_MONITOR, CAP_P2P_QUIET, CAP_P2P_LOCATE,
         CAP_P2P_SMS, CAP_P2P_MOVE, CAP_P2P_BACKUP,
-    )
+    ) + PC_FEATURE_CAPS
     const val PAIRING_TIMEOUT_MS = 60_000L
     const val MAX_CLIPBOARD_CHARS = 256 * 1024
 }
@@ -101,6 +151,8 @@ data class DeviceInfo(
     val wakeBroadcast: String? = null,
     /** From the Mac: whether "Wake for network access" is on. */
     val wakeEnabled: Boolean? = null,
+    /** From a computer: it takes another computer's mouse and keyboard now (`remote.*`). */
+    val remoteControl: Boolean? = null,
 )
 
 @Serializable
@@ -333,6 +385,11 @@ data class Envelope(
     val displayId: Long? = null,
     val video: String? = null,
     val keyFrame: Boolean? = null,
+    /**
+     * On `screen.started`, `screen.frame`, `camera.started`, and `camera.frame` to a PC that listed `pc-screen` or
+     * `pc-camera`: `jpeg`, each frame a whole JPEG picture. Missing means H.264, as for a Mac.
+     */
+    val format: String? = null,
     /** Phone camera: clockwise degrees that turn the picture upright. */
     val rotation: Int? = null,
     /** On `screen.started` to another phone: whether its taps reach this screen (see [PhoneRules]). */
@@ -360,6 +417,8 @@ data class Envelope(
     val macAction: String? = null,
     /** On the `terminal.*` messages. */
     val terminal: TerminalMessage? = null,
+    /** On the `remote.*` messages: one mouse and keyboard across computers. */
+    val remote: RemoteEvent? = null,
     /** On `pair.request`, `pair.pake`, and `pair.accept` (pairing version 3). */
     val pake: PakeMessage? = null,
     /**
@@ -398,6 +457,27 @@ data class PakeMessage(
 )
 
 /** A terminal session on the Mac. `data` is base64 bytes: typed keys, or what the shell printed. */
+/**
+ * One input from the computer whose mouse and keyboard are in use, as the Mac sends it (see PROTOCOL.md, One mouse
+ * and keyboard). Key codes are Mac virtual key codes; [flags] is the raw CGEventFlags value.
+ */
+@Serializable
+data class RemoteEvent(
+    /** `move`, `down`, `up`, `scroll`, `key`, `flags`, or on `remote.enter`/`remote.leave` the crossing itself. */
+    val kind: String,
+    val dx: Double? = null,
+    val dy: Double? = null,
+    /** 0 left, 1 right, 2 and up for other buttons. */
+    val button: Int? = null,
+    val keyCode: Int? = null,
+    val keyDown: Boolean? = null,
+    val flags: Long? = null,
+    /** `left`, `right`, `top`, or `bottom`. */
+    val edge: String? = null,
+    /** How far along that edge, 0 at the top or left to 1. */
+    val at: Double? = null,
+)
+
 @Serializable
 data class TerminalMessage(
     val id: String,
@@ -535,6 +615,10 @@ object MessageType {
     /** Phone to phone (1.6): the move finished (`move` with the counts). */
     const val MOVE_DONE = "move.done"
     const val MAC_ACTION = "mac.action"
+    const val REMOTE_ENTER = "remote.enter"
+    const val REMOTE_INPUT = "remote.input"
+    const val REMOTE_LEAVE = "remote.leave"
+    const val REMOTE_EXIT = "remote.exit"
     const val TERMINAL_OPEN = "terminal.open"
     const val TERMINAL_OPENED = "terminal.opened"
     const val TERMINAL_INPUT = "terminal.input"
