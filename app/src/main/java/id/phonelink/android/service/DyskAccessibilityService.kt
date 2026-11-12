@@ -46,6 +46,8 @@ class DyskAccessibilityService : AccessibilityService() {
         current = this
         applyCopyDetection()
         PhoneLinkService.connectionManager.value?.phone?.refresh()
+        // A phone viewing this screen learns whether its taps go through now.
+        ScreenCaptureService.refreshControl()
     }
 
     /** While automatic copy is off, the service doesn't receive tap or toast events at all. */
@@ -95,6 +97,8 @@ class DyskAccessibilityService : AccessibilityService() {
         main.removeCallbacks(releaseStroke)
         main.removeCallbacks(sendClipboard)
         PhoneLinkService.connectionManager.value?.phone?.refresh()
+        // A phone viewing this screen learns whether its taps go through now.
+        ScreenCaptureService.refreshControl()
     }
 
     private fun perform(event: ControlEvent) {

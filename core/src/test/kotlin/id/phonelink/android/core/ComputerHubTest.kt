@@ -187,6 +187,89 @@ class ComputerHubTest {
     }
 
     @Test
+    fun aDoubleSubmitOnThePhoneStillPairsAndCountsOneTry() {
+        val pc = Pc()
+        val phone = Phone()
+        phone.manager.addManual("127.0.0.1", pc.hub.boundPort)
+        waitUntil("The phone didn't connect") { pc.hub.phones.value.any { it.isConnected } }
+        phone.manager.tryAutoPair()
+        waitUntil("The PC didn't show a code") { pc.hub.pairing.value != null }
+        val code = pc.hub.pairing.value!!.code
+        val wrong = if (code == "000000") "111111" else "000000"
+        // The sixth digit and a Pair tap: the second is ignored, so one wrong try is counted, not two.
+        phone.manager.submitCode(wrong)
+        phone.manager.submitCode(wrong)
+        waitUntil("The wrong code wasn't counted") { pc.hub.pairing.value?.attempts == 1 }
+        waitUntil("The phone didn't hear it was wrong") { phone.manager.prompt.value?.localAccepted == false }
+        Thread.sleep(300)
+        assertEquals(1, pc.hub.pairing.value?.attempts)
+        phone.manager.submitCode(code)
+        phone.manager.submitCode(code)
+        waitUntil("Pairing didn't finish on both sides") {
+            pc.hub.phones.value.any { it.isPaired && it.isConnected } && phone.manager.peers.value.any { it.id == pc.hub.deviceId && it.isPaired }
+        }
+    }
+
+    @Test
+    fun newNoncesDontGetANewShareEachTime() {
+        val pc = Pc()
+        val flooder = Raw(Files.createTempDirectory("dysk-flood").toFile(), pc.hub.boundPort)
+        flooder.hello("android", paired = false)
+        waitUntil("The flooder didn't connect") { pc.hub.phones.value.any { it.isConnected } }
+        val typer = Pake.Typer()
+        flooder.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = typer.request))
+        val share = flooder.expect(MessageType.PAIR_PAKE).pake
+        assertTrue(typer.received(share))
+        val code = pc.hub.pairing.value!!.code
+        // Fresh nonces right away are ignored; the same nonce again gets the same share.
+        repeat(30) { flooder.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = Pake.Typer().request)) }
+        flooder.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = typer.request))
+        flooder.connection.send(Envelope(MessageType.PING))
+        val after = ArrayList<Envelope>()
+        while (true) {
+            val next = flooder.received.poll(5, java.util.concurrent.TimeUnit.SECONDS) ?: throw AssertionError("No pong")
+            if (next.type == MessageType.PONG) break
+            after += next
+        }
+        assertEquals(listOf(MessageType.PAIR_PAKE), after.map { it.type })
+        assertEquals(share, after.single().pake)
+        // A counted wrong code lets the next new nonce have a share at once.
+        val channel = Pake.channel(flooder.identity.deviceId, pc.hub.deviceId)
+        flooder.connection.send(Envelope(MessageType.PAIR_ACCEPT, pake = typer.answer(if (code == "000000") "111111" else "000000", channel)))
+        assertEquals(Pairing.WRONG_CODE, flooder.expect(MessageType.PAIR_REJECT).error)
+        val second = Pake.Typer()
+        flooder.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = second.request))
+        assertTrue(second.received(flooder.expect(MessageType.PAIR_PAKE).pake))
+        // And the new share works with the same code.
+        flooder.connection.send(Envelope(MessageType.PAIR_ACCEPT, pake = second.answer(code, channel)))
+        assertTrue(second.confirms(flooder.expect(MessageType.PAIR_ACCEPT).pake))
+        waitUntil("It didn't pair") { pc.hub.phones.value.any { it.isPaired } }
+    }
+
+    @Test
+    fun anUpdateNoticeDoesntHoldThePairingSlot() {
+        val pc = Pc()
+        val old = Raw(Files.createTempDirectory("dysk-old2").toFile(), pc.hub.boundPort)
+        old.hello("android", paired = false, version = 2)
+        waitUntil("The old phone didn't connect") { pc.hub.phones.value.any { it.isConnected } }
+        old.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        assertEquals(Pairing.UPDATE_REQUIRED, old.expect(MessageType.PAIR_REJECT).error)
+        waitUntil("The PC didn't say to update") { pc.hub.pairing.value?.outdated == true }
+        // A current phone can still pair while the notice shows.
+        val fresh = Raw(Files.createTempDirectory("dysk-fresh").toFile(), pc.hub.boundPort)
+        fresh.hello("android", paired = false)
+        waitUntil("The second phone didn't connect") { pc.hub.phones.value.count { it.isConnected } == 2 }
+        fresh.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = Pake.Typer().request))
+        fresh.expect(MessageType.PAIR_PAKE)
+        assertEquals(fresh.identity.deviceId, pc.hub.pairing.value?.phoneId)
+        assertFalse(pc.hub.pairing.value!!.outdated)
+        // And the old phone asking again doesn't take the code away.
+        old.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        old.expect(MessageType.PAIR_REJECT)
+        assertEquals(fresh.identity.deviceId, pc.hub.pairing.value?.phoneId)
+    }
+
+    @Test
     fun pairingSurvivesARestart() {
         val dir = Files.createTempDirectory("dysk-pc").toFile()
         val first = Pc(dir)
@@ -398,6 +481,15 @@ class ComputerHubTest {
         waitUntil("The second guesser didn't connect") { pc.hub.phones.value.count { it.isConnected } == 2 }
         another.connection.send(Envelope(MessageType.PAIR_REQUEST, pake = Pake.Typer().request))
         another.expect(MessageType.PAIR_REJECT)
+        assertNull(pc.hub.pairing.value)
+        // An older app is told to wait too, before any notice is shown. Two strangers per address at most.
+        guesser.connection.close()
+        waitUntil("The guesser didn't leave") { pc.hub.phones.value.count { it.isConnected } == 1 }
+        val old = Raw(Files.createTempDirectory("dysk-guess3").toFile(), pc.hub.boundPort)
+        old.hello("android", paired = false, version = 2)
+        waitUntil("The old phone didn't connect") { pc.hub.phones.value.any { it.id == old.identity.deviceId && it.isConnected } }
+        old.connection.send(Envelope(MessageType.PAIR_REQUEST))
+        assertTrue(old.expect(MessageType.PAIR_REJECT).error.orEmpty().startsWith("Too many wrong codes"))
         assertNull(pc.hub.pairing.value)
     }
 

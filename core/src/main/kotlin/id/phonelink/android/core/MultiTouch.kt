@@ -15,6 +15,8 @@ class MultiTouch {
     private class Finger(var at: Pair<Float, Float>) {
         val pending = ArrayList<Pair<Float, Float>>()
         var started = false
+        /** Never sent yet: its first stroke starts where it went down, so a press and its moves both land. */
+        var fresh = true
         var lifted = false
         /** Pressed again before the lift went out: a new touch starts here right after. */
         var again: Pair<Float, Float>? = null
@@ -71,9 +73,13 @@ class MultiTouch {
             state.at = points.last()
             state.pending.clear()
             val first = !state.started
+            val fresh = state.fresh
             state.started = true
-            // A finger that starts and lifts at once is a tap: one stroke, no continuation.
-            FingerStep(id, if (first) points.takeLast(1).ifEmpty { points } else points, first, state.lifted)
+            state.fresh = false
+            // A new finger starts at its down point and follows its moves: the skill key, joystick centre, or swipe
+            // start is touched even when the down and the moves arrive together. One that starts and lifts at once
+            // is a tap, or a short swipe if it moved. A finger restarted after a cancel starts where it is now.
+            FingerStep(id, if (first && !fresh) points.takeLast(1) else points, first, state.lifted)
         }
         val again = fingers.filter { it.value.lifted && it.value.again != null }.mapValues { it.value.again!! }
         fingers.entries.removeAll { it.value.lifted }

@@ -45,6 +45,8 @@ data class Peer(
     val canWake: Boolean = false,
     /** The Mac's "Wake for network access", when known. */
     val wakeEnabled: Boolean? = null,
+    /** What its hello listed in `caps`, while connected. */
+    val caps: List<String> = emptyList(),
 ) {
     /** Another phone, paired for files, clipboard, ringing, and battery only. */
     val isPhone: Boolean get() = platform !in PhoneLinkProtocol.COMPUTERS
@@ -52,6 +54,32 @@ data class Peer(
     val isComputer: Boolean get() = !isPhone
     /** A Mac, with the Mac-only features such as its screen, notch, and charging. */
     val isMac: Boolean get() = platform == "macos"
+    /** A phone whose screen this phone can view and control (1.3 and newer). */
+    val canViewScreen: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_SCREEN in caps
+    /** A phone whose camera this phone can use as a remote camera (1.3 and newer). */
+    val canUseCamera: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_CAMERA in caps
+    /** A phone that can forward its notifications and calls here, and send its own on request (1.4 and newer). */
+    val canNotify: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_NOTIFY in caps
+    /** A phone that plays push-to-talk voice from this one (1.4 and newer). */
+    val canTalk: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_TALK in caps
+    /** A phone that plays this phone's sound (1.4 and newer). */
+    val canPlaySound: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_SOUND in caps
+    /** A phone that takes links to open (1.5 and newer). */
+    val canOpen: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_OPEN in caps
+    /** A phone whose music this phone can control (1.5 and newer). */
+    val canMedia: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_MEDIA in caps
+    /** A phone that shares its screen time, and whose battery alerts show here (1.5 and newer). */
+    val canMonitor: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_MONITOR in caps
+    /** A phone this one can silence (1.5 and newer). */
+    val canQuiet: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_QUIET in caps
+    /** A phone that answers with its location and flashes while ringing (1.5 and newer). */
+    val canLocate: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_LOCATE in caps
+    /** A phone whose SMS this phone can read and send through (1.6 and newer). */
+    val canSms: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_SMS in caps
+    /** A phone this one can move to: contacts, photos, and files (1.6 and newer). */
+    val canMove: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_MOVE in caps
+    /** A phone that keeps this phone's photo backup (1.6 and newer). */
+    val canBackup: Boolean get() = isPhone && PhoneLinkProtocol.CAP_P2P_BACKUP in caps
 }
 
 data class PairingPrompt(
@@ -82,6 +110,8 @@ interface DeviceActions {
     fun media(action: String)
     /** Rings loudly so the phone can be found, until [stopRinging] or a timeout. */
     fun ring(from: String) {}
+    /** Rings, and with [flash] also flashes the torch while it rings (asked by another phone). */
+    fun ring(from: String, flash: Boolean) = ring(from)
     fun stopRinging() {}
 }
 
@@ -100,7 +130,7 @@ class ConnectionManager(
     private val isUiVisible: () -> Boolean,
     private val actions: DeviceActions,
     fileSinks: FileSinkFactory,
-    phoneData: PhoneData,
+    private val phoneData: PhoneData,
     /** How the platform keystore protects the pairing key, such as Android Keystore's KeyProtection. Null keeps it in a file. */
     keyStoreProtection: java.security.KeyStore.ProtectionParameter? = null,
 ) {
@@ -122,7 +152,7 @@ class ConnectionManager(
     private var pairingTimeout: Job? = null
     private val pairingGuard = PairingGuard()
     /** CPace state of the prompt: [shower] while this phone shows the code, [typer] while it types it. */
-    private var shower: Pake.Shower? = null
+    private val shower = ShowerSlot()
     private var typer: Pake.Typer? = null
     /** A code typed before the other side's `pair.pake` arrived. */
     private var pendingCode: String? = null
@@ -142,14 +172,81 @@ class ConnectionManager(
     private val _manualTargets = MutableStateFlow<List<ManualTarget>>(emptyList())
     val manualTargets: StateFlow<List<ManualTarget>> = _manualTargets.asStateFlow()
 
+    private val fileSinks = fileSinks
+
     val fileTransfers = FileTransfers(
         scope, fileSinks, File(directory, "transfers.json"),
         linkFor = ::pairedConnection, post = ::postTo, send = ::sendTo,
+        admit = { peerId, offer -> admitFile(peerId, offer) },
+        saved = { peerId, offer, sha -> fileSaved(peerId, offer, sha) },
     )
+
+    /** What each phone sent here for backup or a move, so a copy isn't taken twice. */
+    private val received = ReceivedIndex(directory)
+
+    /** What each paired phone may do with this phone: screen, camera, voice, sound, and what this phone sends it. */
+    val phoneAccess = PhoneAccess(directory)
+
+    /** This phone's notifications and calls, sent to the phones whose switch is on here. */
+    val relay = NotificationRelay(
+        scope, phoneAccess, phoneData,
+        phones = { phonesWith(PhoneLinkProtocol.CAP_P2P_NOTIFY) },
+        send = { peerId, envelope -> postTo(peerId, envelope) },
+    )
+
+    /** Other phones' notifications and calls, shown here while they're connected. */
+    val mirror = NotificationMirror()
+
+    /** The app's side of links, music, quiet, and location for another phone. Null: answered as not available. */
+    @Volatile var phoneRemote: PhoneRemote? = null
+
+    /** A phone asks for a link, music, screen time, quiet, or location the first time: ask the user here. */
+    @Volatile var phoneRequestAskSink: ((String, PeerAsk) -> Unit)? = null
+
+    private val answers = RemoteAnswers(phoneData, { phoneRemote }, { localHello(true).name })
+
+    /** The SMS other phones sent through this one. */
+    val smsLog = SmsSendLog(directory)
+
+    /** This phone's SMS for the phones allowed here (1.6). */
+    val smsShare = SmsShare(phoneAccess, phoneData, smsLog, send = { peerId, envelope -> postTo(peerId, envelope) }, localName = { localHello(true).name })
+
+    /** Other phones' SMS, read from here. */
+    val smsRemote = SmsRemote(directory)
+
+    /** A move from this phone to a new one (1.6). */
+    val mover by lazy {
+        PhoneMover(
+            directory, scope, fileTransfers,
+            ask = { peerId, envelope -> askPhone(peerId, envelope) },
+            post = ::postTo,
+            isConnected = { peerId -> pairedConnection(peerId) != null },
+        )
+    }
+
+    /** An old phone finished moving here: show what came. */
+    @Volatile var phoneMoveSink: ((String, MoveSummary) -> Unit)? = null
+
+    /** A phone's photo backup or move stopped because this phone is nearly full: say so here. */
+    @Volatile var lowSpaceSink: ((String, String?) -> Unit)? = null
+    private val awaited = AwaitedReplies()
+
+    /** This phone's battery alerts for each paired phone. */
+    val monitor = PhoneMonitor(directory)
+
+    private val _batteryAlerts = kotlinx.coroutines.flow.MutableSharedFlow<Pair<String, BatteryAlert>>(extraBufferCapacity = 16)
+    /** A paired phone ran low or charged full, by this phone's alert settings for it. */
+    val batteryAlerts: kotlinx.coroutines.flow.SharedFlow<Pair<String, BatteryAlert>> = _batteryAlerts
+
+    private val _remoteReplies = MutableStateFlow<Map<String, Map<PeerAsk, Envelope>>>(emptyMap())
+    /** The last answer from each phone to each kind of request sent from here: `link.result`, `media.state`, ... */
+    val remoteReplies: StateFlow<Map<String, Map<PeerAsk, Envelope>>> = _remoteReplies.asStateFlow()
 
     val phone = PhoneBridge(
         directory, scope, phoneData, fileTransfers,
         pairedPeers = { synchronized(lock) { connections.keys.filter { it in records && !isPhone(it) } } },
+        relay = relay,
+        smsShare = smsShare,
         send = { peerId, envelope -> postTo(peerId, envelope) },
     )
 
@@ -181,6 +278,30 @@ class ConnectionManager(
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     val localDeviceId: String get() = identity.deviceId
+
+    /** The device this phone's screen is shared with now, set by the app. Taps from a phone need this to be it. */
+    @Volatile var screenSharedWith: String? = null
+
+    /** What this phone asked each other phone for: only those phones' video and photos are taken. */
+    private val watching = HashMap<String, MutableSet<P2pKind>>()
+
+    /** Another phone's screen and camera messages, on the reading thread, while this phone watches it. */
+    @Volatile var phoneViewSink: ((String, Envelope) -> Unit)? = null
+
+    /** What this phone plays from each phone now: its voice, its sound. */
+    private val hearing = HashMap<String, MutableSet<AudioKind>>()
+    /** Phones this phone talks to now. */
+    private val talkingTo = HashSet<String>()
+
+    /**
+     * Voice and sound between phones, on the reading thread: `talk.*` and `audio.*` from a phone that plays here
+     * (once allowed), and `talk.stopped` to this phone as the one talking. The sound sent from here is ended through
+     * [audioSink] with `audio.stop`, as for a Mac.
+     */
+    @Volatile var phoneAudioSink: ((String, Envelope) -> Unit)? = null
+
+    /** A phone wants to talk or play sound here for the first time: ask the user (Allow, Not now, Never). */
+    @Volatile var phoneAskSink: ((String, AudioKind) -> Unit)? = null
 
     private val phonesOffFile = File(directory, "phones_off")
     private val _phonesEnabled = MutableStateFlow(!phonesOffFile.exists())
@@ -400,6 +521,8 @@ class ConnectionManager(
             connection.close()
             val current = synchronized(lock) { connections[id] === connection }
             if (current) fileTransfers.onDisconnected(id)
+            // Between phones a lost connection ends the screen and camera at once, instead of waiting to resume.
+            if (current && isPhone(connection)) endPhoneSessions(id)
             locked {
                 if (connections[id] === connection) {
                     connections.remove(id)
@@ -420,8 +543,11 @@ class ConnectionManager(
     private fun handle(connection: PeerConnection, envelope: Envelope) {
         // Phones only share files, clipboard, ringing, and status with each other. SMS, notifications,
         // control, and the terminal are for Macs.
-        if (isPhone(connection) && !PHONE_MESSAGES.contains(envelope.type) && !envelope.type.startsWith("file.")) return
-        if (isPhone(connection) && !_phonesEnabled.value) return connection.close()
+        // Screen and camera between phones only pass the per-phone switches (see PhoneRules).
+        val fromPhone = isPhone(connection)
+        if (fromPhone && !PHONE_MESSAGES.contains(envelope.type) && !envelope.type.startsWith("file.") && envelope.type !in PhoneRules.ALL) return
+        if (fromPhone && !_phonesEnabled.value) return connection.close()
+        if (fromPhone && envelope.type in PhoneRules.ALL) return handlePhoneShare(connection, envelope)
         // Files are written outside the lock so disk writes don't hold up other messages and actions.
         if (envelope.type.startsWith("file.")) {
             if (synchronized(lock) { records.containsKey(connection.peerId) }) {
@@ -465,7 +591,7 @@ class ConnectionManager(
                         saveRecords()
                         send(connection, Envelope(MessageType.INFO, info = localInfo()))
                         pendingClipboard?.takeIf { id in it.waiting }?.let { send(connection, it.envelope()) }
-                        if (!isPhone(connection)) phone.peerReady(id)
+                        if (!isPhone(connection)) phone.peerReady(id) else phoneReady(id)
                     } else {
                         removeRecord(id)
                     }
@@ -483,16 +609,16 @@ class ConnectionManager(
                     CoreLog.w(TAG, "PAIRING_BAD_PAKE $id")
                     return@locked rejectCurrentPairing()
                 }
-                pendingCode?.let { code ->
-                    pendingCode = null
-                    sendCode(connection, prompt, code)
-                }
+                // Only a code still waiting to go: one the user took back or that was answered isn't sent.
+                val code = pendingCode
+                pendingCode = null
+                if (code != null && prompt.localAccepted) sendCode(connection, prompt, code)
             }
             MessageType.PAIR_ACCEPT -> {
                 val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@locked
                 if (prompt.showsCode) {
                     if (prompt.outdated) return@locked
-                    val showing = shower ?: return@locked
+                    val showing = shower.shower ?: return@locked
                     // Only the old key: an older app, which can't pair any more. Not counted as a wrong code.
                     val pake = envelope.pake ?: return@locked rejectCurrentPairing(Pairing.UPDATE_REQUIRED)
                     val reply = showing.check(pake)
@@ -503,6 +629,7 @@ class ConnectionManager(
                         CoreLog.w(TAG, "PAIRING_LOCKED $id")
                         rejectCurrentPairing(PairingGuard.waitMessage(pairingGuard.waitMs(id)))
                     } else {
+                        shower.wrongCode()
                         _prompt.value = prompt.copy(attempts = prompt.attempts + 1, error = "A wrong code was typed on ${prompt.peerName}.")
                         send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.WRONG_CODE))
                     }
@@ -520,6 +647,7 @@ class ConnectionManager(
                 val prompt = _prompt.value?.takeIf { it.peerId == id } ?: return@locked
                 if (envelope.error == Pairing.WRONG_CODE && !prompt.showsCode) {
                     typer?.wrongCode()
+                    pendingCode = null
                     _prompt.value = prompt.copy(localAccepted = false, error = "That code isn't right. Check the code on ${prompt.peerName} and try again.")
                 } else if (envelope.error == Pairing.UPDATE_REQUIRED && !prompt.showsCode) {
                     dropPake()
@@ -537,6 +665,7 @@ class ConnectionManager(
                 val info = envelope.info
                 if (records.containsKey(id) && info != null) {
                     infos[id] = info
+                    if (isPhone(connection)) monitor.battery(id, info)?.let { _batteryAlerts.tryEmit(id to it) }
                     val record = records.getValue(id)
                     val macs = info.wakeMacs.orEmpty()
                     if (macs.isNotEmpty() && (record.wakeMacs != macs || record.wakeBroadcast != info.wakeBroadcast || record.wakeEnabled != info.wakeEnabled)) {
@@ -589,7 +718,7 @@ class ConnectionManager(
             }
             MessageType.RING -> {
                 if (records.containsKey(id)) when (envelope.ring) {
-                    "start" -> runCatching { actions.ring(connection.hello?.name ?: "Your Mac") }
+                    "start" -> runCatching { actions.ring(connection.hello?.name ?: "Your Mac", flash = envelope.text == RING_FLASH) }
                     "stop" -> runCatching { actions.stopRinging() }
                     "stopped" -> _ringingMacs.value = _ringingMacs.value - id
                 }
@@ -611,6 +740,388 @@ class ConnectionManager(
         }
     }
 
+    // Another phone's screen and camera
+
+    /** A screen or camera message from a paired phone, either as the phone being viewed or as the one viewing. */
+    private fun handlePhoneShare(connection: PeerConnection, envelope: Envelope) {
+        val id = connection.peerId
+        if (!synchronized(lock) { records.containsKey(id) }) return
+        val type = envelope.type
+        when (type) {
+            in PhoneRules.FROM_SOURCE -> return mirror.handle(id, envelope)
+            in PhoneRules.TO_SOURCE -> return handleToSource(connection, envelope)
+            in PhoneRules.FROM_SPEAKER -> return handleSpeaker(connection, envelope)
+            in PhoneRules.FROM_CONTROLLER -> return handleController(connection, envelope)
+            in PhoneRules.TO_CONTROLLER -> {
+                val kind = PhoneRules.TO_CONTROLLER.getValue(type)
+                if (awaited.take(id, kind)) {
+                    _remoteReplies.value = _remoteReplies.value.let { all -> all + (id to (all[id].orEmpty() + (kind to envelope))) }
+                    if (kind == PeerAsk.Move) mover.answered(id, envelope)
+                }
+                return
+            }
+            in PhoneRules.FROM_SMS_READER -> return handleSmsReader(connection, envelope)
+            in PhoneRules.TO_SMS_READER -> {
+                smsRemote.handle(id, envelope)
+                return
+            }
+            in PhoneRules.FROM_MOVER -> {
+                val summary = envelope.move?.takeIf { it.valid() }
+                if (summary != null && phoneAccess.of(id).move == true) runCatching { phoneMoveSink?.invoke(id, summary) }
+                return
+            }
+            in PhoneRules.TO_SPEAKER -> {
+                // Only ever stops what this phone sends there.
+                if (type == MessageType.TALK_STOPPED) {
+                    if (synchronized(lock) { talkingTo.remove(id) }) phoneAudioSink?.invoke(id, envelope)
+                } else {
+                    audioSink?.invoke(id, envelope)
+                }
+                return
+            }
+        }
+        val kind = PhoneRules.TO_VIEWER[type]
+        if (kind != null) {
+            val asked = synchronized(lock) {
+                val kinds = watching[id].orEmpty()
+                val ok = PhoneRules.toViewer(type, kinds)
+                // Stopped means stopped: more video needs a new request.
+                if (ok && (type == MessageType.SCREEN_STOPPED || type == MessageType.CAMERA_STOPPED)) unwatch(id, kind)
+                ok
+            }
+            if (asked) phoneViewSink?.invoke(id, envelope)
+            return
+        }
+        val verdict = PhoneRules.fromViewer(type, phoneAccess.of(id), screenSharedWith == id, controlReady())
+        when (verdict) {
+            PhoneRules.Verdict.Drop, PhoneRules.Verdict.Ask -> Unit
+            PhoneRules.Verdict.Refuse -> connection.post(PhoneRules.refusal(type, localHello(true).name))
+            PhoneRules.Verdict.Deliver -> when (type) {
+                MessageType.SCREEN_REQUEST -> scope.launch(Dispatchers.IO) { runCatching { phoneData.requestScreen(id) } }
+                MessageType.SCREEN_SYNC -> runCatching { phoneData.syncScreen(id) }
+                MessageType.SCREEN_STOP -> runCatching { phoneData.stopScreen(id) }
+                // In order, on the reading thread, like control from a Mac.
+                MessageType.CONTROL -> envelope.control?.let(ControlRules::sanitize)?.let { runCatching { phoneData.control(it) } }
+                else -> cameraSink?.invoke(id, envelope)
+            }
+        }
+    }
+
+    /** A link, music, screen time, quiet, or location request: carried out only by this phone's switch for the sender. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val mediaAnswers = Dispatchers.IO.limitedParallelism(1)
+
+    private fun handleController(connection: PeerConnection, envelope: Envelope) {
+        val id = connection.peerId
+        val kind = PhoneRules.FROM_CONTROLLER.getValue(envelope.type)
+        when (val verdict = PhoneRules.fromController(envelope.type, phoneAccess.of(id))) {
+            // Music buttons run one at a time in arrival order (next, next, volume…); others may be slow (location).
+            PhoneRules.Verdict.Deliver -> scope.launch(if (kind == PeerAsk.Media) mediaAnswers else Dispatchers.IO) {
+                val name = synchronized(lock) { connection.hello?.name ?: records[id]?.name } ?: "Another phone"
+                answers.answer(id, name, envelope)?.let { connection.post(it) }
+            }
+            PhoneRules.Verdict.Drop -> Unit
+            else -> {
+                connection.post(PhoneRules.requestRefusal(kind, localHello(true).name, verdict, envelope.key))
+                if (verdict == PhoneRules.Verdict.Ask) phoneRequestAskSink?.invoke(id, kind)
+            }
+        }
+    }
+
+    /** An SMS request from a phone that reads this phone's SMS: carried out only by this phone's switch for it. */
+    private fun handleSmsReader(connection: PeerConnection, envelope: Envelope) {
+        val id = connection.peerId
+        when (val verdict = PhoneRules.fromSmsReader(envelope.type, phoneAccess.of(id))) {
+            PhoneRules.Verdict.Deliver -> scope.launch(Dispatchers.IO) {
+                val name = synchronized(lock) { connection.hello?.name ?: records[id]?.name } ?: "Another phone"
+                smsShare.handle(id, name, envelope)
+            }
+            PhoneRules.Verdict.Drop -> Unit
+            else -> {
+                val why = PhoneRules.refusalText(PeerAsk.Sms, localHello(true).name, verdict)
+                val answer = PhoneRules.smsAnswer(envelope.type) ?: return
+                connection.post(
+                    if (answer == MessageType.PSMS_RESULT) {
+                        val smsId = envelope.smsSend?.id ?: return
+                        Envelope(answer, smsResult = SmsResult(smsId, false, why))
+                    } else {
+                        Envelope(answer, key = envelope.key, smsThread = envelope.smsThread, error = why)
+                    },
+                )
+                if (verdict == PhoneRules.Verdict.Ask) phoneRequestAskSink?.invoke(id, PeerAsk.Sms)
+            }
+        }
+    }
+
+    /** Lists another phone's SMS threads, or one thread; the answer lands in [SmsRemote.views]. */
+    fun listPhoneSms(peerId: String, thread: Long? = null): Boolean = isPhone(peerId) && postTo(peerId, smsRemote.list(peerId, thread))
+
+    /**
+     * Sends an SMS through another phone's SIM. Returns its ID, whose answer lands in [SmsView.results]; null when the
+     * number or text can't go, or that phone isn't connected.
+     */
+    fun sendPhoneSms(peerId: String, address: String, body: String): String? {
+        if (!isPhone(peerId)) return null
+        val envelope = smsRemote.send(peerId, address, body) ?: return null
+        return envelope.smsSend?.id?.takeIf { postTo(peerId, envelope) }
+    }
+
+    /** New SMS from that phone show here while connected (and again after reconnecting, while [on]). */
+    fun followPhoneSms(peerId: String, on: Boolean) {
+        if (!isPhone(peerId)) return
+        smsRemote.setFollow(peerId, on)
+        postTo(peerId, if (on) smsRemote.watch(peerId) else smsRemote.unwatch(peerId))
+    }
+
+    /** A phone connected or was paired: what it gets from here, and what this phone was doing with it. */
+    private fun phoneReady(id: String) {
+        relay.peerReady(id)
+        if (id in smsRemote.follow.value) postTo(id, smsRemote.watch(id))
+        scope.launch(Dispatchers.IO) { mover.connected(id) }
+    }
+
+    /**
+     * A `file.offer`. From a computer, or a plain file from a phone: taken, to Downloads. Photo backup and moves from
+     * a phone need this phone's switch for it, and 1 GB free after the file; a copy already here is skipped.
+     */
+    private fun admitFile(peerId: String, offer: FileMessage): Admission {
+        if (!isPhone(peerId)) return Admission.Accept()
+        val kind = offer.kind
+        if (kind != PhoneKinds.PHOTO && kind !in PhoneKinds.MOVE) return Admission.Accept()
+        val ask = if (kind == PhoneKinds.PHOTO) PeerAsk.Backup else PeerAsk.Move
+        val local = localHello(true).name
+        when (val verdict = PhoneRules.fileFromPhone(kind, phoneAccess.of(peerId))) {
+            PhoneRules.Verdict.Deliver -> Unit
+            else -> {
+                if (verdict == PhoneRules.Verdict.Ask) phoneRequestAskSink?.invoke(peerId, ask)
+                return Admission.Refuse(PhoneRules.refusalText(ask, local, verdict), if (verdict == PhoneRules.Verdict.Ask) PhoneKinds.ASK else PhoneKinds.OFF)
+            }
+        }
+        val name = synchronized(lock) { connections[peerId]?.hello?.name ?: records[peerId]?.name } ?: "Phone"
+        val origin = FileOrigin(peerId, FileNames.sanitize(name), kind, FileNames.folder(offer.folder))
+        val clean = FileNames.sanitize(offer.name)
+        val size = offer.size ?: 0L
+        if (received.has(peerId, origin.folder, clean, size, offer.sha256) && runCatching { fileSinks.exists(origin, clean, size) }.getOrDefault(false)) {
+            return Admission.Skip
+        }
+        val free = runCatching { phoneData.freeBytes() }.getOrDefault(Long.MAX_VALUE)
+        if (!StorageGuard.enough(free, size)) {
+            runCatching { lowSpaceSink?.invoke(peerId, kind) }
+            return Admission.Refuse(StorageGuard.lowSpaceText(local, free), PhoneKinds.LOW_SPACE)
+        }
+        return Admission.Accept(origin)
+    }
+
+    private fun fileSaved(peerId: String, offer: FileMessage, sha256: String) {
+        if (offer.kind != PhoneKinds.PHOTO && offer.kind !in PhoneKinds.MOVE) return
+        if (!isPhone(peerId)) return
+        received.add(peerId, FileNames.folder(offer.folder), FileNames.sanitize(offer.name), offer.size ?: 0L, sha256)
+    }
+
+    /** Sends a request to another phone and waits for its answer, which lands in [remoteReplies]. */
+    private fun askPhone(peerId: String, envelope: Envelope): Boolean {
+        val kind = PhoneRules.FROM_CONTROLLER[envelope.type] ?: return false
+        if (!isPhone(peerId)) return false
+        awaited.expect(peerId, kind)
+        return postTo(peerId, envelope)
+    }
+
+    /** Offers a web, map, or phone link on another phone. False when it isn't one, or that phone isn't connected. */
+    fun sendLink(peerId: String, text: String): Boolean {
+        val link = SafeLink.find(text) ?: return false
+        return askPhone(peerId, Envelope(MessageType.LINK_OPEN, text = link.uri, key = UUID.randomUUID().toString()))
+    }
+
+    /** A music button on another phone, or [RemoteAnswers.STATE] to only see what plays. */
+    fun phoneMedia(peerId: String, action: String): Boolean =
+        action in RemoteAnswers.MEDIA_ACTIONS && askPhone(peerId, Envelope(MessageType.MEDIA_REMOTE, media = action))
+
+    fun requestScreenTime(peerId: String): Boolean = askPhone(peerId, Envelope(MessageType.MONITOR_REQUEST))
+
+    fun setPhoneQuiet(peerId: String, request: QuietRequest): Boolean =
+        QuietMath.valid(request) && askPhone(peerId, Envelope(MessageType.QUIET_SET, quiet = request.copy(until = null)))
+
+    fun locatePhone(peerId: String): Boolean = askPhone(peerId, Envelope(MessageType.LOCATE_REQUEST))
+
+    /** Changes this phone's battery alerts for another phone. */
+    fun setMonitor(peerId: String, change: (MonitorSettings) -> MonitorSettings) = monitor.set(peerId, change)
+
+    /** A dismiss, reply, or "mark as read" for one of this phone's notifications, from the phone it was sent to. */
+    private fun handleToSource(connection: PeerConnection, envelope: Envelope) {
+        val id = connection.peerId
+        when (PhoneRules.toSource(envelope.type, phoneAccess.of(id), relay.forwarded(id, envelope.key))) {
+            PhoneRules.Verdict.Deliver -> scope.launch(Dispatchers.IO) { relay.handle(id, envelope) }
+            PhoneRules.Verdict.Refuse -> connection.post(NotificationRelay.refusal(envelope.key, localHello(true).name))
+            else -> Unit
+        }
+    }
+
+    /** Voice or sound from a phone: played here only once allowed, from one phone of each kind at a time. */
+    private fun handleSpeaker(connection: PeerConnection, envelope: Envelope) {
+        val id = connection.peerId
+        val type = envelope.type
+        val kind = PhoneRules.FROM_SPEAKER.getValue(type)
+        val starting = type == MessageType.TALK_START || type == MessageType.AUDIO_STARTED
+        val (verdict, busy) = synchronized(lock) {
+            val busy = if (starting) hearing.entries.firstOrNull { it.key != id && kind in it.value }?.key else null
+            val verdict = PhoneRules.fromSpeaker(type, phoneAccess.of(id), hearing[id].orEmpty(), busy)
+            if (verdict == PhoneRules.Verdict.Deliver) {
+                if (starting) hearing.getOrPut(id) { HashSet() }.add(kind)
+                else if (type == MessageType.TALK_STOP || type == MessageType.AUDIO_STOPPED) unhear(id, kind)
+            }
+            verdict to busy
+        }
+        when (verdict) {
+            PhoneRules.Verdict.Deliver -> phoneAudioSink?.invoke(id, envelope)
+            PhoneRules.Verdict.Drop -> Unit
+            else -> {
+                val local = localHello(true).name
+                val busyName = busy?.let { other -> synchronized(lock) { connections[other]?.hello?.name ?: records[other]?.name } ?: "Another phone" }
+                connection.post(PhoneRules.audioRefusal(kind, PhoneRules.audioRefusalText(kind, local, verdict, busyName)))
+                if (verdict == PhoneRules.Verdict.Ask) phoneAskSink?.invoke(id, kind)
+            }
+        }
+    }
+
+    private fun unhear(peerId: String, kind: AudioKind): Boolean = synchronized(lock) {
+        val kinds = hearing[peerId] ?: return@synchronized false
+        val had = kinds.remove(kind)
+        if (kinds.isEmpty()) hearing.remove(peerId)
+        had
+    }
+
+    /** The end of a stream played here, as the player sees it. */
+    private fun endedLocally(kind: AudioKind) = Envelope(if (kind == AudioKind.Talk) MessageType.TALK_STOP else MessageType.AUDIO_STOPPED)
+
+    /** Stops playing that phone's voice or sound here, and tells it to stop sending. */
+    fun stopHearing(peerId: String, kind: AudioKind, why: String? = null) = onIo {
+        if (!unhear(peerId, kind)) return@onIo
+        runCatching { phoneAudioSink?.invoke(peerId, endedLocally(kind)) }
+        postTo(peerId, PhoneRules.audioRefusal(kind, why))
+    }
+
+    /** What this phone plays from [peerId] now. */
+    fun hearingFrom(peerId: String): Set<AudioKind> = synchronized(lock) { hearing[peerId]?.toSet().orEmpty() }
+
+    /** Starts push-to-talk to another phone: `talk.start`, then [sendTalk] for each chunk, then [stopTalk]. */
+    fun startTalk(peerId: String, rate: Int, channels: Int): Boolean {
+        synchronized(lock) { talkingTo.add(peerId) }
+        return sendTo(peerId, Envelope(MessageType.TALK_START, audioRate = rate, audioChannels = channels))
+    }
+
+    /** One chunk of 16-bit PCM, binary to a `bin1` phone. Returns false when it couldn't go. */
+    fun sendTalk(peerId: String, pcm: ByteArray): Boolean = sendTo(peerId, Envelope(MessageType.TALK_FRAME, raw = pcm))
+
+    fun stopTalk(peerId: String) {
+        if (synchronized(lock) { talkingTo.remove(peerId) }) postTo(peerId, Envelope(MessageType.TALK_STOP))
+    }
+
+    /** Dismisses a notification on the phone that forwarded it, and drops it here. */
+    fun dismissMirrored(peerId: String, key: String) {
+        mirror.remove(peerId, key)
+        postTo(peerId, Envelope(MessageType.NOTIFICATION_DISMISS, key = key))
+    }
+
+    /** Answers a forwarded notification; `notification.result` comes back in [NotificationMirror.results]. */
+    fun replyMirrored(peerId: String, key: String, text: String) {
+        postTo(peerId, Envelope(MessageType.NOTIFICATION_REPLY, key = key, text = text))
+    }
+
+    fun markMirroredRead(peerId: String, key: String) {
+        postTo(peerId, Envelope(MessageType.NOTIFICATION_READ, key = key))
+    }
+
+    /** Paired phones connected now whose hello lists [cap]. */
+    private fun phonesWith(cap: String): List<String> = synchronized(lock) {
+        connections.entries.filter { (id, connection) -> id in records && isPhone(connection) && PhoneRules.supports(connection.hello, cap) }.map { it.key }
+    }
+
+    private fun controlReady(): Boolean = runCatching { phoneData.isGranted(PhoneFeature.Control) }.getOrDefault(false)
+
+    /** Ends this phone's screen and camera sessions with [peerId], and forgets what this phone asked it for. */
+    private fun endPhoneSessions(peerId: String) {
+        val (heard, talking) = synchronized(lock) {
+            watching.remove(peerId)
+            (hearing.remove(peerId)?.toList().orEmpty()) to talkingTo.remove(peerId)
+        }
+        runCatching { phoneData.stopScreen(peerId) }
+        runCatching { cameraSink?.invoke(peerId, Envelope(MessageType.CAMERA_STOP)) }
+        // Voice and sound from it end here; voice from here to it ends too. Sound sent from here ends through
+        // the app, which watches who is connected.
+        heard.forEach { runCatching { phoneAudioSink?.invoke(peerId, endedLocally(it)) } }
+        if (talking) runCatching { phoneAudioSink?.invoke(peerId, Envelope(MessageType.TALK_STOPPED, error = "The connection was lost")) }
+        mirror.clear(peerId)
+        relay.disconnected(peerId)
+        smsShare.disconnected(peerId)
+        smsRemote.disconnected(peerId)
+        mover.disconnected(peerId)
+        // What plays there is only known while connected.
+        _remoteReplies.value[peerId]?.let { replies -> _remoteReplies.value = _remoteReplies.value + (peerId to (replies - PeerAsk.Media)) }
+    }
+
+    private fun watch(peerId: String, kind: P2pKind) = synchronized(lock) { watching.getOrPut(peerId) { HashSet() }.add(kind) }
+
+    private fun unwatch(peerId: String, kind: P2pKind) = synchronized(lock) {
+        watching[peerId]?.let { kinds ->
+            kinds.remove(kind)
+            if (kinds.isEmpty()) watching.remove(peerId)
+        }
+    }
+
+    /**
+     * Changes what [peerId] may do here. Taking screen or camera away ends that session now; the app also resends
+     * `screen.started` so the viewer learns whether its taps still go through.
+     */
+    fun setPhoneAccess(peerId: String, change: (PeerAccess) -> PeerAccess) = onIo {
+        val (before, after) = phoneAccess.update(peerId, change)
+        if (before.screen == true && after.screen != true) runCatching { phoneData.stopScreen(peerId) }
+        if (before.camera == true && after.camera != true) runCatching { cameraSink?.invoke(peerId, Envelope(MessageType.CAMERA_STOP)) }
+        val local = localHello(true).name
+        if (before.talk == true && after.talk != true) stopHearing(peerId, AudioKind.Talk, "Talking to $local is turned off there.")
+        if (before.sound == true && after.sound != true) stopHearing(peerId, AudioKind.Sound, "Playing sound on $local is turned off there.")
+        relay.changed(peerId, before, after)
+        if (before.sms != after.sms) smsShare.accessChanged(peerId, after)
+    }
+
+    /** For `screen.started`: whether taps from that phone go through. Null for a computer, which doesn't need it. */
+    fun phoneControlAllowed(peerId: String): Boolean? =
+        if (!isPhone(peerId)) null else PhoneRules.canControl(phoneAccess.of(peerId), controlReady())
+
+    /** Asks another phone for its screen. It shows a notification there, and the user must agree there. */
+    fun viewPhoneScreen(peerId: String) {
+        watch(peerId, P2pKind.Screen)
+        postTo(peerId, Envelope(MessageType.SCREEN_REQUEST))
+    }
+
+    fun stopPhoneScreen(peerId: String) {
+        unwatch(peerId, P2pKind.Screen)
+        postTo(peerId, Envelope(MessageType.SCREEN_STOP))
+    }
+
+    fun syncPhoneScreen(peerId: String) { postTo(peerId, Envelope(MessageType.SCREEN_SYNC)) }
+
+    /** A touch or key on the other phone's screen, `x` and `y` from 0 to 1. It only acts if that phone allows it. */
+    fun sendPhoneControl(peerId: String, event: ControlEvent) {
+        postTo(peerId, Envelope(MessageType.CONTROL, control = event))
+    }
+
+    /** Asks another phone for its camera. It shows a notification there, and the camera starts after a tap. */
+    fun usePhoneCamera(peerId: String) {
+        watch(peerId, P2pKind.Camera)
+        postTo(peerId, Envelope(MessageType.CAMERA_REQUEST))
+    }
+
+    fun stopPhoneCamera(peerId: String) {
+        unwatch(peerId, P2pKind.Camera)
+        postTo(peerId, Envelope(MessageType.CAMERA_STOP))
+    }
+
+    /** `camera.sync`, `camera.control`, `camera.zoom`, or `camera.shutter` for the other phone's camera. */
+    fun sendPhoneCamera(peerId: String, envelope: Envelope) {
+        if (envelope.type !in PhoneRules.FROM_VIEWER || !envelope.type.startsWith("camera.")) return
+        postTo(peerId, envelope)
+    }
+
     // Pairing
 
     fun requestPairing(id: String) = onIo {
@@ -627,7 +1138,9 @@ class ConnectionManager(
         val digits = typed.filter(Char::isDigit)
         locked {
             val prompt = _prompt.value ?: return@locked
-            if (prompt.showsCode || prompt.outdated || digits.length != 6) return@locked
+            // A code already on its way isn't sent again: a second answer would replace the first one's
+            // expected confirmation and use up another try.
+            if (prompt.showsCode || prompt.outdated || prompt.localAccepted || digits.length != 6) return@locked
             val connection = connections[prompt.peerId] ?: return@locked
             val typing = typer ?: return@locked
             _prompt.value = prompt.copy(localAccepted = true, error = null)
@@ -707,14 +1220,14 @@ class ConnectionManager(
                 return
             }
             // Asked again while the code shows: the same code stays, and so do the wrong tries. A new request
-            // (a new nonce) gets a new share for that same code.
+            // (a new nonce) gets a new share for that same code, but only after a wrong code or now and then.
             if (startedByPeer && current.showsCode && !current.outdated) {
                 val nonce = Pake.requestNonce(request) ?: return
-                if (shower?.sameRequest(nonce) != true) {
-                    shower?.close()
-                    shower = Pake.Shower(current.code, nonce, Pake.channel(id, identity.deviceId))
+                when (val renewal = shower.renew(current.code, nonce, Pake.channel(id, identity.deviceId))) {
+                    is ShowerSlot.Renewal.Resend -> send(connection, Envelope(MessageType.PAIR_PAKE, pake = renewal.message))
+                    is ShowerSlot.Renewal.Build -> buildShower(id, renewal.plan)
+                    ShowerSlot.Renewal.Ignore -> CoreLog.w(TAG, "PAIRING_REQUEST_IGNORED $id")
                 }
-                shower?.let { send(connection, Envelope(MessageType.PAIR_PAKE, pake = it.message)) }
                 return
             }
             // Both asked at once: the smaller ID shows the code, the other types it.
@@ -744,11 +1257,7 @@ class ConnectionManager(
         )
         when {
             outdated -> if (startedByPeer) send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.UPDATE_REQUIRED))
-            startedByPeer -> {
-                val showing = Pake.Shower(code, nonceT!!, Pake.channel(id, identity.deviceId))
-                shower = showing
-                send(connection, Envelope(MessageType.PAIR_PAKE, pake = showing.message))
-            }
+            startedByPeer -> buildShower(id, shower.start(code, nonceT!!, Pake.channel(id, identity.deviceId)))
             else -> {
                 val typing = Pake.Typer()
                 typer = typing
@@ -764,6 +1273,18 @@ class ConnectionManager(
         }
     }
 
+    /** The CPace math for a Shower runs once the lock is released; its `pair.pake` goes if the prompt is still the same. */
+    private fun Outgoing.buildShower(id: String, plan: ShowerSlot.Plan) = afterwards {
+        val built = plan.build()
+        locked {
+            if (_prompt.value?.peerId == id && shower.install(plan, built)) {
+                send(connections[id], Envelope(MessageType.PAIR_PAKE, pake = built.message))
+            } else {
+                built.close()
+            }
+        }
+    }
+
     private fun Outgoing.completePairing(id: String) {
         val connection = connections[id] ?: return
         val hello = connection.hello ?: return
@@ -772,13 +1293,12 @@ class ConnectionManager(
         pairingGuard.succeeded(id)
         clearPairing()
         send(connection, Envelope(MessageType.INFO, info = localInfo()))
-        if (!isPhone(connection)) phone.peerReady(id)
+        if (!isPhone(connection)) phone.peerReady(id) else phoneReady(id)
         publishPeers()
     }
 
     private fun dropPake() {
-        shower?.close()
-        shower = null
+        shower.clear()
         typer?.close()
         typer = null
         pendingCode = null
@@ -885,9 +1405,9 @@ class ConnectionManager(
         postTo(peerId, Envelope(MessageType.NOTCH_ACTION, notchAction = action))
     }
 
-    /** Makes the Mac play a loud sound for up to 30 seconds. */
-    fun ringMac(peerId: String, on: Boolean) {
-        postTo(peerId, Envelope(MessageType.RING, ring = if (on) "start" else "stop"))
+    /** Makes the Mac or phone play a loud sound for up to 30 seconds. [flash]: a phone also flashes its torch. */
+    fun ringMac(peerId: String, on: Boolean, flash: Boolean = false) {
+        postTo(peerId, Envelope(MessageType.RING, ring = if (on) "start" else "stop", text = if (on && flash) RING_FLASH else null))
         _ringingMacs.value = if (on) _ringingMacs.value + peerId else _ringingMacs.value - peerId
         if (on) scope.launch {
             delay(RING_MS)
@@ -973,6 +1493,20 @@ class ConnectionManager(
 
     private fun removeRecord(id: String) {
         if (records.remove(id) != null) {
+            if (phoneAccess.of(id) != PeerAccess() || watching.containsKey(id) || hearing.containsKey(id) || id in talkingTo ||
+                mirror.feeds.value.containsKey(id)
+            ) {
+                phoneAccess.forget(id)
+                watching.remove(id)
+                scope.launch(Dispatchers.IO) { endPhoneSessions(id) }
+            }
+            monitor.forget(id)
+            awaited.forget(id)
+            smsShare.forget(id)
+            smsRemote.forget(id)
+            received.forget(id)
+            if (mover.job.plan.value?.peerId == id) scope.launch(Dispatchers.IO) { mover.cancel() }
+            _remoteReplies.value = _remoteReplies.value - id
             infos.remove(id)
             _notch.value = _notch.value - id
             saveRecords()
@@ -996,6 +1530,7 @@ class ConnectionManager(
                 canWake = record?.wakeMacs?.isNotEmpty() == true,
                 viaUsb = connections.containsKey(id) && connectionHosts[id] == PhoneLinkProtocol.USB_HOST,
                 wakeEnabled = record?.wakeEnabled,
+                caps = hello?.caps.orEmpty(),
             )
         }.sortedWith(compareBy({ !it.isConnected }, { it.name.lowercase() }))
     }
@@ -1056,6 +1591,8 @@ class ConnectionManager(
         private const val CLIPBOARD_RECEIPT_MS = 4_000L
         private const val CLIPBOARD_RETRY_MS = 26_000L
         private const val RING_MS = 30_000L
+        /** On `ring` `start` (`text`): also flash the torch. Older phones ignore it and only ring. */
+        const val RING_FLASH = "flash"
         private const val MIN_BACKOFF_MS = 2_000L
         private const val MAX_BACKOFF_MS = 30_000L
         /** A connection that lasted this long was a real one, so the next reconnect starts quickly again. */

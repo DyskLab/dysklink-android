@@ -16,7 +16,13 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 /** The system clipboard. Text set from a phone isn't sent back to it. */
-class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (ByteArray) -> Unit = {}) {
+class Clipboard(
+    private val onCopied: (String) -> Unit,
+    private val onImage: (ByteArray) -> Unit = {},
+    /** The system clipboard; tests pass their own. */
+    private val system: () -> java.awt.datatransfer.Clipboard = { Toolkit.getDefaultToolkit().systemClipboard },
+    private val restoreAfterMs: Long = RESTORE_AFTER_MS,
+) {
     /** Guarded by [changes]: what this side last saw or set, so it isn't sent back. */
     private var last: String? = read()
     private var lastImage: String? = null
@@ -26,7 +32,7 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
     private var watcher: Thread? = null
 
     private fun read(): String? = runCatching {
-        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+        val clipboard = system()
         if (clipboard.isDataFlavorAvailable(DataFlavor.stringFlavor)) clipboard.getData(DataFlavor.stringFlavor) as String else null
     }.getOrNull()
 
@@ -42,12 +48,12 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
             lastImage = print
             lastQuick = quick
         }
-        Toolkit.getDefaultToolkit().systemClipboard.setContents(ImageSelection(image), null)
+        system().setContents(ImageSelection(image), null)
     }.isSuccess
 
     /** The copied picture, when there's a picture and no text. */
     private fun readImage(): BufferedImage? = runCatching {
-        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+        val clipboard = system()
         if (!clipboard.isDataFlavorAvailable(DataFlavor.imageFlavor)) return null
         val image = clipboard.getData(DataFlavor.imageFlavor) as? java.awt.Image ?: return null
         image as? BufferedImage ?: BufferedImage(image.getWidth(null), image.getHeight(null), BufferedImage.TYPE_INT_ARGB)
@@ -56,7 +62,7 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
 
     fun set(text: String): Boolean = runCatching {
         changes.change { last = text }
-        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
+        system().setContents(StringSelection(text), null)
     }.isSuccess
 
     private val pasteLock = Any()
@@ -77,15 +83,20 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
         restore?.cancel(false)
         // Only the first paste of a run saves the clipboard; later ones would save the text pasted before.
         if (beforePaste == null) beforePaste = snapshot()
-        // The paste before may still be being read by the app: don't change the clipboard under it.
-        val wait = pastedAt + PASTE_GAP_MS - System.currentTimeMillis()
-        if (wait > 0) Thread.sleep(wait)
-        if (!set(text)) return false
-        pressPaste()
-        pasted = text
-        pastedAt = System.currentTimeMillis()
-        restore = restorer.schedule(::restoreAfterPaste, RESTORE_AFTER_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-        true
+        try {
+            // The paste before may still be being read by the app: don't change the clipboard under it.
+            val wait = pastedAt + PASTE_GAP_MS - System.currentTimeMillis()
+            if (wait > 0) Thread.sleep(wait)
+            if (!set(text)) return false
+            pressPaste()
+            pasted = text
+            pastedAt = System.currentTimeMillis()
+            true
+        } finally {
+            // Whatever happened, the run ends with the clipboard put back; a failed paste mustn't leave the saved
+            // clipboard waiting, or a paste much later would put back that stale one.
+            restore = restorer.schedule(::restoreAfterPaste, restoreAfterMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
     }
 
     private fun restoreAfterPaste(): Unit = synchronized(pasteLock) {
@@ -99,13 +110,13 @@ class Clipboard(private val onCopied: (String) -> Unit, private val onImage: (By
                 last = saved.text
                 if (image != null) { lastImage = fingerprint(image); lastQuick = quickFingerprint(image) }
             }
-            Toolkit.getDefaultToolkit().systemClipboard.setContents(saved, null)
+            system().setContents(saved, null)
         }.onFailure { id.phonelink.android.core.CoreLog.w("DyskLink", "Couldn't put the clipboard back", it) }
         Unit
     }
 
     private fun snapshot(): Snapshot {
-        val clipboard = runCatching { Toolkit.getDefaultToolkit().systemClipboard }.getOrNull() ?: return Snapshot(null, null, null)
+        val clipboard = runCatching { system() }.getOrNull() ?: return Snapshot(null, null, null)
         fun <T> get(flavor: DataFlavor, cast: (Any) -> T?): T? = runCatching {
             if (clipboard.isDataFlavorAvailable(flavor)) cast(clipboard.getData(flavor)) else null
         }.getOrNull()

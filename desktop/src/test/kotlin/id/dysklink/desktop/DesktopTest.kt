@@ -232,4 +232,88 @@ class DesktopTest {
         val mapping = longArrayOf(0x61, 0x41, 0, 0, 0x62, 0, 0, 0)
         assertEquals(listOf(9, 11), X11Keys.spareKeycodes(mapping, 2, 8))
     }
+
+    private val x11All = TypingTools(Desktop.X11, xdotool = true, x11Remap = true, clipboard = true, robot = true)
+
+    @Test
+    fun aTimedOutXdotoolIsntTypedAgainAnotherWay() {
+        val run = TypingRun(x11All)
+        val typed = mutableListOf<String>()
+        val ok = run.type("hello\nworld", key = { typed += "<$it>" }) { step ->
+            typed += "${step.method}:${step.text}"
+            if (step.text == "hello") Typed.Stopped else Typed.Done
+        }
+        assertEquals(false, ok)
+        // Not retyped by X11 remap, and xdotool stays for next time.
+        assertEquals(listOf("XDOTOOL:hello", "<return>", "XDOTOOL:world"), typed)
+        assertEquals(x11All, run.tools)
+    }
+
+    @Test
+    fun aWayThatFailsPartWaySendsOnlyTheRestTheNextWay() {
+        val run = TypingRun(x11All)
+        val typed = mutableListOf<String>()
+        run.type("abcdef\tg", key = { typed += "<$it>" }) { step ->
+            typed += "${step.method}:${step.text}"
+            when (step.method) {
+                TypeMethod.XDOTOOL -> Typed.Nothing
+                TypeMethod.X11_REMAP -> if (step.text == "abcdef") Typed.Partly(2) else Typed.Done
+                else -> Typed.Done
+            }
+        }
+        // xdotool took nothing: all of it goes by X11 remap, which stops after "ab": only "cdef" is pasted.
+        assertEquals(listOf("XDOTOOL:abcdef", "X11_REMAP:abcdef", "PASTE:cdef\tg"), typed)
+        assertEquals(x11All.copy(xdotool = false, x11Remap = false), run.tools)
+    }
+
+    @Test
+    fun aClipboardHiccupDoesntStopPastingForGood() {
+        val run = TypingRun(TypingTools(Desktop.X11, clipboard = true, robot = true))
+        var fail = true
+        val typed = mutableListOf<String>()
+        run.type("é", key = {}) { step ->
+            typed += "${step.method}:${step.text}"
+            if (step.method == TypeMethod.PASTE && fail) Typed.Nothing else Typed.Done
+        }
+        // Nothing else can type "é" here, so it's lost this time, but the next text is pasted again.
+        assertEquals(listOf("PASTE:é"), typed)
+        assertTrue(run.tools.clipboard)
+        fail = false
+        run.type("ü", key = {}) { step -> typed += "${step.method}:${step.text}"; Typed.Done }
+        assertEquals(listOf("PASTE:é", "PASTE:ü"), typed)
+    }
+
+    /** A clipboard in memory whose next set can be made to fail. */
+    private class FlakyClipboard : java.awt.datatransfer.Clipboard("test") {
+        @Volatile var failSets = 0
+        override fun setContents(contents: java.awt.datatransfer.Transferable?, owner: java.awt.datatransfer.ClipboardOwner?) {
+            if (failSets > 0) { failSets--; throw IllegalStateException("Busy") }
+            super.setContents(contents, owner)
+        }
+        fun text(): String? = getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
+    }
+
+    @Test
+    fun aFailedPasteStillPutsTheClipboardBack() {
+        val system = FlakyClipboard()
+        system.setContents(java.awt.datatransfer.StringSelection("mine"), null)
+        val clipboard = Clipboard(onCopied = {}, system = { system }, restoreAfterMs = 100)
+        assertTrue(clipboard.pasteThrough("one") {})
+        system.failSets = 1
+        assertEquals(false, clipboard.pasteThrough("two") {})
+        Thread.sleep(400)
+        assertEquals("mine", system.text())
+        // Copied later: a paste then puts back this, not the old one.
+        system.setContents(java.awt.datatransfer.StringSelection("newer"), null)
+        assertTrue(clipboard.pasteThrough("three") {})
+        assertEquals("three", system.text())
+        Thread.sleep(400)
+        assertEquals("newer", system.text())
+    }
+
+    @Test
+    fun xdotoolGetsLongerForLongerText() {
+        assertEquals(10, XdotoolTyper.timeoutSeconds("short"))
+        assertEquals(30, XdotoolTyper.timeoutSeconds("x".repeat(1000)))
+    }
 }

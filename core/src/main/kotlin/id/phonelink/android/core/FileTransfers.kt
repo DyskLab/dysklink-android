@@ -50,10 +50,39 @@ interface FileSink {
 
 fun interface FileSinkFactory {
     fun open(name: String, size: Long): FileSink
+
+    /** A file from another phone that has a place of its own, such as photo backup or a move. */
+    fun open(name: String, size: Long, origin: FileOrigin): FileSink = open(name, size)
+
+    /** Whether a file of this name and size is still where [origin] puts it, so a copy can be skipped. */
+    fun exists(origin: FileOrigin, name: String, size: Long): Boolean = false
+}
+
+/** Who sent a file and what for: [kind] is one of [PhoneKinds], [folder] is already made safe. */
+data class FileOrigin(val peerId: String, val peerName: String, val kind: String?, val folder: String? = null)
+
+/** What the receiver does with a `file.offer`. */
+sealed class Admission {
+    /** Saved: with [origin], where its kind goes; without, to Downloads as always. */
+    data class Accept(val origin: FileOrigin? = null) : Admission()
+    /** Answered with `file.result` `ok: false`, [error], and [reason]. */
+    data class Refuse(val error: String, val reason: String? = null) : Admission()
+    /** Already here: answered `ok: true, skipped: true` at once, and nothing is sent. */
+    data object Skip : Admission()
 }
 
 object FileNames {
     private const val MAX_LENGTH = 200
+    private const val MAX_DEPTH = 6
+
+    /** A folder path from another device: each part made safe, no `..`, at most a few levels. Null when empty. */
+    fun folder(raw: String?): String? {
+        val parts = raw.orEmpty().replace('\\', '/').split('/')
+            .map { part -> part.filterNot { it.isISOControl() || it in "<>:\"|?*" }.trim().trimStart('.').take(80) }
+            .filter { it.isNotEmpty() }
+            .take(MAX_DEPTH)
+        return parts.joinToString("/").ifEmpty { null }
+    }
 
     /** File names come from another device, so they must not be able to point at another folder. */
     fun sanitize(raw: String?): String {
@@ -93,10 +122,14 @@ class FileTransfers(
     private val linkFor: ((peerId: String) -> TransferLink?)? = null,
     /** Queues a reply without waiting, for the reading thread. Null uses [send]. */
     private val post: ((peerId: String, envelope: Envelope) -> Boolean)? = null,
+    /** Decides each `file.offer`. Null takes everything, to Downloads. */
+    private val admit: ((peerId: String, offer: FileMessage) -> Admission)? = null,
+    /** A file was saved: its offer, and the SHA-256 that arrived. */
+    private val saved: ((peerId: String, offer: FileMessage, sha256: String) -> Unit)? = null,
     /** Returns false if the message can't be sent. */
     private val send: (peerId: String, envelope: Envelope) -> Boolean,
 ) {
-    private class Incoming(val peerId: String, val size: Long, val sink: FileSink) {
+    private class Incoming(val peerId: String, val size: Long, val sink: FileSink, val offer: FileMessage) {
         val digest: MessageDigest = MessageDigest.getInstance("SHA-256")
         var received = 0L
     }
@@ -137,23 +170,46 @@ class FileTransfers(
 
     private val finishedCallbacks = java.util.concurrent.ConcurrentHashMap<String, (Boolean) -> Unit>()
 
-    /** [onFinished] is told once whether the receiver saved the file. */
-    fun sendFile(peerId: String, name: String, size: Long, kind: String? = null, onFinished: ((Boolean) -> Unit)? = null, open: () -> InputStream) {
+    /** How an upload ended on the receiver: skipped as a copy, or why it was refused. Read with [outcome]. */
+    data class Outcome(val skipped: Boolean = false, val reason: String? = null, val error: String? = null)
+
+    private val outcomes = ConcurrentHashMap<String, Outcome>()
+
+    /** The receiver's answer to an upload that finished, once; null when it didn't say more than ok or failed. */
+    fun outcome(id: String): Outcome? = outcomes.remove(id)
+
+    /**
+     * [onFinished] is told once whether the receiver saved the file (or had it already). [folder] and [sha256] go in
+     * the offer, so another phone can file it and skip a copy it has. Returns the transfer's ID.
+     */
+    fun sendFile(
+        peerId: String, name: String, size: Long, kind: String? = null, onFinished: ((Boolean) -> Unit)? = null,
+        folder: String? = null, sha256: String? = null, open: () -> InputStream,
+    ): String {
         val id = UUID.randomUUID().toString()
         val clean = FileNames.sanitize(name)
         if (onFinished != null) finishedCallbacks[id] = onFinished
         val upload = Upload(peerId)
         outgoing[id] = upload
         add(Transfer(id, peerId, clean, size, 0, outgoing = true, status = TransferStatus.Active))
+        val offer = FileMessage(id, name = clean, size = size, kind = kind, folder = FileNames.folder(folder), sha256 = sha256)
         scope.launch(Dispatchers.IO) {
             try {
-                val failure = runCatching { uploads.withPermit { upload(id, upload, clean, size, kind, open) } }
+                val failure = runCatching { uploads.withPermit { upload(id, upload, offer, open) } }
                     .fold(onSuccess = { it }, onFailure = { it.message ?: "Failed to read the file" })
                 if (failure != null) finish(id, TransferStatus.Failed, failure)
             } finally {
                 outgoing.remove(id)
             }
         }
+        return id
+    }
+
+    /** Stops an upload of this phone's, such as a paused move. The receiver drops what it got. */
+    fun cancel(id: String, reason: String = "Canceled") {
+        val upload = outgoing[id] ?: return
+        upload.stopReason = reason
+        finish(id, TransferStatus.Failed, reason)
     }
 
     /** The link for [peerId]: its current connection, or sending by peer ID when connections aren't tracked here. */
@@ -173,12 +229,12 @@ class FileTransfers(
     private val usesFrames: Boolean get() = linkFor != null || sendFrame != null
 
     /** Returns a failure message, or null if all data was sent. Tells the receiver on its own connection when it fails. */
-    private fun upload(id: String, state: Upload, name: String, size: Long, kind: String?, open: () -> InputStream): String? {
+    private fun upload(id: String, state: Upload, offer: FileMessage, open: () -> InputStream): String? {
         // Failed while it waited its turn, such as when the connection dropped: it never starts.
         state.stopReason?.let { return it }
         val link = currentLink(state.peerId) ?: return "Connection lost"
         val failure = try {
-            sendOver(link, id, state, name, size, kind, open)
+            sendOver(link, id, state, offer, open)
         } catch (error: Exception) {
             error.message ?: "Failed to read the file"
         }
@@ -186,9 +242,9 @@ class FileTransfers(
         return failure
     }
 
-    private fun sendOver(link: TransferLink, id: String, state: Upload, name: String, size: Long, kind: String?, open: () -> InputStream): String? {
+    private fun sendOver(link: TransferLink, id: String, state: Upload, offer: FileMessage, open: () -> InputStream): String? {
         fun stopped(): String? = state.stopReason ?: if (!link.isOpen) "Connection lost" else null
-        val offer = FileMessage(id, name = name, size = size, kind = kind)
+        val size = offer.size ?: 0L
         if (!link.send(Envelope(MessageType.FILE_OFFER, file = offer))) return stopped() ?: "Connection lost"
         val digest = MessageDigest.getInstance("SHA-256")
         var total = 0L
@@ -327,11 +383,16 @@ class FileTransfers(
         val size = file.size ?: return
         if (size < 0 || incoming.containsKey(file.id)) return
         val name = FileNames.sanitize(file.name)
-        val sink = runCatching { sinks.open(name, size) }.getOrElse { error ->
+        val origin = when (val admission = admit?.invoke(peerId, file) ?: Admission.Accept()) {
+            is Admission.Refuse -> return reply(peerId, file.id, false, admission.error, reason = admission.reason)
+            Admission.Skip -> return reply(peerId, file.id, true, null, skipped = true)
+            is Admission.Accept -> admission.origin
+        }
+        val sink = runCatching { if (origin == null) sinks.open(name, size) else sinks.open(name, size, origin) }.getOrElse { error ->
             reply(peerId, file.id, false, error.message ?: "Can't save the file")
             return
         }
-        incoming[file.id] = Incoming(peerId, size, sink)
+        incoming[file.id] = Incoming(peerId, size, sink, file)
         add(Transfer(file.id, peerId, name, size, 0, outgoing = false, status = TransferStatus.Active))
     }
 
@@ -362,6 +423,7 @@ class FileTransfers(
             return finish(file.id, TransferStatus.Failed, "Failed to save the file")
         }
         reply(peerId, file.id, true, null)
+        runCatching { saved?.invoke(peerId, item.offer, hash) }
         finish(file.id, TransferStatus.Done, location, item.sink.openUri)
     }
 
@@ -377,8 +439,14 @@ class FileTransfers(
     private fun onResult(peerId: String, file: FileMessage) {
         if (!isOutgoingTo(peerId, file.id)) return
         if (file.ok == true) {
-            finish(file.id, TransferStatus.Done, "Sent")
+            val skipped = file.skipped == true
+            // A copy the receiver has is answered before the data: the upload stops, and it counts as done.
+            if (skipped) outcomes[file.id] = Outcome(skipped = true)
+            // Done first, so the upload stopping below can't fail it.
+            finish(file.id, TransferStatus.Done, if (skipped) "Already there" else "Sent")
+            if (skipped) outgoing[file.id]?.stopReason = "Already there"
         } else {
+            if (file.reason != null) outcomes[file.id] = Outcome(reason = file.reason, error = file.error)
             outgoing[file.id]?.stopReason = "Rejected by the receiver"
             finish(file.id, TransferStatus.Failed, file.error ?: "Rejected by the receiver")
         }
@@ -392,8 +460,9 @@ class FileTransfers(
     }
 
     /** Queued, not waited on: this runs on the connection's reading thread. */
-    private fun reply(peerId: String, id: String, ok: Boolean, error: String?) {
-        (post ?: send)(peerId, Envelope(MessageType.FILE_RESULT, file = FileMessage(id, ok = ok, error = error)))
+    private fun reply(peerId: String, id: String, ok: Boolean, error: String?, skipped: Boolean = false, reason: String? = null) {
+        val result = FileMessage(id, ok = ok, error = error, skipped = skipped.takeIf { it }, reason = reason)
+        (post ?: send)(peerId, Envelope(MessageType.FILE_RESULT, file = result))
     }
 
     private fun add(transfer: Transfer) {

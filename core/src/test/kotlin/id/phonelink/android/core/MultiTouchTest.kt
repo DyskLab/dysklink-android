@@ -32,6 +32,41 @@ class MultiTouchTest {
     }
 
     @Test
+    fun aNewFingerStartsAtItsDownPointEvenWhenItsMovesCameInTheSameStep() {
+        val touch = MultiTouch()
+        touch.down(0, 0.2f, 0.7f)
+        touch.step()
+        // The skill key is pressed and dragged to aim before the next step goes out.
+        touch.move(0, 0.25f, 0.7f)
+        touch.down(1, 0.8f, 0.6f)
+        touch.move(1, 0.82f, 0.55f)
+        touch.move(1, 0.84f, 0.5f)
+        val step = touch.step(2)
+        assertEquals(FingerStep(1, listOf(0.8f to 0.6f, 0.82f to 0.55f, 0.84f to 0.5f), first = true, last = false), step.fingers[1])
+        assertEquals(MultiTouch.MOVE_MS, step.duration)
+        // The next stroke continues from where the first one ended.
+        touch.move(1, 0.85f, 0.5f)
+        assertEquals(FingerStep(1, listOf(0.84f to 0.5f, 0.85f to 0.5f), first = false, last = false), touch.step(3).fingers[1])
+    }
+
+    @Test
+    fun aDownMovesAndLiftInOneStepIsAShortSwipeAndWithoutMovesATap() {
+        val touch = MultiTouch()
+        touch.down(4, 0.5f, 0.5f)
+        touch.move(4, 0.6f, 0.5f)
+        touch.up(4, 0.7f, 0.5f)
+        val swipe = touch.step()
+        assertEquals(listOf(FingerStep(4, listOf(0.5f to 0.5f, 0.6f to 0.5f, 0.7f to 0.5f), first = true, last = true)), swipe.fingers)
+        assertTrue(!touch.isActive)
+
+        touch.down(5, 0.3f, 0.3f)
+        touch.up(5)
+        val tap = touch.step(1)
+        assertEquals(listOf(FingerStep(5, listOf(0.3f to 0.3f), first = true, last = true)), tap.fingers)
+        assertEquals(MultiTouch.TAP_MS, tap.duration)
+    }
+
+    @Test
     fun onlyOneStepRunsAtATime() {
         val touch = MultiTouch()
         touch.down(0, 0.5f, 0.5f)

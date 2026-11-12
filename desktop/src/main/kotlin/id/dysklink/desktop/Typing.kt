@@ -53,6 +53,56 @@ sealed interface TypeStep {
     data class Text(val method: TypeMethod, val text: String) : TypeStep
 }
 
+/** How one typing step went. */
+sealed interface Typed {
+    data object Done : Typed
+    /** Nothing went in, so all of it can go another way. */
+    data object Nothing : Typed
+    /** The first [count] UTF-16 units went in, then it failed: only the rest goes another way. */
+    data class Partly(val count: Int) : Typed
+    /** It stopped part way and how much went in isn't known, such as xdotool killed after a timeout. None of it is typed again. */
+    data object Stopped : Typed
+}
+
+/**
+ * Types text step by step, and moves to the next way when one fails, without typing anything twice. A way that took
+ * nothing is dropped for good, except the clipboard, which can fail for a moment: it's skipped for the rest of
+ * that text only. Not thread-safe.
+ */
+class TypingRun(tools: TypingTools) {
+    var tools: TypingTools = tools
+        private set
+
+    /** Types [text]: [key] presses Enter or Tab, [typeWith] types a run of text. Returns false if anything failed. */
+    fun type(text: String, key: (String) -> Unit, typeWith: (TypeStep.Text) -> Typed): Boolean {
+        var local = tools
+        var ok = true
+        var steps = Typing.plan(text, local)
+        while (steps.isNotEmpty()) {
+            val step = steps.first()
+            steps = steps.drop(1)
+            if (step is TypeStep.Key) { key(step.name); continue }
+            step as TypeStep.Text
+            val rest = when (val result = typeWith(step)) {
+                Typed.Done -> continue
+                Typed.Stopped -> { ok = false; continue }
+                Typed.Nothing -> step.text
+                is Typed.Partly -> step.text.substring(result.count.coerceIn(0, step.text.length))
+            }
+            ok = false
+            local = local.without(step.method)
+            if (step.method != TypeMethod.PASTE) tools = tools.without(step.method)
+            steps = Typing.plan(rest + steps.joinToString("") {
+                when (it) {
+                    is TypeStep.Text -> it.text
+                    is TypeStep.Key -> if (it.name == "return") "\n" else "\t"
+                }
+            }, local)
+        }
+        return ok
+    }
+}
+
 object Typing {
     /** How one character (a code point, so an emoji is one) is typed, or null when it can't be. */
     fun methodFor(codePoint: Int, tools: TypingTools): TypeMethod? {

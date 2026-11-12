@@ -78,33 +78,90 @@ class CpaceTest {
 
     @Test
     fun fieldArithmeticSanity() {
-        val p = Cpace.P
-        assertEquals(BigInteger.ZERO, Cpace.inv0(BigInteger.ZERO))
+        val p = CpaceReference.P
+        val ref = CpaceReference
+        fun fe(x: BigInteger) = Field25519.unpack(ref.encodeU(x))
+        fun big(x: LongArray) = ref.decodeU(Field25519.pack(x))
+        assertEquals(BigInteger.ZERO, big(Field25519.invert(fe(BigInteger.ZERO))))
         val x = BigInteger("1234567890123456789012345678901234567890")
-        assertEquals(BigInteger.ONE, x.multiply(Cpace.inv0(x)).mod(p))
+        val product = LongArray(16).also { Field25519.mul(it, fe(x), Field25519.invert(fe(x))) }
+        assertEquals(BigInteger.ONE, big(product))
         // 2 is Elligator's non-square for this field; 4 is a square, and so is -1 (p = 5 mod 8).
-        assertFalse(Cpace.isSquare(BigInteger.valueOf(2)))
-        assertTrue(Cpace.isSquare(BigInteger.valueOf(4)))
-        assertTrue(Cpace.isSquare(p.subtract(BigInteger.ONE)))
-        assertTrue(Cpace.isSquare(BigInteger.ZERO))
-        // Every output of the map is on the curve: x^3 + A x^2 + x is a square.
+        assertEquals(0, Field25519.isSquare(fe(BigInteger.valueOf(2))))
+        assertEquals(1, Field25519.isSquare(fe(BigInteger.valueOf(4))))
+        assertEquals(1, Field25519.isSquare(fe(p.subtract(BigInteger.ONE))))
+        assertEquals(1, Field25519.isSquare(fe(BigInteger.ZERO)))
+        assertEquals(0, Field25519.isSquare(fe(p.subtract(ref.inv0(BigInteger.valueOf(2))))))
+        // Every output of the map is on the curve, and it agrees with the BigInteger reference.
         val a = BigInteger.valueOf(486662)
-        for (i in 0 until 50) {
-            val u = BigInteger(Cpace.randomBytes(32)).abs().mod(p)
-            val xu = Cpace.elligator2(u)
-            assertTrue(Cpace.isSquare(xu.pow(3).add(a.multiply(xu.pow(2))).add(xu).mod(p)))
+        for (i in 0 until 200) {
+            val bytes = Cpace.randomBytes(32)
+            val u = ref.decodeU(bytes)
+            val xu = ref.decodeU(Cpace.elligator2(bytes))
+            assertEquals(ref.elligator2(u), xu, "u=$u")
+            assertTrue(ref.isSquare(xu.pow(3).add(a.multiply(xu.pow(2))).add(xu).mod(p)))
+            val y = ref.decodeU(Cpace.randomBytes(32))
+            assertEquals(u.multiply(y).mod(p), big(LongArray(16).also { Field25519.mul(it, fe(u), fe(y)) }))
+            assertEquals(u.subtract(y).mod(p), big(LongArray(16).also { Field25519.sub(it, fe(u), fe(y)) }))
+            assertEquals(ref.inv0(u), big(Field25519.invert(fe(u))))
+            assertEquals(if (ref.isSquare(u)) 1 else 0, Field25519.isSquare(fe(u)))
         }
-        // u = 0 and u = p (the same field element) map to the same point on the curve. 1 + 2u^2 is never 0 here,
-        // since -1/2 isn't a square mod p.
-        val xz = Cpace.elligator2(BigInteger.ZERO)
-        assertEquals(xz, Cpace.elligator2(p))
-        assertTrue(Cpace.isSquare(xz.pow(3).add(a.multiply(xz.pow(2))).add(xz).mod(p)))
-        assertFalse(Cpace.isSquare(p.subtract(Cpace.inv0(BigInteger.valueOf(2)))))
-        // Round trip, with bit 255 ignored on decoding.
-        val bytes = Cpace.encodeU(x)
-        assertEquals(x, Cpace.decodeU(bytes))
-        bytes[31] = (bytes[31].toInt() or 0x80).toByte()
-        assertEquals(x, Cpace.decodeU(bytes))
+        // u = 0 and u = p (the same field element) map to the same point. 1 + 2u^2 is never 0 here.
+        val xz = Cpace.elligator2(ByteArray(32))
+        assertContentEquals(xz, Cpace.elligator2(pBytes(p)))
+        assertEquals(ref.elligator2(BigInteger.ZERO), ref.decodeU(xz))
+        // Non-canonical inputs (p..2^255-1) and bit 255 set reduce like the reference.
+        for (extra in listOf(0, 1, 18)) {
+            val nonCanonical = pBytes(p.add(BigInteger.valueOf(extra.toLong())))
+            assertEquals(ref.elligator2(BigInteger.valueOf(extra.toLong())), ref.decodeU(Cpace.elligator2(nonCanonical)))
+            nonCanonical[31] = (nonCanonical[31].toInt() or 0x80).toByte()
+            assertEquals(ref.elligator2(BigInteger.valueOf(extra.toLong())), ref.decodeU(Cpace.elligator2(nonCanonical)))
+        }
+    }
+
+    /** Little-endian bytes of a value below 2^255, unreduced. */
+    private fun pBytes(value: BigInteger): ByteArray {
+        val big = value.toByteArray()
+        return ByteArray(32) { if (it < big.size) big[big.size - 1 - it] else 0 }
+    }
+
+    @Test
+    fun ladderMatchesTheBigIntegerReference() {
+        repeat(100) {
+            val scalar = Cpace.randomBytes(32)
+            val point = Cpace.randomBytes(32)
+            assertContentEquals(CpaceReference.x25519(scalar, point), Cpace.x25519(scalar, point))
+        }
+        // RFC 7748 section 5.2, the first vector, and the 1 and 1000 iteration checks.
+        val k = hex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
+        val u = hex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c")
+        assertEquals("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552", Cpace.x25519(k, u).hex())
+        var kk = hex("0900000000000000000000000000000000000000000000000000000000000000")
+        var uu = kk.copyOf()
+        for (i in 1..1000) {
+            val next = Cpace.x25519(kk, uu)
+            uu = kk
+            kk = next
+            if (i == 1) assertEquals("422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079", kk.hex())
+        }
+        assertEquals("684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51", kk.hex())
+    }
+
+    @Test
+    fun showerTiming() {
+        val ci = Pake.channel("ab".repeat(32), "cd".repeat(32))
+        fun time(block: () -> Unit): Double {
+            repeat(20) { block() }
+            val start = System.nanoTime()
+            repeat(50) { block() }
+            return (System.nanoTime() - start) / 50 / 1e6
+        }
+        val new = time { Pake.Shower("123456", Cpace.randomBytes(16), ci) }
+        val old = time {
+            val g = CpaceReference.calculateGenerator("123456".toByteArray(), ci, Cpace.randomBytes(32))
+            CpaceReference.x25519(Cpace.sampleScalar(), g)
+        }
+        println("Shower creation: field %.3f ms, BigInteger %.3f ms".format(new, old))
     }
 
     /** The same fixed inputs as `Cpace.selfTest` in the Mac app (and a Python reference); both must print these. */

@@ -145,6 +145,8 @@ class MainActivity : ComponentActivity() {
                     val charge by ChargeReminder.settings.collectAsStateWithLifecycle()
                     val chargeSessions by ChargeReminder.sessions.collectAsStateWithLifecycle()
                     val phonesEnabled by connections.phonesEnabled.collectAsStateWithLifecycle()
+                    val phoneAccess by connections.phoneAccess.all.collectAsStateWithLifecycle()
+                    val mirror by connections.mirror.feeds.collectAsStateWithLifecycle()
                     val actions = remember(connections) { makeActions(connections) }
                     PhoneLinkApp(
                         state = UiState(
@@ -160,6 +162,8 @@ class MainActivity : ComponentActivity() {
                             prayerRequest = prayerRequest.value,
                             featureRequest = featureRequest.value,
                             phonesEnabled = phonesEnabled,
+                            phoneAccess = phoneAccess,
+                            mirror = mirror,
                         ),
                         actions = actions,
                     )
@@ -210,6 +214,61 @@ class MainActivity : ComponentActivity() {
                 pointer = connections::sendMacPointer,
                 input = connections::sendInput,
             ),
+            phoneShareLink = id.phonelink.android.ui.PhoneShareLink(
+                setSink = { connections.phoneViewSink = it },
+                viewScreen = { peer ->
+                    PhoneLinkService.setMacScreenViewing(true)
+                    connections.viewPhoneScreen(peer)
+                },
+                stopScreen = { peer ->
+                    PhoneLinkService.setMacScreenViewing(false)
+                    connections.stopPhoneScreen(peer)
+                },
+                syncScreen = connections::syncPhoneScreen,
+                control = connections::sendPhoneControl,
+                useCamera = { peer ->
+                    PhoneLinkService.setMacScreenViewing(true)
+                    connections.usePhoneCamera(peer)
+                },
+                stopCamera = { peer ->
+                    PhoneLinkService.setMacScreenViewing(false)
+                    connections.stopPhoneCamera(peer)
+                },
+                camera = connections::sendPhoneCamera,
+            ),
+            setPhoneAccess = { peer, access -> connections.setPhoneAccess(peer) { access } },
+            phoneRelayLink = id.phonelink.android.ui.PhoneRelayLink(
+                dismiss = connections::dismissMirrored,
+                reply = connections::replyMirrored,
+                read = connections::markMirroredRead,
+                stopHearing = { peer, kind -> connections.stopHearing(peer, kind) },
+            ),
+            phoneRemoteLink = id.phonelink.android.ui.PhoneRemoteLink(
+                replies = connections.remoteReplies,
+                monitor = connections.monitor.settings,
+                sendLink = connections::sendLink,
+                media = { peer, action -> connections.phoneMedia(peer, action) },
+                screenTime = { peer -> connections.requestScreenTime(peer) },
+                quiet = { peer, request -> connections.setPhoneQuiet(peer, request) },
+                locate = { peer -> connections.locatePhone(peer) },
+                setMonitor = { peer, settings -> connections.setMonitor(peer) { settings } },
+            ),
+            ringPhone = connections::ringMac,
+            phoneMoreLink = id.phonelink.android.ui.PhoneMoreLink(
+                smsViews = connections.smsRemote.views,
+                smsFollow = connections.smsRemote.follow,
+                smsLog = connections.smsLog.entries,
+                listSms = connections::listPhoneSms,
+                sendSms = connections::sendPhoneSms,
+                followSms = connections::followPhoneSms,
+                movePlan = connections.mover.job.plan,
+                moveProgress = { plan -> connections.mover.job.progress(plan) },
+                startMove = { peer, name, items -> lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { connections.mover.start(peer, name, items) } },
+                pauseMove = { lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { connections.mover.pause() } },
+                resumeMove = { connections.mover.resume() },
+                cancelMove = { lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { connections.mover.cancel() } },
+            ),
+            openAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
             sendClipboardText = { text ->
                 connections.shareClipboard(text, force = true) { ok ->
                     runOnUiThread { toast(if (ok) "Text sent to your devices' clipboard" else "Couldn't send the text. It may be too long.") }
@@ -298,6 +357,10 @@ class MainActivity : ComponentActivity() {
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
+            // A web, map, or phone link can also open on another phone, from a notification there.
+            val link = if (uris.isEmpty()) id.phonelink.android.core.SafeLink.find(text) else null
+            val phones = connections.peers.value.filter { it.isPaired && it.isConnected && it.canOpen }
+            if (text != null && link != null && phones.isNotEmpty()) return@launch chooseLinkTarget(connections, text, phones)
             val peerId = connections.peers.value.let { all -> all.firstOrNull { it.isMac && it.isPaired && it.isConnected } ?: all.firstOrNull { it.isPaired && it.isConnected } }?.id
             when {
                 peerId == null -> toast("No Mac connected")
@@ -308,6 +371,24 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Shared text with a link: send it to the clipboards, or open it on one of the phones. */
+    private fun chooseLinkTarget(connections: ConnectionManager, text: String, phones: List<id.phonelink.android.core.Peer>) {
+        val options = listOf("Send to the clipboard") + phones.map { "Open on ${it.name}" }
+        AlertDialog.Builder(this)
+            .setTitle("Send with DyskLink")
+            .setItems(options.toTypedArray()) { _, which ->
+                if (which == 0) {
+                    connections.shareClipboard(text, force = true)
+                    toast("Text sent to your devices' clipboard")
+                } else {
+                    val phone = phones[which - 1]
+                    toast(if (connections.sendLink(phone.id, text)) "Sent to ${phone.name}. It opens when tapped there." else "${phone.name} isn't connected")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /**
@@ -434,7 +515,11 @@ class MainActivity : ComponentActivity() {
         if (!IntentTokens.shared.consume(token, IntentTokens.CAMERA, peerId)) return toast(IntentTokens.EXPIRED_MESSAGE)
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
-            if (connections.peers.value.any { it.id == peerId && it.isPaired && it.isMac }) startCamera(peerId, false)
+            val peer = connections.peers.value.firstOrNull { it.id == peerId && it.isPaired } ?: return@launch
+            when {
+                peer.isMac -> startCamera(peerId, false)
+                peer.isPhone -> askPhoneFirst(connections, peer, camera = true) { startCamera(peerId, false) }
+            }
         }
     }
 
@@ -447,7 +532,48 @@ class MainActivity : ComponentActivity() {
         if (!IntentTokens.shared.consume(token, IntentTokens.SCREEN, peerId)) return toast(IntentTokens.EXPIRED_MESSAGE)
         lifecycleScope.launch {
             val connections = PhoneLinkService.connectionManager.filterNotNull().first()
-            if (connections.peers.value.any { it.id == peerId && it.isPaired }) askForScreen(peerId)
+            val peer = connections.peers.value.firstOrNull { it.id == peerId && it.isPaired } ?: return@launch
+            if (peer.isPhone) askPhoneFirst(connections, peer, camera = false) { askForScreen(peerId) } else askForScreen(peerId)
+        }
+    }
+
+    /**
+     * Another phone wants this screen or camera. Allowed before: go on (Android's own dialog still asks for the
+     * screen each time). Never asked: ask here first. Turned off: nothing happens.
+     */
+    private fun askPhoneFirst(connections: ConnectionManager, peer: id.phonelink.android.core.Peer, camera: Boolean, go: () -> Unit) {
+        val access = connections.phoneAccess.of(peer.id)
+        when (if (camera) access.camera else access.screen) {
+            true -> go()
+            false -> Unit
+            null -> {
+                val refused = id.phonelink.android.core.Envelope(
+                    if (camera) id.phonelink.android.core.MessageType.CAMERA_STOPPED else id.phonelink.android.core.MessageType.SCREEN_STOPPED,
+                    error = "${LocalDevice(this).name} didn't allow it.",
+                )
+                AlertDialog.Builder(this)
+                    .setTitle(if (camera) "Allow ${peer.name} to use the camera?" else "Allow ${peer.name} to view this screen?")
+                    .setMessage(
+                        if (camera) "${peer.name} will see what this camera sees, and can zoom, take photos, and record video. " +
+                            "They are saved on this phone and sent to ${peer.name}. You can turn this off on the page for ${peer.name}."
+                        else "${peer.name} will see everything on this screen while it's shared. Android asks every time before sharing starts. " +
+                            "Taps from ${peer.name} need a separate switch, which stays off. You can turn this off on the page for ${peer.name}.",
+                    )
+                    .setPositiveButton("Allow") { _, _ ->
+                        connections.setPhoneAccess(peer.id) { if (camera) it.copy(camera = true) else it.copy(screen = true) }
+                        // Saved on the IO thread; the per-phone check at start reads it, so wait for it first.
+                        lifecycleScope.launch {
+                            connections.phoneAccess.all.first { all -> all[peer.id]?.let { if (camera) it.camera else it.screen } == true }
+                            go()
+                        }
+                    }
+                    .setNegativeButton("Not now") { _, _ -> connections.post(peer.id, refused) }
+                    .setNeutralButton("Never") { _, _ ->
+                        connections.setPhoneAccess(peer.id) { if (camera) it.copy(camera = false) else it.copy(screen = false) }
+                        connections.post(peer.id, refused)
+                    }
+                    .show()
+            }
         }
     }
 
@@ -464,7 +590,8 @@ class MainActivity : ComponentActivity() {
         }
         screenPeer = peerId
         // The phone's sound goes with the screen, which needs the audio permission before Android's recording dialog.
-        if (id.phonelink.android.service.AudioShare.wantsSoundWithScreen(this) &&
+        val toPhone = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peerId }?.isPhone == true
+        if (!toPhone && id.phonelink.android.service.AudioShare.wantsSoundWithScreen(this) &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
             screenSoundPermission.launch(Manifest.permission.RECORD_AUDIO)
@@ -572,6 +699,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         PhoneLinkService.setUiVisible(false)
+        // Another phone's SMS need the screen lock again once DyskLink has left the screen.
+        if (!isChangingConfigurations) id.phonelink.android.service.SmsLock.session.lock()
         super.onStop()
     }
 

@@ -28,11 +28,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.resume
 
-/** Where photo sync stands for one Mac: which photo was sent last, and how many so far. */
+/** Where photo sync stands for one Mac or phone: which photo was sent last, and how many so far. */
 data class PhotoMark(val dateAdded: Long, val mediaId: Long)
 
 /**
- * Sends new photos to the Macs that have photo sync on, whenever they're connected. Only photos taken after sync was
+ * Sends new photos to the Macs and phones (photo backup, 1.6) that have photo sync on, whenever they're connected.
+ * Each keeps its own position, so a phone and a Mac never share one. Only photos taken after sync was
  * turned on are sent, oldest first, and the last one sent is remembered so nothing goes twice.
  */
 object PhotoSync {
@@ -69,6 +70,40 @@ object PhotoSync {
     fun setWifiOnly(context: Context, macId: String, on: Boolean) {
         prefs(context).edit().putBoolean("wifi_$macId", on).apply()
         if (!on) trigger?.invoke()
+    }
+
+    /** Who gets photos now: Macs, and phones that keep a backup (1.6), each by its own switches. Pure, for the tests. */
+    fun targets(
+        peers: List<id.phonelink.android.core.Peer>,
+        isOn: (String) -> Boolean,
+        wifiOnly: (String) -> Boolean,
+        chargingOnly: (String) -> Boolean,
+        onWifi: Boolean,
+        charging: Boolean,
+    ): List<id.phonelink.android.core.Peer> = peers
+        .filter { it.isPaired && it.isConnected && (it.isMac || it.canBackup) && isOn(it.id) }
+        .filter { !wifiOnly(it.id) || onWifi }
+        .filter { !chargingOnly(it.id) || charging }
+
+    /** Only sends while this phone charges (new in 1.6, for both Macs and phones). */
+    fun chargingOnly(context: Context, peerId: String) = prefs(context).getBoolean("charging_$peerId", false)
+
+    fun setChargingOnly(context: Context, peerId: String, on: Boolean) {
+        prefs(context).edit().putBoolean("charging_$peerId", on).apply()
+        if (!on) trigger?.invoke()
+    }
+
+    fun isCharging(context: Context): Boolean {
+        val battery = context.getSystemService(android.os.BatteryManager::class.java) ?: return false
+        return battery.isCharging
+    }
+
+    private val _stopped = MutableStateFlow<Map<String, String>>(emptyMap())
+    /** Why photo backup to a phone stopped or waits, such as "turned off on B", until the next photo goes. */
+    val stopped: StateFlow<Map<String, String>> = _stopped.asStateFlow()
+
+    fun setStopped(peerId: String, why: String?) {
+        _stopped.value = if (why == null) _stopped.value - peerId else _stopped.value + (peerId to why)
     }
 
     fun onFreeWifi(context: Context): Boolean {
@@ -198,16 +233,34 @@ class PhotoSyncer(private val context: Context, private val connections: Connect
         runCatching { context.contentResolver.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, observer) }
         runCatching { context.contentResolver.registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, observer) }
         PhotoSync.trigger = { schedule(0) }
-        // A Mac coming back gets what was taken while it was away.
+        startPower()
+        // A Mac or phone coming back gets what was taken while it was away.
         scope.launch {
             connections.peers
-                .map { peers -> peers.filter { it.isMac && it.isPaired && it.isConnected }.map { it.id }.toSet() }
+                .map { peers -> peers.filter(::isTarget).filter { it.isConnected }.map { it.id }.toSet() }
                 .distinctUntilChanged()
                 .collect { schedule(CONNECT_SETTLE_MS) }
         }
     }
 
+    /** Plugging in starts a run for targets that wait for charging. */
+    private val power = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: android.content.Intent) = schedule(CONNECT_SETTLE_MS)
+    }
+
+    fun startPower() {
+        runCatching {
+            androidx.core.content.ContextCompat.registerReceiver(
+                context, power, android.content.IntentFilter(android.content.Intent.ACTION_POWER_CONNECTED),
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }
+    }
+
+    private fun isTarget(peer: id.phonelink.android.core.Peer) = peer.isPaired && (peer.isMac || peer.canBackup)
+
     fun stop() {
+        runCatching { context.unregisterReceiver(power) }
         runCatching { context.contentResolver.unregisterContentObserver(observer) }
         PhotoSync.trigger = null
     }
@@ -255,15 +308,48 @@ class PhotoSyncer(private val context: Context, private val connections: Connect
     /** Returns true when there are more photos to send right away. */
     private suspend fun runOnce(): Boolean = lock.withLock {
         if (!PhotoSync.canRead(context)) return@withLock false
-        val macs = connections.peers.value.filter { it.isMac && it.isPaired && it.isConnected && PhotoSync.isOn(context, it.id) }
-            .filter { !PhotoSync.wifiOnly(context, it.id) || PhotoSync.onFreeWifi(context) }
+        val targets = PhotoSync.targets(
+            connections.peers.value,
+            isOn = { PhotoSync.isOn(context, it) },
+            wifiOnly = { PhotoSync.wifiOnly(context, it) },
+            chargingOnly = { PhotoSync.chargingOnly(context, it) },
+            onWifi = PhotoSync.onFreeWifi(context),
+            charging = PhotoSync.isCharging(context),
+        )
         var more = false
-        for (mac in macs) {
-            val newMore = sendNew(mac.id)
+        for (target in targets) {
+            phones = if (target.isPhone) phones + target.id else phones - target.id
+            val newMore = sendNew(target.id)
             // New photos first, then the catch-up a batch at a time.
-            more = newMore || (!newMore && sendEarlier(mac.id)) || more
+            more = newMore || (!newMore && PhotoSync.isOn(context, target.id) && sendEarlier(target.id)) || more
         }
         more
+    }
+
+    /** Targets that are phones: they get each photo's SHA-256 in the offer, so a copy they have is skipped. */
+    @Volatile private var phones = emptySet<String>()
+
+    private fun sha256(uri: Uri): String? = runCatching {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        } ?: return null
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }.getOrNull()
+
+    /** A phone refused: full (backup stops, with a notification), or not allowed (waits, with why on its page). */
+    private fun refused(peerId: String, outcome: id.phonelink.android.core.FileTransfers.Outcome) {
+        val why = outcome.error ?: "Refused"
+        PhotoSync.setStopped(peerId, why)
+        if (outcome.reason == id.phonelink.android.core.PhoneKinds.LOW_SPACE) {
+            PhotoSync.setOn(context, peerId, false)
+            PhoneNotices.backupStopped(context, peerId, why)
+        }
     }
 
     private suspend fun sendNew(macId: String): Boolean =
@@ -312,13 +398,21 @@ class PhotoSyncer(private val context: Context, private val connections: Connect
                 saved(PhotoMark(photo.dateAdded, photo.id))
                 continue
             }
+            val toPhone = macId in phones
+            val sha = if (toPhone) sha256(uri) else null
+            var transfer = ""
             val ok = suspendCancellableCoroutine { done ->
-                connections.fileTransfers.sendFile(macId, photo.name, size, PhotoSync.KIND, onFinished = { done.resume(it) }) {
+                transfer = connections.fileTransfers.sendFile(macId, photo.name, size, PhotoSync.KIND, onFinished = { done.resume(it) }, sha256 = sha) {
                     context.contentResolver.openInputStream(uri) ?: error("The photo is gone")
                 }
             }
+            val outcome = connections.fileTransfers.outcome(transfer)
             // Stop at the first failure and try again next time, so the order stays and nothing is skipped.
-            if (!ok) return false
+            if (!ok) {
+                if (toPhone && outcome?.reason != null) refused(macId, outcome)
+                return false
+            }
+            if (toPhone) PhotoSync.setStopped(macId, null)
             saved(PhotoMark(photo.dateAdded, photo.id))
         }
         lastRunComplete = true

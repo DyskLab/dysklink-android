@@ -22,4 +22,24 @@ object CameraMath {
         return pool.minByOrNull { (w, _) -> abs(w - targetWidth) * 2 + if (w > targetWidth) 1 else 0 }
             ?: sizes.minByOrNull { (w, h) -> w * h }
     }
+
+    /** A zoom asked for by another phone, kept between 1 and what the camera can do. Not a number gives 1. */
+    fun clampZoom(zoom: Float?, maxZoom: Float): Float {
+        if (zoom == null || !zoom.isFinite()) return 1f
+        return zoom.coerceIn(1f, maxOf(1f, maxZoom))
+    }
+
+    /**
+     * The centered part of the sensor to read for [zoom], for cameras without a zoom ratio (before Android 11):
+     * left, top, width, height inside the active array of [activeWidth] by [activeHeight].
+     */
+    fun cropRegion(activeWidth: Int, activeHeight: Int, zoom: Float): IntArray {
+        val z = if (zoom.isFinite()) zoom.coerceAtLeast(1f) else 1f
+        val width = (activeWidth / z).toInt().coerceIn(1, activeWidth)
+        val height = (activeHeight / z).toInt().coerceIn(1, activeHeight)
+        return intArrayOf((activeWidth - width) / 2, (activeHeight - height) / 2, width, height)
+    }
+
+    /** The biggest size by area, for full-size photos. */
+    fun largest(sizes: List<Pair<Int, Int>>): Pair<Int, Int>? = sizes.maxByOrNull { (w, h) -> w.toLong() * h }
 }

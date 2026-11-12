@@ -66,6 +66,10 @@ class PhoneDataImpl(context: Context) : PhoneData {
 
     override fun dismissNotification(key: String) = DyskNotificationListener.dismiss(key)
 
+    override fun replyNotification(key: String, text: String): String? = DyskNotificationListener.reply(context, key, text)
+
+    override fun markNotificationRead(key: String): Boolean = DyskNotificationListener.markRead(context, key)
+
     override fun readSms(limit: Int, afterId: Long): List<SmsItem> {
         val projection = arrayOf(
             Telephony.Sms._ID, Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS,
@@ -163,7 +167,7 @@ class PhoneDataImpl(context: Context) : PhoneData {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val notification = Notification.Builder(context, PhoneLinkService.SCREEN_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo_glyph)
-            .setContentTitle("Mac is requesting the phone screen")
+            .setContentTitle(screenRequestTitle(peerId))
             .setContentText("Tap to choose. Nothing is shared until you agree.")
             .setContentIntent(
                 PendingIntent.getActivity(
@@ -174,6 +178,12 @@ class PhoneDataImpl(context: Context) : PhoneData {
             .build()
         context.getSystemService(NotificationManager::class.java)
             .notify(PhoneLinkService.SCREEN_REQUEST_NOTIFICATION_ID, notification)
+    }
+
+    /** A phone asking is named; a Mac keeps the title it always had. */
+    private fun screenRequestTitle(peerId: String): String {
+        val peer = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peerId }
+        return if (peer?.isPhone == true) "${peer.name} wants to view this screen" else "Mac is requesting the phone screen"
     }
 
     override fun syncScreen(peerId: String) = ScreenCaptureService.requestSync(peerId)
@@ -245,6 +255,40 @@ class DyskNotificationListener : NotificationListenerService() {
             runCatching { current?.cancelNotification(key) }
         }
 
+        private fun find(key: String): StatusBarNotification? =
+            runCatching { current?.activeNotifications?.firstOrNull { it.key == key } }.getOrNull()
+
+        /** The app's own reply action, the one a person would type into. */
+        private fun replyAction(notification: Notification): Notification.Action? {
+            val typed = notification.actions.orEmpty().filter { action -> action.remoteInputs?.any { it.allowFreeFormInput } == true }
+            return typed.firstOrNull { Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && it.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY }
+                ?: typed.firstOrNull()
+        }
+
+        private fun readAction(notification: Notification): Notification.Action? = notification.actions.orEmpty().firstOrNull { action ->
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && action.semanticAction == Notification.Action.SEMANTIC_ACTION_MARK_AS_READ) ||
+                action.title?.toString()?.trim()?.equals("Mark as read", ignoreCase = true) == true
+        }
+
+        /** Answers through the notification's reply action, as if typed in the notification. */
+        fun reply(context: Context, key: String, text: String): String? {
+            val sbn = find(key) ?: return "That notification is gone"
+            val action = replyAction(sbn.notification) ?: return "This notification can't be answered"
+            return runCatching {
+                val inputs = action.remoteInputs
+                val results = android.os.Bundle().apply { inputs.forEach { putCharSequence(it.resultKey, text) } }
+                val intent = Intent()
+                android.app.RemoteInput.addResultsToIntent(inputs, intent, results)
+                action.actionIntent.send(context, 0, intent)
+                null
+            }.getOrElse { it.message ?: "Couldn't reply" }
+        }
+
+        fun markRead(context: Context, key: String): Boolean {
+            val action = find(key)?.notification?.let(::readAction) ?: return false
+            return runCatching { action.actionIntent.send(context, 0, Intent()) }.isSuccess
+        }
+
         private fun toItem(context: Context, sbn: StatusBarNotification): NotificationItem? {
             val notification = sbn.notification
             val isSummary = notification.flags and Notification.FLAG_GROUP_SUMMARY != 0
@@ -271,6 +315,8 @@ class DyskNotificationListener : NotificationListenerService() {
                 avatar = NotificationImages.avatar(context, notification),
                 picture = NotificationImages.picture(context, notification),
                 color = notification.color.takeIf { it != Notification.COLOR_DEFAULT && it != 0 }?.and(0xFFFFFF),
+                reply = (replyAction(notification) != null).takeIf { it },
+                markRead = (readAction(notification) != null).takeIf { it },
             )
         }
 

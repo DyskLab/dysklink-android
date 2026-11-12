@@ -85,11 +85,100 @@ internal class Outgoing {
         if (connection != null) closes += connection
     }
 
-    val isEmpty: Boolean get() = sends.isEmpty() && closes.isEmpty()
+    private val afterwards = ArrayList<() -> Unit>()
+
+    /** Work for after the lock is released, such as CPace math, run by [flush] once the sends are queued. */
+    fun afterwards(block: () -> Unit) {
+        afterwards += block
+    }
+
+    val isEmpty: Boolean get() = sends.isEmpty() && closes.isEmpty() && afterwards.isEmpty()
 
     fun flush() {
         // Queued, not waited on: a peer that stopped reading must not hold up whoever held the lock.
         sends.forEach { (connection, envelope) -> connection.post(envelope) }
         closes.forEach { it.close() }
+        afterwards.forEach { it() }
+    }
+}
+
+/**
+ * The showing side's CPace state for one code on screen: a single [Pake.Shower]. A `pair.request` with a new nonce
+ * only gets a new one after a counted wrong code from that peer, or once every [RENEW_MS]; other requests are
+ * ignored, so a peer can't make this side do the math (or hold its lock) for every request it sends. Building
+ * happens outside the lock: [start] and [renew] reserve, [install] puts the result in place. Not thread-safe;
+ * callers hold their lock.
+ */
+internal class ShowerSlot(private val clock: () -> Long = System::currentTimeMillis) {
+    class Plan internal constructor(internal val generation: Long, val code: String, val nonceT: ByteArray, val ci: ByteArray) {
+        fun build(): Pake.Shower = Pake.Shower(code, nonceT, ci)
+    }
+
+    sealed interface Renewal {
+        /** The same request again: resend this. */
+        class Resend(val message: PakeMessage) : Renewal
+        /** Build this outside the lock, then [install] it and send its message. */
+        class Build(val plan: Plan) : Renewal
+        /** Too soon, or that nonce is already being answered. */
+        data object Ignore : Renewal
+    }
+
+    var shower: Pake.Shower? = null
+        private set
+    private var nonceT: ByteArray? = null
+    private var reservedAt = 0L
+    private var renewable = false
+    private var generation = 0L
+
+    /** The first Shower for a new code. Drops whatever was there. */
+    fun start(code: String, nonce: ByteArray, ci: ByteArray): Plan {
+        clear()
+        return reserve(code, nonce, ci)
+    }
+
+    /** A `pair.request` with [nonce] while [code] shows. */
+    fun renew(code: String, nonce: ByteArray, ci: ByteArray): Renewal {
+        val current = nonceT
+        if (current != null && java.security.MessageDigest.isEqual(current, nonce)) {
+            return shower?.takeIf { it.sameRequest(nonce) }?.let { Renewal.Resend(it.message) } ?: Renewal.Ignore
+        }
+        if (!renewable && clock() - reservedAt < RENEW_MS) return Renewal.Ignore
+        return Renewal.Build(reserve(code, nonce, ci))
+    }
+
+    /** Puts a Shower built from [plan] in place. False (and [built] is closed) when the prompt moved on meanwhile. */
+    fun install(plan: Plan, built: Pake.Shower): Boolean {
+        if (plan.generation != generation) {
+            built.close()
+            return false
+        }
+        shower?.close()
+        shower = built
+        return true
+    }
+
+    /** A wrong code was counted: the next new nonce may have a fresh Shower. */
+    fun wrongCode() {
+        renewable = true
+    }
+
+    fun clear() {
+        shower?.close()
+        shower = null
+        nonceT = null
+        renewable = false
+        generation++
+    }
+
+    private fun reserve(code: String, nonce: ByteArray, ci: ByteArray): Plan {
+        generation++
+        nonceT = nonce.copyOf()
+        reservedAt = clock()
+        renewable = false
+        return Plan(generation, code, nonce.copyOf(), ci)
+    }
+
+    companion object {
+        const val RENEW_MS = 2_000L
     }
 }

@@ -48,6 +48,8 @@ class PhoneLinkService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     @Volatile private var discovery: NsdDiscovery? = null
     @Volatile private var watchers: PhoneWatchers? = null
+    /** What the SMS and call watchers should follow now. */
+    @Volatile private var watchCalls: (() -> Set<id.phonelink.android.core.PhoneFeature>)? = null
 
     /** Whether NSD should be looking now; set from the main thread. */
     @Volatile private var discoveryWanted = true
@@ -61,7 +63,11 @@ class PhoneLinkService : Service() {
                     screenOn.value = true
                     rescan.trySend(Unit)
                 }
-                Intent.ACTION_SCREEN_OFF -> screenOn.value = false
+                Intent.ACTION_SCREEN_OFF -> {
+                    screenOn.value = false
+                    // Reading another phone's SMS needs the screen lock again after the screen was off.
+                    SmsLock.session.lock()
+                }
             }
         }
     }
@@ -128,7 +134,30 @@ class PhoneLinkService : Service() {
 
             val phoneWatchers = PhoneWatchers(this@PhoneLinkService, connections.phone)
             watchers = phoneWatchers
-            launch(Dispatchers.Main) { connections.phone.active.collect(phoneWatchers::sync) }
+            // Calls are watched for a Mac's Calls feature, or for a phone whose "Send calls" is on here.
+            val phoneData = PhoneDataImpl(this@PhoneLinkService)
+            // SMS are watched for a Mac's SMS feature, or while a phone allowed here watches this phone's SMS.
+            fun watched(active: Set<id.phonelink.android.core.PhoneFeature>, all: Map<String, id.phonelink.android.core.PeerAccess>, smsPhones: Set<String>): Set<id.phonelink.android.core.PhoneFeature> {
+                var features = active
+                if (all.values.any { it.calls } && phoneData.isGranted(id.phonelink.android.core.PhoneFeature.Calls)) features = features + id.phonelink.android.core.PhoneFeature.Calls
+                if (smsPhones.isNotEmpty() && phoneData.isGranted(id.phonelink.android.core.PhoneFeature.Sms)) features = features + id.phonelink.android.core.PhoneFeature.Sms
+                return features
+            }
+            watchCalls = { watched(connections.phone.active.value, connections.phoneAccess.all.value, connections.smsShare.watchers.value) }
+            launch(Dispatchers.Main) {
+                combine(connections.phone.active, connections.phoneAccess.all, connections.smsShare.watchers, ::watched).collect(phoneWatchers::sync)
+            }
+            // SMS through this phone, photo backup, and moves (1.6).
+            connections.smsShare.onSent = { peer, name, number -> PhoneNotices.smsSent(this@PhoneLinkService, peer, name, number) }
+            launch(Dispatchers.Main) {
+                connections.smsRemote.incoming.collect { (peer, messages) -> PhoneNotices.smsReceived(this@PhoneLinkService, peer, messages) }
+            }
+            connections.lowSpaceSink = { peer, kind -> PhoneNotices.lowSpace(this@PhoneLinkService, peer, kind) }
+            connections.phoneMoveSink = { peer, summary ->
+                PhoneNotices.moveFinished(this@PhoneLinkService, peer, summary, connections.fileTransfers.transfers.value)
+            }
+            connections.mover.source = MoveSourceImpl(this@PhoneLinkService)
+            connections.mover.kick()
 
             discovery = NsdDiscovery(
                 this@PhoneLinkService,
@@ -162,7 +191,17 @@ class PhoneLinkService : Service() {
                 connections.peers
                     .map { peers -> peers.filter { it.isConnected }.map { it.id }.toSet() }
                     .distinctUntilChanged()
-                    .collect { connected -> AudioShare.keepOnly(this@PhoneLinkService, connected) }
+                    .collect { connected ->
+                        AudioShare.keepOnly(this@PhoneLinkService, connected)
+                        PeerAudio.keepOnly(this@PhoneLinkService, connected)
+                    }
+            }
+            // Other phones' notifications and calls, shown here while they're connected.
+            launch(Dispatchers.Main) { connections.mirror.feeds.collect { MirrorNotifications.sync(this@PhoneLinkService, it) } }
+            launch(Dispatchers.Main) {
+                connections.mirror.results.collect { (_, result) ->
+                    result.error?.let { android.widget.Toast.makeText(this@PhoneLinkService, "Reply not sent: $it", android.widget.Toast.LENGTH_LONG).show() }
+                }
             }
 
             // Other phones: listen, and say so on the network while phone connections are on.
@@ -191,7 +230,24 @@ class PhoneLinkService : Service() {
             launch(Dispatchers.Main) { connections.notch.collect { Widgets.renderAll(this@PhoneLinkService) } }
             connections.startUsb()
             connections.cameraSink = { peer, envelope -> CameraStreamService.handle(this@PhoneLinkService, peer, envelope) }
+            // Taps from another phone only work while this screen is shared with that phone.
+            launch { ScreenCaptureService.activePeer.collect { connections.screenSharedWith = it } }
+            // A phone viewing this screen learns at once when its taps start or stop going through.
+            launch(Dispatchers.Main) { connections.phoneAccess.all.collect { ScreenCaptureService.refreshControl() } }
             connections.audioSink = { peer, envelope -> AudioShare.handle(this@PhoneLinkService, peer, envelope) }
+            connections.phoneAudioSink = { peer, envelope -> PeerAudio.handle(this@PhoneLinkService, peer, envelope) }
+            connections.phoneAskSink = { peer, kind -> PeerAudio.ask(this@PhoneLinkService, peer, kind) }
+            // Links, music, screen time, quiet, and location for other phones: each by its own switch here.
+            connections.phoneRemote = PhoneRemoteImpl(this@PhoneLinkService)
+            connections.phoneRequestAskSink = { peer, kind -> RemoteAsks.ask(this@PhoneLinkService, peer, kind) }
+            launch(Dispatchers.Main) {
+                connections.batteryAlerts.collect { (peer, alert) -> RemoteAsks.battery(this@PhoneLinkService, peer, alert) }
+            }
+            // The location type while some phone may ask for the location, so the answer works with the app closed.
+            launch(Dispatchers.Main) {
+                combine(connections.phoneAccess.all, uiVisible) { all, visible -> all.values.any { it.locate == true } to visible }
+                    .collect { (wanted, visible) -> syncLocationType(wanted, visible) }
+            }
             photoSyncer = PhotoSyncer(this@PhoneLinkService, connections, scope).also { syncer -> launch(Dispatchers.Main) { syncer.start() } }
             launch { showPairingAlerts(connections) }
             launch {
@@ -215,8 +271,31 @@ class PhoneLinkService : Service() {
                 connections.broadcastInfo()
                 // Permissions can be revoked from Settings while the app runs.
                 connections.phone.refresh()
+                // The phone permission for "Send calls" may have been granted since.
+                watchCalls?.let { features -> launch(Dispatchers.Main) { watchers?.sync(features()) } }
+                // The location permission may have been granted or taken back since.
+                launch(Dispatchers.Main) { syncLocationType(connections.phoneAccess.all.value.values.any { it.locate == true }, uiVisible.value) }
             }
         }
+    }
+
+    /** Whether the foreground service has the location type now. */
+    private var withLocation = false
+
+    /**
+     * Adds the location type to this service while a phone is allowed to ask for the location and the permission is
+     * given. Android only lets it be added while DyskLink is on screen (no background location is asked for), so it
+     * is added the next time the app opens; it's dropped as soon as no phone may ask.
+     */
+    private fun syncLocationType(wanted: Boolean, visible: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val want = wanted && RemoteAsks.hasLocation(this)
+        if (want == withLocation || (want && !visible)) return
+        val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or if (want) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0
+        val count = manager.value?.peers?.value?.count { it.isPaired && it.isConnected } ?: 0
+        runCatching { ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(count), types) }
+            .onSuccess { withLocation = want }
+            .onFailure { android.util.Log.w("PhoneLink", "Can't change the service type", it) }
     }
 
     private suspend fun showStatus(connections: ConnectionManager) {
@@ -397,6 +476,9 @@ class PhoneLinkService : Service() {
         val connectionManager: StateFlow<ConnectionManager?> = manager.asStateFlow()
 
         private val uiVisible = MutableStateFlow(false)
+
+        /** DyskLink is on screen now. */
+        val isUiVisible: Boolean get() = uiVisible.value
 
         fun setUiVisible(visible: Boolean) {
             uiVisible.value = visible

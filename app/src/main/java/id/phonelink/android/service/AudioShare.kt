@@ -114,9 +114,15 @@ object AudioShare {
                 envelope.error?.let { _problem.value = it }
                 endPlayer()
             }
-            // The Mac asked to stop hearing this phone: the screen goes on without sound.
+            // The Mac asked to stop hearing this phone: the screen goes on without sound. Another phone also says why
+            // when it refused or stopped the sound.
             MessageType.AUDIO_STOP -> if (_sending.value == peerId) {
+                envelope.error?.let { _problem.value = it }
                 pump?.stop()
+                PhoneSoundService.stop(context)
+            } else if (envelope.error != null && PhoneSoundService.pendingPeer == peerId) {
+                // Refused before the first chunk went: the service may still be starting.
+                _problem.value = envelope.error
                 PhoneSoundService.stop(context)
             }
         }
@@ -148,21 +154,38 @@ object AudioShare {
     internal fun setProblem(text: String?) { _problem.value = text }
 }
 
-/** Plays a Mac's sound. A writer thread keeps a short queue; when the network bunches chunks up, old ones are dropped. */
-private class MacSoundPlayer(rate: Int, private val channels: Int, private val maxQueued: Int) {
+/**
+ * Plays a Mac's or another phone's sound. A writer thread keeps a short queue; when the network bunches chunks up, old
+ * ones are dropped. [chunkBytes]: 40 ms at this rate and channel count.
+ */
+internal class MacSoundPlayer(
+    rate: Int,
+    private val channels: Int,
+    private val maxQueued: Int,
+    chunkBytes: Int = AudioShare.CHUNK_BYTES,
+    usage: Int = AudioAttributes.USAGE_MEDIA,
+) {
     private val queue = LinkedBlockingQueue<ByteArray>()
     @Volatile private var running = true
     private val track = AudioTrack.Builder()
-        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+        .setAudioAttributes(
+            AudioAttributes.Builder().setUsage(usage)
+                .setContentType(if (usage == AudioAttributes.USAGE_MEDIA) AudioAttributes.CONTENT_TYPE_MUSIC else AudioAttributes.CONTENT_TYPE_SPEECH).build(),
+        )
         .setAudioFormat(
             AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setChannelMask(if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO).build(),
         )
-        .setBufferSizeInBytes(maxOf(AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT), AudioShare.CHUNK_BYTES * 4))
+        .setBufferSizeInBytes(
+            maxOf(
+                AudioTrack.getMinBufferSize(rate, if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT),
+                chunkBytes * 4,
+            ),
+        )
         .setTransferMode(AudioTrack.MODE_STREAM)
         .build()
     /** Silence written before the first chunk after a gap, as at the start, so the track has a little in hand. */
-    private val prime = ByteArray(AudioShare.CHUNK_BYTES * if (maxQueued <= 4) 1 else 2)
+    private val prime = ByteArray(chunkBytes * if (maxQueued <= 4) 1 else 2)
     private val writer = Thread({
         var lastWrite = 0L
         while (running) {
@@ -323,7 +346,12 @@ class PhoneSoundService : Service() {
             return START_NOT_STICKY
         }
         started = true
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        pendingPeer = peer
+        val target = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peer }
+        ServiceCompat.startForeground(
+            this, NOTIFICATION_ID, notification(target?.takeIf { it.isPhone }?.name),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+        )
         val capture = runCatching { getSystemService(MediaProjectionManager::class.java).getMediaProjection(code, data) }.getOrNull()
         if (capture == null) {
             AudioShare.setProblem("Recording permission is unavailable")
@@ -347,15 +375,16 @@ class PhoneSoundService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun notification(): Notification {
+    /** [phone]: the other phone's name, when the sound goes to a phone instead of a computer. */
+    private fun notification(phone: String? = null): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "Sound to Mac", NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, PhoneSoundService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_lock_silent_mode_off)
-            .setContentTitle("Playing this phone's sound on the Mac")
-            .setContentText("Music and videos on this phone are heard on the Mac.")
+            .setContentTitle(if (phone != null) "Playing this phone's sound on $phone" else "Playing this phone's sound on the Mac")
+            .setContentText(if (phone != null) "Music and videos on this phone are heard on $phone." else "Music and videos on this phone are heard on the Mac.")
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .setOngoing(true)
@@ -371,6 +400,7 @@ class PhoneSoundService : Service() {
             runCatching { capture.stop() }
         }
         projection = null
+        pendingPeer = null
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -382,6 +412,10 @@ class PhoneSoundService : Service() {
         private const val EXTRA_PEER = "peer"
         private const val CHANNEL = "sound"
         private const val NOTIFICATION_ID = NotificationIds.PHONE_SOUND
+
+        /** Where the sound goes while the service runs, also before its first chunk. */
+        @Volatile var pendingPeer: String? = null
+            private set
 
         fun start(context: Context, code: Int, data: Intent, peerId: String) {
             ContextCompat.startForegroundService(

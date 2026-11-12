@@ -84,13 +84,21 @@ class ScreenCaptureService : Service() {
             )
             return START_NOT_STICKY
         }
+        // A phone only gets the screen once it's allowed here, whatever started this.
+        val manager = PhoneLinkService.connectionManager.value
+        val phone = manager?.peers?.value?.firstOrNull { it.id == peer }?.isPhone == true
+        if (phone && peer != null && manager?.phoneAccess?.of(peer)?.screen != true) {
+            manager?.post(peer, Envelope(MessageType.SCREEN_STOPPED, error = "Viewing this screen is turned off on the phone."))
+            if (projection == null && busyWith == null) stopSelf()
+            return START_NOT_STICKY
+        }
         if (code != Activity.RESULT_OK || data == null || peer == null || projection != null || busyWith != null) {
             if (projection == null && busyWith == null) stopSelf()
             return START_NOT_STICKY
         }
         // Android requires this service to be in the foreground before the recording permission is used.
         ServiceCompat.startForeground(
-            this, NOTIFICATION_ID, buildNotification(),
+            this, NOTIFICATION_ID, buildNotification(peer),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0,
         )
         peerId = peer
@@ -112,7 +120,9 @@ class ScreenCaptureService : Service() {
             current = this
             active.value = peer
             sendStarted()
-            if (AudioShare.soundWithScreen(this)) {
+            // Sound only goes to computers: a phone viewing has no player for it.
+            val toPhone = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peer }?.isPhone == true
+            if (AudioShare.soundWithScreen(this) && !toPhone) {
                 val pump = PlaybackPump(peer)
                 val problem = pump.start(capture)
                 if (problem == null) sound = pump else Log.w(TAG, "Screen goes without sound: $problem")
@@ -129,8 +139,14 @@ class ScreenCaptureService : Service() {
         return PhoneLinkService.connectionManager.value?.sendDirect(peer, envelope) ?: false
     }
 
+    /** A phone viewing also learns whether its taps go through here. */
+    private fun started(): Envelope {
+        val canControl = peerId?.let { PhoneLinkService.connectionManager.value?.phoneControlAllowed(it) }
+        return Envelope(MessageType.SCREEN_STARTED, screen = size, canControl = canControl)
+    }
+
     private fun sendStarted() {
-        send(Envelope(MessageType.SCREEN_STARTED, screen = size))
+        send(started())
     }
 
     private fun startEncoder() {
@@ -146,7 +162,7 @@ class ScreenCaptureService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        val stream = ScreenStreamer(scope, ::send, ::requestKeyFrame, resync = { send(Envelope(MessageType.SCREEN_STARTED, screen = size)) }) {
+        val stream = ScreenStreamer(scope, ::send, ::requestKeyFrame, resync = { send(started()) }) {
             handler.post { stopSelf() }
         }
         codec.setCallback(EncoderOutput(stream), handler)
@@ -235,15 +251,19 @@ class ScreenCaptureService : Service() {
         surface = null
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(peer: String): Notification {
         val stop = PendingIntent.getService(
             this, 0, Intent(this, ScreenCaptureService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE,
         )
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val viewer = PhoneLinkService.connectionManager.value?.peers?.value?.firstOrNull { it.id == peer }?.takeIf { it.isPhone }
         return Notification.Builder(this, PhoneLinkService.SHARING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo_glyph)
-            .setContentTitle("Screen shared with Mac")
-            .setContentText("Everything on your screen is visible on the Mac.")
+            .setContentTitle(if (viewer != null) "Being viewed by ${viewer.name}" else "Screen shared with Mac")
+            .setContentText(
+                if (viewer != null) "${viewer.name} sees everything on this screen. Tap Stop to end it."
+                else "Everything on your screen is visible on the Mac.",
+            )
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .setOngoing(true)
@@ -311,6 +331,12 @@ class ScreenCaptureService : Service() {
         /** A Mac can only stop its own session. */
         fun stop(context: Context, peerId: String) {
             if (active.value == peerId) stop(context)
+        }
+
+        /** Tells a phone viewing this screen again whether its taps go through, after a switch changed. */
+        fun refreshControl() {
+            val service = current ?: return
+            service.handler.post { if (service.encoder != null) service.sendStarted() }
         }
 
         fun requestSync(peerId: String) {

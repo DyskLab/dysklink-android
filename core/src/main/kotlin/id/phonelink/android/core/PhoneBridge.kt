@@ -34,8 +34,16 @@ interface PhoneData {
     fun isGranted(feature: PhoneFeature): Boolean
     fun activeNotifications(): List<NotificationItem>
     fun dismissNotification(key: String)
+    /** Answers a notification through its reply action. Returns why it failed, or null when it was sent. */
+    fun replyNotification(key: String, text: String): String? = "This notification can't be answered"
+    /** Presses a notification's "mark as read" action. False when it has none. */
+    fun markNotificationRead(key: String): Boolean = false
     /** Newest messages first, only those with an ID above [afterId]. */
     fun readSms(limit: Int, afterId: Long = 0): List<SmsItem>
+    /** One thread's messages, newest first. */
+    fun readSmsThread(threadId: Long, limit: Int): List<SmsItem> = readSms(SMS_SCAN).filter { it.threadId == threadId }.take(limit)
+    /** Free space where received files go, in bytes. */
+    fun freeBytes(): Long = runCatching { storageRoot.usableSpace }.getOrDefault(Long.MAX_VALUE)
     /** [done] receives a failure message, or null if the carrier accepted the SMS. */
     fun sendSms(address: String, body: String, done: (String?) -> Unit)
     fun readContacts(): List<ContactItem>
@@ -49,6 +57,11 @@ interface PhoneData {
     /** Photos and videos, newest first, with thumbnails. */
     fun gallery(offset: Int, limit: Int): List<GalleryItem> = emptyList()
     fun galleryFile(id: Long): GalleryFile? = null
+
+    companion object {
+        /** How far back [readSmsThread] looks without a thread query. */
+        const val SMS_SCAN = 1_000
+    }
 }
 
 /**
@@ -62,6 +75,10 @@ class PhoneBridge(
     private val data: PhoneData,
     private val files: FileTransfers,
     private val pairedPeers: () -> List<String>,
+    /** Forwards to other phones, by their own switches. Null when there are none (tests, the desktop). */
+    private val relay: NotificationRelay? = null,
+    /** New SMS for the phones that read this phone's SMS, by their own switch. */
+    private val smsShare: SmsShare? = null,
     private val send: (peerId: String, envelope: Envelope) -> Unit,
 ) {
     private val settingsFile = File(directory, "features.json")
@@ -201,11 +218,13 @@ class PhoneBridge(
     // Data pushed by the phone
 
     fun notificationPosted(item: NotificationItem) {
+        relay?.posted(item)
         if (!isActive(PhoneFeature.Notifications)) return
         pairedPeers().forEach { send(it, Envelope(MessageType.NOTIFICATION_POSTED, notification = item)) }
     }
 
     fun notificationRemoved(key: String) {
+        relay?.removed(key)
         if (!isActive(PhoneFeature.Notifications)) return
         pairedPeers().forEach { send(it, Envelope(MessageType.NOTIFICATION_REMOVED, key = key)) }
     }
@@ -218,6 +237,7 @@ class PhoneBridge(
     }
 
     fun smsChanged() = onIo {
+        smsShare?.changed()
         if (!isActive(PhoneFeature.Sms)) return@onIo
         val fresh = data.readSms(SMS_PUSH_LIMIT, afterId = lastSmsId)
         val newest = fresh.maxOfOrNull { it.id } ?: return@onIo
@@ -226,9 +246,13 @@ class PhoneBridge(
     }
 
     fun callStateChanged(state: String, number: String?) {
-        if (!isActive(PhoneFeature.Calls)) return
+        val toMacs = isActive(PhoneFeature.Calls)
+        // Phones go by their own switch, but still need Android's phone permission.
+        val toPhones = relay?.wantsCalls() == true && runCatching { data.isGranted(PhoneFeature.Calls) }.getOrDefault(false)
+        if (!toMacs && !toPhones) return
         val event = calls.update(state, number, System.currentTimeMillis()) ?: return
-        pairedPeers().forEach { send(it, Envelope(MessageType.CALL, call = event)) }
+        if (toMacs) pairedPeers().forEach { send(it, Envelope(MessageType.CALL, call = event)) }
+        if (toPhones) relay?.call(event)
     }
 
     private fun sendFeatures(peerId: String) {

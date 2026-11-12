@@ -16,6 +16,9 @@ import android.view.KeyEvent
 import id.phonelink.android.core.DeviceActions
 import id.phonelink.android.core.FileSink
 import id.phonelink.android.core.FileSinkFactory
+import id.phonelink.android.core.FileNames
+import id.phonelink.android.core.FileOrigin
+import id.phonelink.android.core.PhoneKinds
 import java.io.File
 import java.io.OutputStream
 
@@ -48,6 +51,8 @@ class DeviceActionsImpl(private val context: Context) : DeviceActions {
 
     override fun ring(from: String) = PhoneRinger.start(context, from)
 
+    override fun ring(from: String, flash: Boolean) = PhoneRinger.start(context, from, flash)
+
     override fun stopRinging() = PhoneRinger.stop(context)
 
     private fun mediaKey(code: Int) {
@@ -57,19 +62,61 @@ class DeviceActionsImpl(private val context: Context) : DeviceActions {
     }
 }
 
-/** Android 10 and up saves to Download/DyskLink. Older versions use the app folder. */
+/**
+ * Android 10 and up saves to Download/DyskLink. Photo backup and photos of a move from another phone go to
+ * Pictures/DyskLink/<phone>, and the files of a move to Download/DyskLink/<phone>/<folder>. Older versions use the app
+ * folder.
+ */
 class DownloadSinks(private val context: Context) : FileSinkFactory {
     override fun open(name: String, size: Long): FileSink =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStoreSink(name) else LegacySink(name)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStoreSink(name, downloads(), "${Environment.DIRECTORY_DOWNLOADS}/DyskLink", null)
+        else LegacySink(name, null)
 
-    private inner class MediaStoreSink(name: String) : FileSink {
+    override fun open(name: String, size: Long, origin: FileOrigin): FileSink {
+        val place = place(name, origin)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStoreSink(name, place.collection, place.path, place.mime)
+        else LegacySink(name, place.path)
+    }
+
+    override fun exists(origin: FileOrigin, name: String, size: Long): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val place = place(name, origin)
+        val where = "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.SIZE} = ?"
+        return runCatching {
+            context.contentResolver.query(place.collection, arrayOf(MediaStore.MediaColumns._ID), where, arrayOf("${place.path}/", name, size.toString()), null)
+                ?.use { it.count > 0 } ?: false
+        }.getOrDefault(false)
+    }
+
+    private class Place(val collection: android.net.Uri, val path: String, val mime: String?)
+
+    private fun downloads(): android.net.Uri =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Downloads.EXTERNAL_CONTENT_URI else MediaStore.Files.getContentUri("external")
+
+    /** Photos and videos to Pictures, everything else to Download, each under DyskLink and the sending phone's name. */
+    private fun place(name: String, origin: FileOrigin): Place {
+        val phone = FileNames.sanitize(origin.peerName)
+        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+        val media = origin.kind == PhoneKinds.PHOTO || origin.kind == PhoneKinds.MOVE_MEDIA
+        return when {
+            media && mime?.startsWith("image/") == true -> Place(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_PICTURES}/DyskLink/$phone", mime)
+            media && mime?.startsWith("video/") == true -> Place(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_PICTURES}/DyskLink/$phone", mime)
+            else -> {
+                val folder = FileNames.folder(origin.folder)?.let { "/$it" }.orEmpty()
+                Place(downloads(), "${Environment.DIRECTORY_DOWNLOADS}/DyskLink/$phone$folder", mime)
+            }
+        }
+    }
+
+    private inner class MediaStoreSink(name: String, collection: android.net.Uri, private val path: String, mime: String?) : FileSink {
         private val resolver = context.contentResolver
         private val uri = resolver.insert(
-            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            collection,
             ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, name)
-                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/DyskLink")
-                put(MediaStore.Downloads.IS_PENDING, 1)
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, path)
+                if (mime != null) put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             },
         ) ?: error("Can't create the file")
         private val output: OutputStream = resolver.openOutputStream(uri) ?: error("Can't open the file")
@@ -79,8 +126,8 @@ class DownloadSinks(private val context: Context) : FileSinkFactory {
 
         override fun commit(): String {
             output.close()
-            resolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
-            return "Download/DyskLink"
+            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            return path
         }
 
         override fun abort() {
@@ -89,8 +136,8 @@ class DownloadSinks(private val context: Context) : FileSinkFactory {
         }
     }
 
-    private inner class LegacySink(private val name: String) : FileSink {
-        private val folder = File(context.getExternalFilesDir(null) ?: context.filesDir, "DyskLink").apply { mkdirs() }
+    private inner class LegacySink(private val name: String, subfolder: String?) : FileSink {
+        private val folder = File(context.getExternalFilesDir(null) ?: context.filesDir, subfolder ?: "DyskLink").apply { mkdirs() }
         private val partial = File(folder, "$name.part")
         private val output = partial.outputStream()
         private var saved: File? = null

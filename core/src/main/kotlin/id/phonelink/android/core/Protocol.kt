@@ -28,6 +28,38 @@ object PhoneLinkProtocol {
     const val CAP_BINARY = "bin1"
     /** What this build advertises in `hello.caps`. */
     val CAPS: List<String> = listOf(CAP_BINARY)
+    /** A phone that can share its screen with another phone, and take taps from it (see [PhoneRules]). Since 1.3. */
+    const val CAP_P2P_SCREEN = "p2p-screen"
+    /** A phone that can stream its camera to another phone and take photos for it. Since 1.3. */
+    const val CAP_P2P_CAMERA = "p2p-camera"
+    /** A phone that can forward its notifications and calls to another phone, and take dismiss and reply. Since 1.4. */
+    const val CAP_P2P_NOTIFY = "p2p-notify"
+    /** A phone that plays push-to-talk voice from another phone (`talk.*`). Since 1.4. */
+    const val CAP_P2P_TALK = "p2p-talk"
+    /** A phone that plays another phone's sound (`audio.*` between phones). Since 1.4. */
+    const val CAP_P2P_SOUND = "p2p-sound"
+    /** A phone that takes links from another phone and offers to open them (`link.open`). Since 1.5. */
+    const val CAP_P2P_OPEN = "p2p-open"
+    /** A phone whose music another phone can control (`media.remote`, `media.state`). Since 1.5. */
+    const val CAP_P2P_MEDIA = "p2p-media"
+    /** A phone that shares its screen time with another phone (`monitor.*`), whose battery it watches. Since 1.5. */
+    const val CAP_P2P_MONITOR = "p2p-monitor"
+    /** A phone another phone can silence (`quiet.*`). Since 1.5. */
+    const val CAP_P2P_QUIET = "p2p-quiet"
+    /** A phone that answers another phone with its location (`locate.*`), and flashes while it rings. Since 1.5. */
+    const val CAP_P2P_LOCATE = "p2p-locate"
+    /** A phone whose SMS another phone can read and send through (`psms.*`). Since 1.6. */
+    const val CAP_P2P_SMS = "p2p-sms"
+    /** A phone that takes a move from an old phone: contacts, photos, and files (`move.*`). Since 1.6. */
+    const val CAP_P2P_MOVE = "p2p-move"
+    /** A phone that keeps another phone's photo backup (`file.offer` with `kind: "photo"`). Since 1.6. */
+    const val CAP_P2P_BACKUP = "p2p-backup"
+    /** What the Android app advertises: [CAPS] and the phone-to-phone features. Computers never list these. */
+    val PHONE_CAPS: List<String> = CAPS + listOf(
+        CAP_P2P_SCREEN, CAP_P2P_CAMERA, CAP_P2P_NOTIFY, CAP_P2P_TALK, CAP_P2P_SOUND,
+        CAP_P2P_OPEN, CAP_P2P_MEDIA, CAP_P2P_MONITOR, CAP_P2P_QUIET, CAP_P2P_LOCATE,
+        CAP_P2P_SMS, CAP_P2P_MOVE, CAP_P2P_BACKUP,
+    )
     const val PAIRING_TIMEOUT_MS = 60_000L
     const val MAX_CLIPBOARD_CHARS = 256 * 1024
 }
@@ -82,6 +114,12 @@ data class FileMessage(
     val error: String? = null,
     /** "photo" for photo sync, which the Mac saves into Pictures instead of Downloads. */
     val kind: String? = null,
+    /** Between phones, on `file.offer` of a move: the folder under the receiver's DyskLink folder, `/`-separated. */
+    val folder: String? = null,
+    /** On `file.result`: the receiver already had this file (same name, size, and SHA-256), so nothing was sent. */
+    val skipped: Boolean? = null,
+    /** On a refused `file.result` between phones: `low-space`, `ask`, or `off` (see [PhoneKinds]). */
+    val reason: String? = null,
 )
 
 @Serializable
@@ -119,6 +157,10 @@ data class NotificationItem(
     val picture: String? = null,
     /** The app's accent color, as 0xRRGGBB. */
     val color: Int? = null,
+    /** Between phones: the notification has a reply action, so `notification.reply` can answer it. */
+    val reply: Boolean? = null,
+    /** Between phones: the notification has a "mark as read" action, for `notification.read`. */
+    val markRead: Boolean? = null,
 )
 
 @Serializable
@@ -178,6 +220,20 @@ data class FsEntry(val name: String, val isDirectory: Boolean, val size: Long, v
 
 @Serializable
 data class ScreenInfo(val width: Int, val height: Int)
+
+/**
+ * The phone camera's state, on `camera.started` between phones: zoom from 1 to [maxZoom], whether the lens has a
+ * flash and the torch is on, whether a video is being recorded, and whether full-size photos can be taken.
+ */
+@Serializable
+data class CameraState(
+    val zoom: Float? = null,
+    val maxZoom: Float? = null,
+    val flash: Boolean? = null,
+    val torch: Boolean? = null,
+    val recording: Boolean? = null,
+    val stills: Boolean? = null,
+)
 
 /** The `x` and `y` coordinates range from 0 to 1, relative to the phone screen. */
 @Serializable
@@ -252,7 +308,7 @@ data class Envelope(
     val contacts: List<ContactItem>? = null,
     /** On `usage`: today's screen time. */
     val usage: UsageReport? = null,
-    /** On `audio.frame`: 16-bit interleaved PCM in base64. On `audio.started`: the rate and channels that follow. */
+    /** On `audio.frame` and `talk.frame`: 16-bit interleaved PCM in base64. On `audio.started` and `talk.start`: the rate and channels that follow. */
     val audio: String? = null,
     val audioRate: Int? = null,
     val audioChannels: Int? = null,
@@ -279,7 +335,23 @@ data class Envelope(
     val keyFrame: Boolean? = null,
     /** Phone camera: clockwise degrees that turn the picture upright. */
     val rotation: Int? = null,
+    /** On `screen.started` to another phone: whether its taps reach this screen (see [PhoneRules]). */
+    val canControl: Boolean? = null,
+    /** On `camera.zoom`: the zoom wanted, from 1 up to the camera's `maxZoom`. */
+    val zoom: Float? = null,
+    /** On `camera.started` to another phone: zoom, torch, recording, and whether photos can be taken. */
+    val cameraState: CameraState? = null,
     val control: ControlEvent? = null,
+    /** On `media.state` between phones: what plays there now. */
+    val nowPlaying: NowPlaying? = null,
+    /** On `quiet.set` (what to set) and `quiet.result` (what was set, and until when). */
+    val quiet: QuietRequest? = null,
+    /** On `locate.result`: where the phone is. */
+    val location: LocationFix? = null,
+    /** On `psms.list`: one thread's messages instead of the list of threads. */
+    val smsThread: Long? = null,
+    /** On `move.request` and `move.done`: what the move holds. */
+    val move: MoveSummary? = null,
     val notch: NotchState? = null,
     val notchAction: NotchAction? = null,
     /** On `ring`: `start`, `stop`, or `stopped` (the ringing side says it ended). */
@@ -305,7 +377,7 @@ data class Envelope(
         raw?.let { return it }
         val text = when (type) {
             MessageType.FILE_CHUNK -> file?.data
-            MessageType.AUDIO_FRAME -> audio
+            MessageType.AUDIO_FRAME, MessageType.TALK_FRAME -> audio
             else -> video
         } ?: return null
         return runCatching { java.util.Base64.getDecoder().decode(text) }.getOrNull()
@@ -363,6 +435,14 @@ object MessageType {
     const val NOTIFICATION_POSTED = "notification.posted"
     const val NOTIFICATION_REMOVED = "notification.removed"
     const val NOTIFICATION_DISMISS = "notification.dismiss"
+    /** Phone to phone: answer a forwarded notification through its reply action (`key`, `text`). */
+    const val NOTIFICATION_REPLY = "notification.reply"
+    /** Phone to phone: press a forwarded notification's "mark as read" action (`key`). */
+    const val NOTIFICATION_READ = "notification.read"
+    /** Phone to phone: how `notification.reply` went (`key`, `error` when it failed). */
+    const val NOTIFICATION_RESULT = "notification.result"
+    /** Phone to phone: the sender stopped forwarding; drop every notification from it. */
+    const val NOTIFICATION_CLEARED = "notification.cleared"
     const val SMS_LIST = "sms.list"
     const val SMS_MESSAGES = "sms.messages"
     const val SMS_NEW = "sms.new"
@@ -378,6 +458,12 @@ object MessageType {
     const val AUDIO_FRAME = "audio.frame"
     const val AUDIO_STOP = "audio.stop"
     const val AUDIO_STOPPED = "audio.stopped"
+    /** Phone to phone push-to-talk: `talk.start` (`audioRate`, `audioChannels`), `talk.frame` (PCM), `talk.stop`. */
+    const val TALK_START = "talk.start"
+    const val TALK_FRAME = "talk.frame"
+    const val TALK_STOP = "talk.stop"
+    /** From the phone listening: it stopped playing the voice, or refused it (`error`). */
+    const val TALK_STOPPED = "talk.stopped"
     const val GALLERY_LIST = "gallery.list"
     const val GALLERY = "gallery"
     const val GALLERY_GET = "gallery.get"
@@ -398,6 +484,12 @@ object MessageType {
     const val CAMERA_STOP = "camera.stop"
     const val CAMERA_STOPPED = "camera.stopped"
     const val CAMERA_CONTROL = "camera.control"
+    /** Phone to phone: take a full-size photo now (`key` names it). Answered with `camera.shot`. */
+    const val CAMERA_SHUTTER = "camera.shutter"
+    /** Phone to phone: set the zoom (`zoom`). */
+    const val CAMERA_ZOOM = "camera.zoom"
+    /** Phone to phone: a photo or video was saved (`key`, `text` `photo`/`video`, `file.name`) or failed (`error`). */
+    const val CAMERA_SHOT = "camera.shot"
     /** The Mac's screen on this phone: the phone asks, the Mac sends video and takes taps. */
     const val MACSCREEN_START = "macscreen.start"
     const val MACSCREEN_STARTED = "macscreen.started"
@@ -410,6 +502,38 @@ object MessageType {
     const val NOTCH_STATE = "notch.state"
     const val NOTCH_ACTION = "notch.action"
     const val RING = "ring"
+    /** Phone to phone (1.5): offer a web, map, or phone link (`text`, `key`). Answered with `link.result`. */
+    const val LINK_OPEN = "link.open"
+    const val LINK_RESULT = "link.result"
+    /** Phone to phone (1.5): a music button (`media`), or `state`. Answered with `media.state` (`nowPlaying` or `error`). */
+    const val MEDIA_REMOTE = "media.remote"
+    const val MEDIA_STATE = "media.state"
+    /** Phone to phone (1.5): today's screen time. Answered with `monitor.report` (`usage` or `error`). */
+    const val MONITOR_REQUEST = "monitor.request"
+    const val MONITOR_REPORT = "monitor.report"
+    /** Phone to phone (1.5): ringer mode or Do Not Disturb (`quiet`). Answered with `quiet.result`. */
+    const val QUIET_SET = "quiet.set"
+    const val QUIET_RESULT = "quiet.result"
+    /** Phone to phone (1.5): where the phone is. Answered with `locate.result` (`location` or `error`). */
+    const val LOCATE_REQUEST = "locate.request"
+    const val LOCATE_RESULT = "locate.result"
+    /** Phone to phone (1.6): the threads (`key`), or one thread (`smsThread`). Answered with `psms.listing`. */
+    const val PSMS_LIST = "psms.list"
+    const val PSMS_LISTING = "psms.listing"
+    /** Phone to phone (1.6): send an SMS through the other phone (`smsSend`). Answered with `psms.result`. */
+    const val PSMS_SEND = "psms.send"
+    const val PSMS_RESULT = "psms.result"
+    /** Phone to phone (1.6): send new SMS here while connected (`key`). Answered with `psms.watching`. */
+    const val PSMS_WATCH = "psms.watch"
+    const val PSMS_WATCHING = "psms.watching"
+    const val PSMS_UNWATCH = "psms.unwatch"
+    /** Phone to phone (1.6): new SMS on the phone with the SIM, to a phone that watches. */
+    const val PSMS_NEW = "psms.new"
+    /** Phone to phone (1.6): an old phone asks to move to this one (`key`, `move`). Answered with `move.answer`. */
+    const val MOVE_REQUEST = "move.request"
+    const val MOVE_ANSWER = "move.answer"
+    /** Phone to phone (1.6): the move finished (`move` with the counts). */
+    const val MOVE_DONE = "move.done"
     const val MAC_ACTION = "mac.action"
     const val TERMINAL_OPEN = "terminal.open"
     const val TERMINAL_OPENED = "terminal.opened"
@@ -514,7 +638,7 @@ object BinaryFrames {
     /** The messages that go binary. Everything else stays JSON. */
     val TYPES = setOf(
         MessageType.SCREEN_FRAME, MessageType.CAMERA_FRAME, MessageType.MACSCREEN_FRAME,
-        MessageType.AUDIO_FRAME, MessageType.FILE_CHUNK,
+        MessageType.AUDIO_FRAME, MessageType.TALK_FRAME, MessageType.FILE_CHUNK,
     )
 
     /** True when [hello] lists binary frames. */
@@ -541,7 +665,7 @@ object BinaryFrames {
         val text = java.util.Base64.getEncoder().encodeToString(raw)
         return when (envelope.type) {
             MessageType.FILE_CHUNK -> envelope.copy(raw = null, file = (envelope.file ?: FileMessage("")).copy(data = text))
-            MessageType.AUDIO_FRAME -> envelope.copy(raw = null, audio = text)
+            MessageType.AUDIO_FRAME, MessageType.TALK_FRAME -> envelope.copy(raw = null, audio = text)
             else -> envelope.copy(raw = null, video = text)
         }
     }

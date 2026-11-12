@@ -116,7 +116,7 @@ class ComputerHub(
     @Volatile private var soundFrom: String? = null
     private var pairingTimeout: Job? = null
     /** CPace state of [pairing]: [shower] while the code shows here, [typer] while it's typed here. */
-    private var shower: Pake.Shower? = null
+    private val shower = ShowerSlot()
     private var typer: Pake.Typer? = null
     /** A code typed before the other computer's `pair.pake` arrived. */
     private var pendingCode: String? = null
@@ -172,7 +172,7 @@ class ComputerHub(
         InboundServer(
             socket, sslContext, scope, "hub",
             isPaired = { id -> synchronized(lock) { records.containsKey(id) } },
-            isPairing = { id -> _pairing.value?.phoneId == id },
+            isPairing = { id -> _pairing.value?.takeIf { !it.outdated }?.phoneId == id },
             helloTimeoutMs = helloTimeoutMs,
             idleMs = unpairedIdleMs,
         ) { connection, _ -> serve(connection) }.start()
@@ -546,7 +546,9 @@ class ComputerHub(
     fun requestPairing(id: String): Unit = lockedInBackground {
         val connection = connections[id] ?: return@lockedInBackground
         val hello = connection.hello ?: return@lockedInBackground
-        if (records.containsKey(id) || !isComputer(connection) || _pairing.value != null) return@lockedInBackground
+        if (records.containsKey(id) || !isComputer(connection)) return@lockedInBackground
+        // An update notice isn't a pairing: it gives way.
+        if (_pairing.value?.takeIf { !it.outdated } != null) return@lockedInBackground
         dropPake()
         if (hello.protocolVersion < Pairing.PAKE_SINCE) {
             // Its DyskLink only pairs the old way, which this one no longer accepts.
@@ -590,6 +592,18 @@ class ComputerHub(
         }
     }
 
+    /** The CPace math for a Shower runs once the lock is released; its `pair.pake` goes if the code still shows. */
+    private fun Outgoing.buildShower(id: String, plan: ShowerSlot.Plan) = afterwards {
+        val built = plan.build()
+        locked {
+            if (_pairing.value?.takeIf { !it.typing && !it.outdated }?.phoneId == id && shower.install(plan, built)) {
+                send(connections[id], Envelope(MessageType.PAIR_PAKE, pake = built.message))
+            } else {
+                built.close()
+            }
+        }
+    }
+
     private fun Outgoing.completePairing(connection: PeerConnection, hello: Hello) {
         records[connection.peerId] = Record(hello.name, hello.model, hello.platform)
         saveRecords()
@@ -608,46 +622,49 @@ class ComputerHub(
         when (envelope.type) {
             MessageType.PAIR_REQUEST -> {
                 if (records.containsKey(id)) return@locked
-                val current = _pairing.value
+                // An update notice for another device doesn't hold the single pairing slot.
+                val current = _pairing.value?.takeIf { !it.outdated || it.phoneId == id }
                 if (current != null && current.phoneId != id) {
                     send(connection, Envelope(MessageType.PAIR_REJECT))
                     return@locked
                 }
                 // Asked again while the code shows: the same code stays, and so do the wrong tries. A new request
                 // (a new nonce) gets a new share for that same code.
-                if (current != null && !current.typing) {
-                    if (current.outdated) return@locked
+                if (current != null && !current.typing && !current.outdated) {
                     val nonce = Pake.requestNonce(envelope.pake) ?: return@locked
-                    if (shower?.sameRequest(nonce) != true) {
-                        shower?.close()
-                        shower = Pake.Shower(current.code, nonce, Pake.channel(id, identity.deviceId))
+                    // A new nonce gets a new share only after a wrong code or now and then, so requests can't
+                    // keep this computer doing the math.
+                    when (val renewal = shower.renew(current.code, nonce, Pake.channel(id, identity.deviceId))) {
+                        is ShowerSlot.Renewal.Resend -> send(connection, Envelope(MessageType.PAIR_PAKE, pake = renewal.message))
+                        is ShowerSlot.Renewal.Build -> buildShower(id, renewal.plan)
+                        ShowerSlot.Renewal.Ignore -> CoreLog.w(TAG, "PAIRING_REQUEST_IGNORED $id")
                     }
-                    shower?.let { send(connection, Envelope(MessageType.PAIR_PAKE, pake = it.message)) }
                     return@locked
                 }
                 // Both computers asked at once: the smaller ID shows the code, the other types it.
                 if (current != null && current.typing && identity.deviceId > id) return@locked
-                // Older apps only know the old code check, which a device in the middle could brute-force.
-                val nonceT = Pake.requestNonce(envelope.pake)
-                if (hello.protocolVersion < Pairing.PAKE_SINCE || nonceT == null) {
-                    dropPake()
-                    send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.UPDATE_REQUIRED))
-                    _pairing.value = HubPairing(id, hello.name, "", outdated = true, error = Pairing.updateMessage(hello.name))
-                    startPairingTimeout(id)
-                    return@locked
-                }
                 val wait = pairingGuard.waitMs(id)
                 if (wait > 0) {
                     if (current != null) clearPairing()
                     send(connection, Envelope(MessageType.PAIR_REJECT, error = PairingGuard.waitMessage(wait)))
                     return@locked
                 }
+                // Older apps only know the old code check, which a device in the middle could brute-force. The
+                // notice shows only while nothing else does, and gives way to a real pairing.
+                val nonceT = Pake.requestNonce(envelope.pake)
+                if (hello.protocolVersion < Pairing.PAKE_SINCE || nonceT == null) {
+                    send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.UPDATE_REQUIRED))
+                    if (current == null && _pairing.value == null) {
+                        dropPake()
+                        _pairing.value = HubPairing(id, hello.name, "", outdated = true, error = Pairing.updateMessage(hello.name))
+                        startPairingTimeout(id)
+                    }
+                    return@locked
+                }
                 dropPake()
                 val code = Pairing.newCode()
-                val showing = Pake.Shower(code, nonceT, Pake.channel(id, identity.deviceId))
-                shower = showing
                 _pairing.value = HubPairing(id, hello.name, code)
-                send(connection, Envelope(MessageType.PAIR_PAKE, pake = showing.message))
+                buildShower(id, shower.start(code, nonceT, Pake.channel(id, identity.deviceId)))
                 startPairingTimeout(id)
             }
             MessageType.PAIR_PAKE -> {
@@ -657,10 +674,10 @@ class ComputerHub(
                     CoreLog.w(TAG, "PAIRING_BAD_PAKE $id")
                     return@locked rejectCurrentPairing()
                 }
-                pendingCode?.let { code ->
-                    pendingCode = null
-                    sendCode(connection, prompt, code)
-                }
+                // Only a code still waiting to go: one that was answered or taken back isn't sent.
+                val code = pendingCode
+                pendingCode = null
+                if (code != null && prompt.localAccepted) sendCode(connection, prompt, code)
             }
             MessageType.PAIR_ACCEPT -> {
                 val prompt = _pairing.value?.takeIf { it.phoneId == id } ?: return@locked
@@ -677,7 +694,7 @@ class ComputerHub(
                     return@locked
                 }
                 if (prompt.outdated) return@locked
-                val showing = shower ?: return@locked
+                val showing = shower.shower ?: return@locked
                 // Only the old key: an older app, which can't pair any more. Not counted as a wrong code.
                 val pake = envelope.pake ?: return@locked rejectCurrentPairing(Pairing.UPDATE_REQUIRED)
                 val reply = showing.check(pake)
@@ -688,6 +705,7 @@ class ComputerHub(
                     CoreLog.w(TAG, "PAIRING_LOCKED $id")
                     rejectCurrentPairing(PairingGuard.waitMessage(pairingGuard.waitMs(id)))
                 } else {
+                    shower.wrongCode()
                     _pairing.value = prompt.copy(attempts = prompt.attempts + 1, error = "A wrong code was typed on ${prompt.phoneName}.")
                     send(connection, Envelope(MessageType.PAIR_REJECT, error = Pairing.WRONG_CODE))
                 }
@@ -696,6 +714,7 @@ class ComputerHub(
                 val prompt = _pairing.value?.takeIf { it.phoneId == id } ?: return@locked
                 if (prompt.typing && envelope.error == Pairing.WRONG_CODE) {
                     typer?.wrongCode()
+                    pendingCode = null
                     _pairing.value = prompt.copy(attempts = prompt.attempts + 1, localAccepted = false, error = "That code is wrong. Check it on ${prompt.phoneName}.")
                 } else if (prompt.typing && envelope.error == Pairing.UPDATE_REQUIRED) {
                     dropPake()
@@ -717,8 +736,7 @@ class ComputerHub(
     }
 
     private fun dropPake() {
-        shower?.close()
-        shower = null
+        shower.clear()
         typer?.close()
         typer = null
         pendingCode = null

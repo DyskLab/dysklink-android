@@ -43,7 +43,8 @@ class PcInput(private val pasteText: (String) -> Boolean) {
             desktop = desktop,
             unicodeInput = desktop == Desktop.WINDOWS && windowsTyper.isAvailable,
             xdotool = desktop == Desktop.X11 && xdotool.isAvailable,
-            x11Remap = desktop == Desktop.X11 && !xdotool.isAvailable && x11Typer.isAvailable,
+            // Also with xdotool, as the way to go when xdotool fails.
+            x11Remap = desktop == Desktop.X11 && x11Typer.isAvailable,
             clipboard = true,
             robot = robot != null,
         ).also {
@@ -51,7 +52,8 @@ class PcInput(private val pasteText: (String) -> Boolean) {
             if (desktop == Desktop.WAYLAND) CoreLog.w("DyskLink", "Wayland: text from the phone can't be typed into other apps")
         }
     }
-    @Volatile private var currentTools: TypingTools? = null
+    /** Drops a way that fails, so the next one is used from then on. Guarded by [type]'s lock. */
+    private val run by lazy { TypingRun(tools) }
 
     /** Shown under the switch when text can only be pasted here, which some apps (terminals) don't take with Ctrl+V. */
     val typingNote: String? get() = when {
@@ -109,39 +111,21 @@ class PcInput(private val pasteText: (String) -> Boolean) {
 
     @Synchronized
     private fun type(robot: Robot, text: String) {
-        var steps = Typing.plan(text, currentTools ?: tools)
-        while (steps.isNotEmpty()) {
-            val step = steps.first()
-            steps = steps.drop(1)
-            when (step) {
-                is TypeStep.Key -> Keys.named[step.name]?.let { tap(robot, it, emptyList()) }
-                is TypeStep.Text -> if (!typeWith(robot, step)) {
-                    // That way failed: it's not used again, and the rest of the text goes the next way.
-                    val fewer = (currentTools ?: tools).without(step.method)
-                    currentTools = fewer
-                    CoreLog.w("DyskLink", "Typing with ${step.method} failed; now $fewer")
-                    val rest = step.text + steps.joinToString("") {
-                        when (it) {
-                            is TypeStep.Text -> it.text
-                            is TypeStep.Key -> if (it.name == "return") "\n" else "\t"
-                        }
-                    }
-                    steps = Typing.plan(rest, fewer)
-                }
-            }
-        }
+        val before = run.tools
+        val ok = run.type(text, key = { name -> Keys.named[name]?.let { tap(robot, it, emptyList()) } }) { typeWith(robot, it) }
+        if (!ok) CoreLog.w("DyskLink", "Typing partly failed; now ${run.tools}" + if (run.tools != before) " (was $before)" else "")
     }
 
-    private fun typeWith(robot: Robot, step: TypeStep.Text): Boolean = when (step.method) {
+    private fun typeWith(robot: Robot, step: TypeStep.Text): Typed = when (step.method) {
         TypeMethod.UNICODE_INPUT -> windowsTyper.type(step.text)
         TypeMethod.XDOTOOL -> xdotool.type(step.text)
         TypeMethod.X11_REMAP -> x11Typer.type(step.text)
-        TypeMethod.PASTE -> pasteText(step.text)
+        TypeMethod.PASTE -> if (pasteText(step.text)) Typed.Done else Typed.Nothing
         TypeMethod.US_KEYS -> {
             step.text.forEach { c ->
                 Keys.forChar(c)?.let { (key, shift) -> tap(robot, key, if (shift) listOf(KeyEvent.VK_SHIFT) else emptyList()) }
             }
-            true
+            Typed.Done
         }
     }
 }
