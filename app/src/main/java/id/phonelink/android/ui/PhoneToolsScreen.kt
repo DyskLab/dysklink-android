@@ -117,7 +117,36 @@ fun PhoneToolsScreen(onBack: () -> Unit, onAllowFiles: () -> Unit) {
             appsVersion++
         }
         allowedFiles = WebFiles.canReadFiles(context)
+        // An app uninstalled from its settings page leaves the list right away; sizes are read again behind it.
+        apps?.let { list ->
+            val left = list.filter { isInstalled(context, it.packageName) }
+            if (left.size != list.size) {
+                apps = left
+                appsVersion++
+            }
+        }
         onPauseOrDispose { }
+    }
+    // Apps removed or added while this screen is open, for example from a notification or the Play Store.
+    DisposableEffect(Unit) {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: android.content.Intent) {
+                val name = intent.data?.schemeSpecificPart
+                if (intent.action == android.content.Intent.ACTION_PACKAGE_REMOVED && name != null &&
+                    !intent.getBooleanExtra(android.content.Intent.EXTRA_REPLACING, false)
+                ) {
+                    apps = apps?.filterNot { it.packageName == name }
+                }
+                appsVersion++
+            }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(android.content.Intent.ACTION_PACKAGE_REMOVED)
+            addAction(android.content.Intent.ACTION_PACKAGE_ADDED)
+            addDataScheme("package")
+        }
+        androidx.core.content.ContextCompat.registerReceiver(context, receiver, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED)
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
     }
     LaunchedEffect(appsVersion) {
         apps = withContext(Dispatchers.IO) { runCatching { PhoneApps.load(context) }.getOrDefault(emptyList()) }
@@ -558,3 +587,6 @@ private fun ToolChip(text: String, on: Boolean, color: Color = Palette.Mint, onC
             .padding(horizontal = 12.dp, vertical = 7.dp),
     )
 }
+
+private fun isInstalled(context: Context, packageName: String): Boolean =
+    runCatching { context.packageManager.getApplicationInfo(packageName, 0) }.isSuccess
