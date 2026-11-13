@@ -54,6 +54,13 @@ data class DyskColors(
         else -> color
     }
 
+    /** The switch: a darker track when off and a white knob in light mode. Same values as the Mac. */
+    val switchOffTrack: Color get() = if (isDark) panelRaised else Color(0xFFC9D0DA)
+    val switchOffKnob: Color get() = if (isDark) textFaint else Color.White
+    val switchOnKnob: Color get() = if (isDark) onAccent else Color.White
+    /** An outline only light mode needs: a raised fill on the background is too close to it to see. */
+    val lightOutline: Color get() = if (isDark) Color.Transparent else stroke
+
     fun battery(percent: Int): Color = when {
         percent <= 15 -> coral
         percent <= 35 -> amber

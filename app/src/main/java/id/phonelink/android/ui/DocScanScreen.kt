@@ -269,7 +269,7 @@ private fun ToggleRow(title: String, detail: String, checked: Boolean, onChange:
         Switch(
             checked = checked,
             onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(checkedTrackColor = Palette.Mint, checkedThumbColor = Palette.OnAccent),
+            colors = SwitchDefaults.colors(checkedTrackColor = Palette.Mint),
         )
     }
 }
@@ -468,7 +468,7 @@ private fun ScanSheet(
                         fontSize = 13.sp,
                         lineHeight = 18.sp,
                         modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState())
-                            .clip(RoundedCornerShape(14.dp)).background(Palette.Ink.copy(alpha = 0.5f)).padding(12.dp),
+                            .clip(RoundedCornerShape(14.dp)).background(if (Palette.IsDark) Palette.Ink.copy(alpha = 0.5f) else Palette.PanelRaised).padding(12.dp),
                     )
                 }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

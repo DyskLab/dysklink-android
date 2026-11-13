@@ -351,7 +351,7 @@ private fun RenameField(title: String, onDone: (String) -> Unit) {
                 focused = it.isFocused
             }
             .clip(RoundedCornerShape(10.dp))
-            .background(Palette.Ink.copy(alpha = 0.4f))
+            .background(if (Palette.IsDark) Palette.Ink.copy(alpha = 0.4f) else Palette.PanelRaised)
             .padding(vertical = 10.dp, horizontal = 6.dp),
     )
 }

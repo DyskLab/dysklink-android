@@ -277,11 +277,18 @@ private fun ProvideColors(colors: DyskColors, content: @Composable () -> Unit) {
     } else {
         lightColorScheme(
             primary = colors.mint,
-            onPrimary = colors.onAccent,
+            // Only Material's own controls read this (our buttons use OnAccent): a white switch knob and check
+            // mark on mint, as on the Mac and desktop, instead of a near-black knob.
+            onPrimary = Color.White,
             primaryContainer = colors.mint.copy(alpha = 0.16f),
             onPrimaryContainer = colors.textPrimary,
             secondary = colors.sky,
             onSecondary = colors.onAccent,
+            // Progress and slider tracks use these; Material's default is a lavender that matches nothing here.
+            secondaryContainer = colors.panelRaised,
+            onSecondaryContainer = colors.textPrimary,
+            tertiary = colors.violet,
+            onTertiary = Color.White,
             background = colors.ink,
             onBackground = colors.textPrimary,
             surface = colors.panel,

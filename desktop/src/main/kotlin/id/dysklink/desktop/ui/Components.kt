@@ -108,6 +108,7 @@ fun TabPill(
     val content = if (selected) colors.onAccent else colors.textPrimary
     Row(
         Modifier.height(30.dp).clip(CircleShape).background(if (selected) colors.mint else colors.panelRaised)
+            .border(1.dp, if (selected) Color.Transparent else colors.lightOutline, CircleShape)
             .clickable(onClick = onClick).padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -302,8 +303,9 @@ fun DyskSwitch(checked: Boolean, enabled: Boolean = true, onChange: (Boolean) ->
     Switch(
         checked, onChange, Modifier.requiredSize(52.dp, 32.dp).scale(0.8f), enabled = enabled,
         colors = SwitchDefaults.colors(
-            checkedTrackColor = colors.mint, checkedThumbColor = colors.onAccent, checkedBorderColor = Color.Transparent,
-            uncheckedTrackColor = colors.panelRaised, uncheckedThumbColor = colors.textFaint, uncheckedBorderColor = colors.stroke,
+            checkedTrackColor = colors.mint, checkedThumbColor = colors.switchOnKnob, checkedBorderColor = Color.Transparent,
+            uncheckedTrackColor = colors.switchOffTrack, uncheckedThumbColor = colors.switchOffKnob,
+            uncheckedBorderColor = if (colors.isDark) colors.stroke else Color.Transparent,
         ),
     )
     }
