@@ -86,7 +86,7 @@ fun IncomingAudioCard(peer: Peer, link: PhoneRelayLink?) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 if (talking == peer.id) "${peer.name} is talking" else "Playing sound from ${peer.name}",
-                color = Palette.Mint, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f),
+                color = Palette.MintText, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f),
             )
             SecondaryButton("Stop", tint = Palette.Coral) {
                 link?.stopHearing(peer.id, if (talking == peer.id) AudioKind.Talk else AudioKind.Sound)
@@ -105,7 +105,7 @@ fun PlaySoundCard(peer: Peer, onStartSound: () -> Unit) {
     GlassCard {
         Text(
             if (on) "Playing on ${peer.name}" else "Play this phone's sound on ${peer.name}",
-            color = if (on) Palette.Mint else Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            color = if (on) Palette.MintText else Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
         )
         Text("Music and videos from here play on its speaker.", color = Palette.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
         Spacer(Modifier.height(12.dp))
@@ -116,7 +116,7 @@ fun PlaySoundCard(peer: Peer, onStartSound: () -> Unit) {
         }
         if (soundProblem != null && sending == null) {
             Spacer(Modifier.height(8.dp))
-            Text(soundProblem!!, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+            Text(soundProblem!!, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
         }
     }
 }
@@ -169,7 +169,7 @@ internal fun HoldToTalk(peer: Peer, height: androidx.compose.ui.unit.Dp = 112.dp
     }
     (note ?: problem)?.let {
         Spacer(Modifier.height(6.dp))
-        Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+        Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
     }
 }
 
@@ -206,7 +206,7 @@ fun PhoneSendCard(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -> Unit
         }
         if (access.notify && !listening) {
             Spacer(Modifier.height(8.dp))
-            Text("Needs notification access for DyskLink.", color = Palette.Amber, fontSize = 12.sp)
+            Text("Needs notification access for DyskLink.", color = Palette.AmberText, fontSize = 12.sp)
             Spacer(Modifier.height(8.dp))
             SecondaryButton("Allow notification access", Modifier.fillMaxWidth()) { onGrant(PhoneFeature.Notifications) }
         }
@@ -218,7 +218,7 @@ fun PhoneSendCard(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -> Unit
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(appLabel(context, pkg), color = Palette.TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        "Send again", color = Palette.Sky, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        "Send again", color = Palette.SkyText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.clip(CircleShape).clickable { onChange(access.copy(muted = access.muted - pkg)) }.padding(8.dp),
                     )
                 }
@@ -233,7 +233,7 @@ fun PhoneSendCard(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -> Unit
         }
         if (access.calls && !callsGranted) {
             Spacer(Modifier.height(8.dp))
-            Text("Needs the phone permission for DyskLink.", color = Palette.Amber, fontSize = 12.sp)
+            Text("Needs the phone permission for DyskLink.", color = Palette.AmberText, fontSize = 12.sp)
         }
     }
     if (picking) {
@@ -289,7 +289,7 @@ fun PhoneNotificationsScreen(peer: Peer, feed: MirrorFeed?, link: PhoneRelayLink
         val call = feed?.call?.takeIf { it.state == "ringing" }
         if (call != null) {
             GlassCard {
-                Text("Incoming call on ${peer.name}", color = Palette.Mint, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("Incoming call on ${peer.name}", color = Palette.MintText, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 Text(call.number ?: "Unknown number", color = Palette.TextPrimary, fontSize = 18.sp)
                 Text("Answer or decline it on ${peer.name}.", color = Palette.TextSecondary, fontSize = 12.sp)
             }
@@ -351,7 +351,7 @@ private fun MirroredCard(
         }
         item.title?.let { Text(it, color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis) }
         item.text?.let { Text(it, color = Palette.TextSecondary, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 6, overflow = TextOverflow.Ellipsis) }
-        if (sent) Text("Reply sent", color = Palette.Mint, fontSize = 12.sp)
+        if (sent) Text("Reply sent", color = Palette.MintText, fontSize = 12.sp)
         if (replying) {
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(draft, onDraft, Modifier.fillMaxWidth(), placeholder = { Text("Reply") }, maxLines = 4)
@@ -370,7 +370,7 @@ private fun MirroredCard(
 @Composable
 private fun CardAction(label: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
     Text(
-        label, color = color, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+        label, color = Palette.text(color), fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(CircleShape).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 8.dp),
     )
 }

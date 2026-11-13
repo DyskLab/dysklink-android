@@ -169,7 +169,7 @@ fun PhoneSmsScreen(peer: Peer, link: PhoneMoreLink?, onBack: () -> Unit) {
                     SecondaryButton("Refresh", Modifier.weight(1f)) { SmsLock.session.touch(); link.listSms(peer.id, null) }
                 }
                 Spacer(Modifier.height(10.dp))
-                view.error?.let { Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp) }
+                view.error?.let { Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp) }
                 val threads = view.threads
                 when {
                     threads == null -> Text(if (view.loading) "Asking ${peer.name}…" else "", color = Palette.TextSecondary, fontSize = 13.sp)
@@ -246,7 +246,7 @@ private fun SmsComposer(peer: Peer, link: PhoneMoreLink, view: SmsView, address:
         }
     }
     Column(Modifier.padding(top = 8.dp)) {
-        note?.let { Text(it, color = if (it.startsWith("Sent")) Palette.Mint else Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp) }
+        note?.let { Text(it, color = if (it.startsWith("Sent")) Palette.MintText else Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp) }
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(text, { text = it; note = null; SmsLock.session.touch() }, Modifier.weight(1f), placeholder = { Text("SMS through ${peer.name}") }, maxLines = 4)
             Spacer(Modifier.padding(4.dp))
@@ -284,7 +284,7 @@ fun SmsLogList(peer: Peer, entries: List<SmsLogEntry>) {
     mine.take(20).forEach { entry ->
         Text(
             "${timeFormat.format(java.util.Date(entry.time))}  ${entry.address}  ${entry.chars} chars" + if (entry.ok) "" else ", not sent: ${entry.error ?: "failed"}",
-            color = if (entry.ok) Palette.TextSecondary else Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp,
+            color = if (entry.ok) Palette.TextSecondary else Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp,
         )
     }
     if (mine.size > 20) Text("And ${mine.size - 20} more.", color = Palette.TextFaint, fontSize = 12.sp)

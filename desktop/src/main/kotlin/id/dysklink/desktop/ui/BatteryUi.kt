@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -28,11 +29,16 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import id.dysklink.desktop.BatteryMath
 import id.dysklink.desktop.BatteryView
 import id.dysklink.desktop.ChargeState
+import id.dysklink.desktop.EnergyMath
+import id.dysklink.desktop.EnergyView
+import id.dysklink.desktop.ImpactLevel
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -41,11 +47,17 @@ import java.util.Locale
 fun BatteryCard(model: DeskModel) {
     val flow = model.battery ?: return
     val view by flow.collectAsState()
-    BatteryContent(view ?: return)
+    // The apps are only sampled while this card is on screen (and on battery for the tray's line).
+    DisposableEffect(model) {
+        model.watchEnergy(true)
+        onDispose { model.watchEnergy(false) }
+    }
+    val energy = model.energy?.collectAsState()?.value
+    BatteryContent(view ?: return, energy)
 }
 
 @Composable
-fun BatteryContent(view: BatteryView) {
+fun BatteryContent(view: BatteryView, energy: EnergyView? = null) {
     val colors = Dysk.colors
     val r = view.reading
     val tint = when {
@@ -99,6 +111,10 @@ fun BatteryContent(view: BatteryView) {
                 }
             }
         }
+        if (energy != null) {
+            Spacer(Modifier.height(Space.sm))
+            EnergyApps(energy)
+        }
         if (view.days.size >= 2) {
             Spacer(Modifier.height(Space.sm))
             LineChart("Health, one point a day", view.days.map { it.health.toFloat() },
@@ -128,6 +144,70 @@ fun BatteryContent(view: BatteryView) {
             Spacer(Modifier.height(Space.sm))
             view.notes.forEach { Body(it, colors.textFaint) }
         }
+    }
+}
+
+/** Apps using significant energy, as the Mac's Battery page: battery power against the load, then the top apps. */
+@Composable
+private fun EnergyApps(e: EnergyView) {
+    val colors = Dysk.colors
+    Column(Modifier.fillMaxWidth().background(colors.panelRaised.copy(alpha = 0.5f), RoundedCornerShape(12.dp)).padding(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Using significant energy", Modifier.weight(1f), color = colors.textSecondary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (e.gpu) "Estimated from CPU and GPU use" else "Estimated from CPU use", color = colors.textFaint, fontSize = 11.sp)
+        }
+        Spacer(Modifier.height(8.dp))
+        // The split: what the battery gives, and how much of it the load takes.
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.xs)) {
+            Box(Modifier.weight(1f)) {
+                StatTile("Battery power", e.batteryWatts?.let { "%.1f W".format(Locale.ENGLISH, it) } ?: if (e.onBattery) "Not reported" else "On the charger",
+                    if (e.onBattery) "From the battery now" else "Plug-in power: impact is relative")
+            }
+            Box(Modifier.weight(1f)) {
+                StatTile("System load", "%.0f%% CPU".format(Locale.ENGLISH, e.loadPercent),
+                    e.loadWatts?.let { "About %.1f W of the battery's power".format(Locale.ENGLISH, it) } ?: "All cores, last 15 seconds")
+            }
+        }
+        if (e.batteryWatts != null && e.loadWatts != null) {
+            Spacer(Modifier.height(6.dp))
+            val share = (e.loadWatts / e.batteryWatts).toFloat().coerceIn(0f, 1f)
+            Box(Modifier.fillMaxWidth().height(6.dp).background(colors.stroke, CircleShape)) {
+                Box(Modifier.fillMaxWidth(share.coerceAtLeast(0.02f)).fillMaxHeight().background(colors.amber, CircleShape))
+            }
+            Row(Modifier.padding(top = 3.dp)) {
+                Text("Load", Modifier.weight(1f), color = colors.textFaint, fontSize = 10.5.sp)
+                Text("Screen, idle and the rest", color = colors.textFaint, fontSize = 10.5.sp)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        when {
+            !e.ready -> Text("Measuring…", Modifier.padding(vertical = 8.dp), color = colors.textFaint, fontSize = 12.5.sp)
+            e.apps.isEmpty() -> Text("No apps using significant energy", Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                color = colors.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+            else -> {
+                val scale = maxOf(100.0, e.apps.maxOf { it.impact })
+                e.apps.forEach { app ->
+                    val tint = when (app.level) { ImpactLevel.High -> colors.coral; ImpactLevel.Medium -> colors.amber; ImpactLevel.Low -> colors.sky }
+                    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(app.name, Modifier.weight(1f), color = colors.textPrimary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.width(8.dp))
+                        Box(Modifier.width(90.dp).height(6.dp).background(colors.stroke, CircleShape)) {
+                            Box(Modifier.fillMaxWidth((app.impact / scale).toFloat().coerceIn(0.04f, 1f)).fillMaxHeight().background(tint, CircleShape))
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Text(app.watts?.let { "~%.1f W".format(Locale.ENGLISH, it) } ?: "", Modifier.width(52.dp), color = colors.textSecondary,
+                            fontSize = 12.sp, textAlign = TextAlign.End)
+                        Text(app.level.label, Modifier.width(60.dp), color = Dysk.colors.text(tint), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Impact is CPU time in percent of one core${if (e.gpu) " plus GPU use" else ""}, averaged over 15 seconds; apps above " +
+                "${EnergyMath.SIGNIFICANT.toInt()} show.${if (e.loadWatts != null) " Watts are estimates." else ""} Only process names are read, and they stay on this PC.",
+            color = colors.textFaint, fontSize = 11.sp, lineHeight = 15.sp,
+        )
     }
 }
 

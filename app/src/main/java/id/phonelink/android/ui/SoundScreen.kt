@@ -78,7 +78,7 @@ fun SoundScreen(peerId: String, macName: String, connected: Boolean, isMac: Bool
         }
         problem?.let {
             Spacer(Modifier.height(10.dp))
-            Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+            Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
         }
         if (!connected) {
             Spacer(Modifier.height(10.dp))

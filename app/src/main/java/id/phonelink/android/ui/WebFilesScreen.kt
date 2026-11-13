@@ -48,7 +48,7 @@ fun WebFilesHomeCard(onOpen: () -> Unit) {
                 Text("Phone files in a browser", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 Text(
                     if (state.running) "On at ${state.address?.removePrefix("http://")}" else "Get files from any laptop on the same Wi-Fi.",
-                    color = if (state.running) Palette.Mint else Palette.TextSecondary,
+                    color = if (state.running) Palette.MintText else Palette.TextSecondary,
                     fontSize = 12.sp,
                 )
             }
@@ -91,7 +91,7 @@ fun WebFilesScreen(onBack: () -> Unit, onAllowFiles: () -> Unit) {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         state.address.orEmpty(),
-                        color = Palette.Mint,
+                        color = Palette.MintText,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
@@ -139,7 +139,7 @@ fun WebFilesScreen(onBack: () -> Unit, onAllowFiles: () -> Unit) {
                     )
                     state.problem?.let {
                         Spacer(Modifier.height(8.dp))
-                        Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+                        Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
                     }
                     Spacer(Modifier.height(12.dp))
                     PrimaryButton("Start", Modifier.fillMaxWidth()) { if (allowed) WebFiles.start(context) else onAllowFiles() }

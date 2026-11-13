@@ -145,7 +145,7 @@ fun DevicePage(model: DeskModel, ui: UiState, device: HubPhone, pickFiles: () ->
                     .border(2.dp, colors.mint, RoundedCornerShape(20.dp)),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("Drop to send to ${device.name}", color = colors.mint, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text("Drop to send to ${device.name}", color = colors.mintText, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -370,7 +370,7 @@ private fun NotificationCard(item: NotificationItem, canDismiss: Boolean, onDism
             Spacer(Modifier.width(Space.sm))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(item.app, color = colors.mint, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                    Text(item.app, color = colors.mintText, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(6.dp))
                     Text(SimpleDateFormat("HH:mm").format(Date(item.time)), color = colors.textFaint, fontSize = 11.sp)
                 }

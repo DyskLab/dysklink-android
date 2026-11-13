@@ -161,7 +161,7 @@ fun PhoneToolsScreen(onBack: () -> Unit, onAllowFiles: () -> Unit) {
                 val on = option == tab
                 Text(
                     option.label,
-                    color = if (on) Palette.Ink else Palette.TextSecondary,
+                    color = if (on) Palette.OnAccent else Palette.TextSecondary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -295,7 +295,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.StorageTab(allowed: B
                         selected = emptySet()
                         storage = PhoneApps.storage()
                     }
-                }) { Text("Delete", color = Palette.Coral) }
+                }) { Text("Delete", color = Palette.CoralText) }
             },
             dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
         )
@@ -304,7 +304,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.StorageTab(allowed: B
 
 @Composable
 private fun UsageBar(fraction: Float) {
-    Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.08f))) {
+    Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(Palette.Contrast.copy(alpha = 0.08f))) {
         Box(Modifier.fillMaxWidth(fraction.coerceIn(0.02f, 1f)).height(8.dp).clip(CircleShape).background(Palette.Accent))
     }
 }
@@ -329,7 +329,7 @@ private fun CleanGroup(
             Column(horizontalAlignment = Alignment.End) {
                 Text(
                     if (list.isEmpty()) "None" else if (kind == CleanKind.Empty) "${list.size}" else formatSize(list.sumOf { it.size }),
-                    color = if (list.isEmpty()) Palette.TextFaint else Palette.Mint,
+                    color = if (list.isEmpty()) Palette.TextFaint else Palette.MintText,
                     fontSize = 14.sp, fontWeight = FontWeight.Bold,
                 )
                 if (list.isNotEmpty()) Text("${list.size} items ${if (isOpen) "▴" else "▾"}", color = Palette.TextFaint, fontSize = 11.sp)
@@ -339,7 +339,7 @@ private fun CleanGroup(
             Spacer(Modifier.height(8.dp))
             Text(
                 if (picked == list.size) "Unselect all" else "Select all",
-                color = Palette.Mint, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                color = Palette.MintText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.clip(CircleShape).clickable { onSelectAll(picked != list.size) }.padding(vertical = 4.dp),
             )
         }
@@ -364,7 +364,7 @@ private fun CleanRow(item: CleanItem, on: Boolean, onView: () -> Unit, onToggle:
                 .border(1.5.dp, if (on) Palette.Mint else Palette.TextFaint, RoundedCornerShape(7.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            if (on) Icon(Icons.Rounded.Check, null, tint = Palette.Ink, modifier = Modifier.size(16.dp))
+            if (on) Icon(Icons.Rounded.Check, null, tint = Palette.OnAccent, modifier = Modifier.size(16.dp))
         }
         Spacer(Modifier.width(12.dp))
         if (item.isFolder) FlatIcon(Icons.Rounded.Folder, Palette.Sky, size = 30.dp) else FlatIcon(FlatIcons.file(item.name), Palette.Sky, size = 30.dp)
@@ -382,7 +382,7 @@ private fun CleanRow(item: CleanItem, on: Boolean, onView: () -> Unit, onToggle:
             Spacer(Modifier.width(8.dp))
             Text(
                 "View",
-                color = Palette.Mint,
+                color = Palette.MintText,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
@@ -498,7 +498,7 @@ private fun AppRow(app: AppEntry, now: Long, context: Context, onClick: () -> Un
         Column(Modifier.weight(1f)) {
             Text(app.name, color = Palette.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val used = AppAudit.lastUsedText(app, now)
-            if (used.isNotEmpty()) Text(used, color = if (unused) Palette.Amber else Palette.TextFaint, fontSize = 11.5.sp)
+            if (used.isNotEmpty()) Text(used, color = if (unused) Palette.AmberText else Palette.TextFaint, fontSize = 11.5.sp)
         }
         app.sizeBytes?.let { Text(formatSize(it), color = Palette.TextSecondary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold) }
         Text("  ›", color = Palette.TextFaint, fontSize = 16.sp)
@@ -543,7 +543,7 @@ private fun LazyListScope.permissionGroup(group: PermissionGroup, holders: List<
                 Spacer(Modifier.width(8.dp))
                 Text(
                     if (holders.isEmpty()) "None" else "${holders.size} ${if (isOpen) "▴" else "▾"}",
-                    color = if (holders.isEmpty()) Palette.TextFaint else if (strong) Palette.Amber else Palette.Mint,
+                    color = if (holders.isEmpty()) Palette.TextFaint else if (strong) Palette.AmberText else Palette.MintText,
                     fontSize = 14.sp, fontWeight = FontWeight.Bold,
                 )
             }
@@ -575,7 +575,7 @@ private fun LazyListScope.permissionGroup(group: PermissionGroup, holders: List<
 private fun ToolChip(text: String, on: Boolean, color: Color = Palette.Mint, onClick: () -> Unit) {
     Text(
         text,
-        color = if (on) Palette.Ink else Palette.TextSecondary,
+        color = if (on) Palette.OnAccent else Palette.TextSecondary,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,

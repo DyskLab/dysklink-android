@@ -137,7 +137,7 @@ private fun MoveChooser(peer: Peer, link: PhoneMoreLink) {
                 MediaRange.entries.forEach { option ->
                     val selected = option == range
                     Text(
-                        option.label, color = if (selected) Palette.Ink else Palette.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                        option.label, color = if (selected) Palette.OnAccent else Palette.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
                         modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) Palette.Mint else Palette.PanelRaised)
                             .clickable {
                                 counted = null
@@ -164,7 +164,7 @@ private fun MoveChooser(peer: Peer, link: PhoneMoreLink) {
         folders.forEach { uri ->
             Row(Modifier.padding(top = 6.dp)) {
                 Text(MoveSources.treeName(context, uri), color = Palette.TextPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                Text("Remove", color = Palette.Coral, fontSize = 13.sp, modifier = Modifier.clickable { folders = folders - uri; counted = null })
+                Text("Remove", color = Palette.CoralText, fontSize = 13.sp, modifier = Modifier.clickable { folders = folders - uri; counted = null })
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -202,7 +202,7 @@ private fun MoveChooser(peer: Peer, link: PhoneMoreLink) {
                 color = Palette.TextSecondary, fontSize = 12.sp,
             )
             peer.info?.storageFreeBytes?.let { free ->
-                Text("${formatBytes(free)} free on ${peer.name}. At least 1 GB stays free there.", color = if (free - bytes < (1L shl 30)) Palette.Amber else Palette.TextFaint, fontSize = 12.sp)
+                Text("${formatBytes(free)} free on ${peer.name}. At least 1 GB stays free there.", color = if (free - bytes < (1L shl 30)) Palette.AmberText else Palette.TextFaint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(10.dp))
             PrimaryButton("Start move", Modifier.fillMaxWidth()) {
@@ -250,8 +250,8 @@ private fun MoveProgressView(peer: Peer, plan: MovePlan, link: PhoneMoreLink) {
             MovePhase.Waiting -> "Waiting for ${peer.name} to connect"
             MovePhase.Done -> "Done"
         }
-        Text(status, color = if (plan.phase == MovePhase.Done) Palette.Mint else Palette.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-        plan.error?.let { Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp) }
+        Text(status, color = if (plan.phase == MovePhase.Done) Palette.MintText else Palette.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        plan.error?.let { Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp) }
         Spacer(Modifier.height(10.dp))
         val fraction = if (progress.totalBytes > 0) progress.doneBytes.toFloat() / progress.totalBytes else if (progress.totalItems > 0) progress.doneItems.toFloat() / progress.totalItems else 1f
         LinearProgressIndicator(progress = { fraction.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
@@ -267,7 +267,7 @@ private fun MoveProgressView(peer: Peer, plan: MovePlan, link: PhoneMoreLink) {
                     progress.skipped.takeIf { it > 0 }?.let { "$it already on ${peer.name}" },
                     progress.failed.takeIf { it > 0 }?.let { "$it couldn't be sent" },
                 ).joinToString(", "),
-                color = if (progress.failed > 0) Palette.Amber else Palette.TextFaint, fontSize = 12.sp,
+                color = if (progress.failed > 0) Palette.AmberText else Palette.TextFaint, fontSize = 12.sp,
             )
         }
         Spacer(Modifier.height(12.dp))
@@ -279,7 +279,7 @@ private fun MoveProgressView(peer: Peer, plan: MovePlan, link: PhoneMoreLink) {
                     color = Palette.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp,
                 )
                 plan.items.filter { it.error != null && it.status == id.phonelink.android.core.MoveItemStatus.Failed }.take(5).forEach {
-                    Text("${it.name}: ${it.error}", color = Palette.Amber, fontSize = 11.sp)
+                    Text("${it.name}: ${it.error}", color = Palette.AmberText, fontSize = 11.sp)
                 }
                 Spacer(Modifier.height(10.dp))
                 PrimaryButton("Finish", Modifier.fillMaxWidth(), onClick = link.cancelMove)

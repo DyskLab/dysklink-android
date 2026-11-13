@@ -174,7 +174,7 @@ private fun Sidebar(model: DeskModel, ui: UiState, devices: List<HubPhone>, sele
             ) {
                 DyskIcon(DyskIcons.Download, colors.mint, 13.dp)
                 Spacer(Modifier.width(8.dp))
-                Text("Update to ${release.version}", Modifier.weight(1f), color = colors.mint, fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text("Update to ${release.version}", Modifier.weight(1f), color = colors.mintText, fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                 Text("View", color = colors.textSecondary, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
             }
         }
@@ -229,14 +229,14 @@ private fun DeviceRow(device: HubPhone, selected: Boolean, alerts: Int, onClick:
                 )
                 if (battery != null && device.isConnected && device.isPaired) {
                     Text(" · ", color = colors.textFaint, fontSize = 11.sp)
-                    Text("$battery%", color = colors.battery(battery), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text("$battery%", color = colors.text(colors.battery(battery)), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
         if (device.isConnected && device.viaUsb) {
             Text(
                 "USB", Modifier.padding(start = 6.dp).background(colors.mint.copy(alpha = 0.15f), CircleShape).padding(horizontal = 7.dp, vertical = 2.dp),
-                color = colors.mint, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                color = colors.mintText, fontSize = 10.sp, fontWeight = FontWeight.Bold,
             )
             if (alerts > 0) Spacer(Modifier.width(4.dp))
         }
@@ -286,7 +286,7 @@ private fun EmptyState(model: DeskModel, phones: List<HubPhone>, radarProgress: 
         )
         if (phones.any { it.isConnected && !it.isPaired && !it.isComputer }) {
             Spacer(Modifier.height(Space.md))
-            Text("A phone is connected. Tap ${model.deviceName} in DyskLink on it to pair.", color = colors.sky, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text("A phone is connected. Tap ${model.deviceName} in DyskLink on it to pair.", color = colors.skyText, fontSize = 13.sp, fontWeight = FontWeight.Medium)
         }
         Spacer(Modifier.height(Space.lg))
         Text("Not showing up? Add this PC on the phone by its address:", color = colors.textFaint, fontSize = 12.5.sp)
@@ -300,7 +300,7 @@ private fun EmptyState(model: DeskModel, phones: List<HubPhone>, radarProgress: 
                 Text("Manual connection", color = colors.textFaint, fontSize = 12.5.sp)
                 Spacer(Modifier.width(7.dp))
                 SelectionContainer {
-                    Text(address, color = colors.mint, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+                    Text(address, color = colors.mintText, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
                 }
             }
         }

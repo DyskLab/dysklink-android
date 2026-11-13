@@ -128,7 +128,7 @@ private fun NoteCard(note: String?, receivedAt: Long, send: (NotchAction) -> Uni
             if (draft.isNotEmpty()) {
                 Text(
                     "Copy",
-                    color = Palette.Mint,
+                    color = Palette.MintText,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp))
@@ -188,7 +188,7 @@ private fun FocusCard(snapshot: NotchSnapshot, send: (NotchAction) -> Unit) {
                     fontSize = 44.sp,
                     fontWeight = FontWeight.Bold,
                 )
-                Text("$phase · session ${focus.session} of ${focus.sessions}", color = color, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text("$phase · session ${focus.session} of ${focus.sessions}", color = Palette.text(color), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 PrimaryButton(if (focus.running) "Pause" else "Start", Modifier.width(110.dp)) {
@@ -361,7 +361,7 @@ private fun TaskInput(
                 .clickable(enabled = ready, onClick = onSubmit),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, contentDescription = iconLabel, tint = if (ready) Palette.Ink else Palette.TextFaint, modifier = Modifier.size(22.dp))
+            Icon(icon, contentDescription = iconLabel, tint = if (ready) Palette.OnAccent else Palette.TextFaint, modifier = Modifier.size(22.dp))
         }
     }
 }
@@ -390,7 +390,7 @@ private fun TaskRow(task: NotchTask, onToggle: () -> Unit, onRename: () -> Unit,
                     .border(1.5.dp, if (task.done) Palette.Mint else Palette.TextFaint, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                if (task.done) Icon(Icons.Default.Check, contentDescription = "Done", tint = Palette.Ink, modifier = Modifier.size(15.dp))
+                if (task.done) Icon(Icons.Default.Check, contentDescription = "Done", tint = Palette.OnAccent, modifier = Modifier.size(15.dp))
             }
         }
         Text(
@@ -404,7 +404,7 @@ private fun TaskRow(task: NotchTask, onToggle: () -> Unit, onRename: () -> Unit,
         )
         Text(
             "Remove",
-            color = Palette.Coral,
+            color = Palette.CoralText,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clip(CircleShape).clickable(onClick = onDelete).padding(horizontal = 10.dp, vertical = 12.dp),

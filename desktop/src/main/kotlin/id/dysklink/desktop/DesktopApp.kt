@@ -152,6 +152,7 @@ class DesktopApp(private val scope: CoroutineScope) {
     fun setTrayMenu(config: TrayMenuConfig) {
         _trayMenu.value = config
         config.save(settings)
+        energy.setTray(TraySection.EnergyApp in config.shown)
     }
 
     /** DyskLink's own rows in the Launcher, for what's on now. */
@@ -197,6 +198,8 @@ class DesktopApp(private val scope: CoroutineScope) {
 
     /** The laptop's battery; its view stays null on a PC without one. */
     val battery = BatteryMonitor(scope, Platform.dataDir)
+    /** Apps using significant energy, in the Battery section and the tray. */
+    val energy = EnergyMonitor(scope, battery.view)
 
     /** `dysklink --clipboard` from a desktop shortcut, and a second start, reach this one through it. */
     private val instance = SingleInstance(Platform.dataDir)
@@ -681,6 +684,8 @@ class DesktopApp(private val scope: CoroutineScope) {
         windowTidy.start()
         launcher.start()
         battery.start()
+        energy.setTray(TraySection.EnergyApp in _trayMenu.value.shown)
+        energy.start()
         instance.listen { command ->
             when {
                 command == SingleInstance.CLIPBOARD -> clipHistory.requestPicker()
@@ -709,6 +714,7 @@ class DesktopApp(private val scope: CoroutineScope) {
         windowTidy.stop()
         launcher.stop()
         battery.stop()
+        energy.stop()
         instance.close()
         ringer.stop()
         speaker.stop()

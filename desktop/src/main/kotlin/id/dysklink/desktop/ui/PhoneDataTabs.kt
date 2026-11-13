@@ -110,7 +110,7 @@ private fun ContactRow(contact: ContactItem, canSms: Boolean, onCopy: (String) -
         val palette = listOf(colors.violet, colors.mint, colors.amber, colors.coral, colors.sky)
         val tint = palette[Math.floorMod(contact.name.hashCode(), palette.size)]
         Box(Modifier.size(34.dp).background(tint.copy(alpha = 0.22f), CircleShape), contentAlignment = Alignment.Center) {
-            Text(ContactSearch.initials(contact.name), color = tint, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+            Text(ContactSearch.initials(contact.name), color = colors.text(tint), fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {

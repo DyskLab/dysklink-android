@@ -169,7 +169,7 @@ fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, kin
                         val on = option == language
                         Text(
                             option.label,
-                            color = if (on) Palette.Ink else Palette.TextSecondary,
+                            color = if (on) Palette.OnAccent else Palette.TextSecondary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier
@@ -211,7 +211,7 @@ fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, kin
                         androidx.compose.material3.Icon(
                             if (wanted) FlatIcons.stop else FlatIcons.mic,
                             contentDescription = if (wanted) "Stop" else "Talk",
-                            tint = Palette.Ink,
+                            tint = Palette.OnAccent,
                             modifier = Modifier.size(42.dp),
                         )
                     }
@@ -244,7 +244,7 @@ fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, kin
                 }
                 problem?.let {
                     Spacer(Modifier.height(10.dp))
-                    Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+                    Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
                 }
             }
 

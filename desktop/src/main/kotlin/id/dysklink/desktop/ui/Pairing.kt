@@ -80,7 +80,7 @@ private fun Heading(title: String, detail: String) {
 @Composable
 private fun ErrorLine(text: String) {
     Spacer(Modifier.height(Space.sm))
-    Text(text, color = Dysk.colors.coral, fontSize = 12.5.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
+    Text(text, color = Dysk.colors.coralText, fontSize = 12.5.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
 }
 
 @Composable

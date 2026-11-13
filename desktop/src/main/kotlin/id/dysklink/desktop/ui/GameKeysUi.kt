@@ -710,7 +710,7 @@ private fun Inspector(game: GameKeysController, key: GameKey) {
                         .clickable { game.capture = if (waiting) null else Capture.Key(key.id); game.refocus() },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(if (waiting) "Press a key..." else key.label, color = if (waiting) colors.amber else colors.textPrimary, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                    Text(if (waiting) "Press a key..." else key.label, color = if (waiting) colors.amberText else colors.textPrimary, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -833,7 +833,7 @@ private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) 
 private fun Label(text: String) = Text(text, color = Dysk.colors.textSecondary, fontSize = 11.sp)
 
 @Composable
-private fun Note(text: String, color: Color = Dysk.colors.textSecondary) = Text(text, color = color, fontSize = 11.sp, lineHeight = 15.sp)
+private fun Note(text: String, color: Color = Dysk.colors.textSecondary) = Text(text, color = Dysk.colors.text(color), fontSize = 11.sp, lineHeight = 15.sp)
 
 /** A small choice button, filled when it's the one chosen. */
 @Composable

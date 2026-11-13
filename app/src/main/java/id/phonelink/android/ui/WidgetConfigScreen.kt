@@ -58,7 +58,7 @@ fun ShortcutsConfigScreen(start: List<WidgetShortcut>, onSave: (List<WidgetShort
                                 fontSize = 15.sp,
                                 modifier = Modifier.weight(1f).padding(start = 8.dp),
                             )
-                            if (index >= 0) Text("${index + 1}", color = Palette.Mint, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            if (index >= 0) Text("${index + 1}", color = Palette.MintText, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }

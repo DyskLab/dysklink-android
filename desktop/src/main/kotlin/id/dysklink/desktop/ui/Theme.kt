@@ -30,6 +30,12 @@ data class DyskColors(
     val violet: Color,
     val amber: Color,
     val coral: Color,
+    /** Text in an accent: the bright accent on dark, a deeper one on light that reads at 4.5:1 or more on every panel. */
+    val mintText: Color,
+    val skyText: Color,
+    val violetText: Color,
+    val amberText: Color,
+    val coralText: Color,
     /** Text and icons on a solid mint pill or button. */
     val onAccent: Color,
     /** A faint fill behind small icons, as Color.white.opacity(0.06) on the Mac. */
@@ -37,6 +43,16 @@ data class DyskColors(
 ) {
     val logo = Color(0xFF14B8A6)
     val accentGradient: Brush get() = Brush.linearGradient(listOf(mint, sky, violet))
+
+    /** The text-safe version of an accent, for views that take one colour for both a dot and a label. */
+    fun text(color: Color): Color = when (color) {
+        mint -> mintText
+        sky -> skyText
+        violet -> violetText
+        amber -> amberText
+        coral -> coralText
+        else -> color
+    }
 
     fun battery(percent: Int): Color = when {
         percent <= 15 -> coral
@@ -61,11 +77,20 @@ val DarkColors = DyskColors(
     violet = Color(0xFF8B7BFF),
     amber = Color(0xFFFFC35C),
     coral = Color(0xFFFF6F7D),
+    mintText = Color(0xFF5EF2C2),
+    skyText = Color(0xFF4CC9F0),
+    violetText = Color(0xFF8B7BFF),
+    amberText = Color(0xFFFFC35C),
+    coralText = Color(0xFFFF6F7D),
     onAccent = Color(0xFF090D13),
     iconWell = Color(0x0FFFFFFF),
 )
 
-/** The same hues, deep enough to read on white. */
+/**
+ * The light theme. The bright accents are for fills, rings, bars, icons, and large titles (3:1 or more on the
+ * panel); text uses the *Text accents, which read at 4.5:1 or more on the panel, raised panel, background, and
+ * sidebar. onAccent is the dark ink, since white on the light accents is only about 3:1. Same values as the Mac.
+ */
 val LightColors = DyskColors(
     isDark = false,
     ink = Color(0xFF090D13),
@@ -76,13 +101,18 @@ val LightColors = DyskColors(
     stroke = Color(0x1A0B1220),
     textPrimary = Color(0xFF111723),
     textSecondary = Color(0xFF4F5B6C),
-    textFaint = Color(0xFF8590A0),
+    textFaint = Color(0xFF5F6A7B),
     mint = Color(0xFF0FA67A),
     sky = Color(0xFF1A8FC2),
     violet = Color(0xFF6A5AE0),
     amber = Color(0xFFC07F00),
     coral = Color(0xFFD9434F),
-    onAccent = Color(0xFFFFFFFF),
+    mintText = Color(0xFF057553),
+    skyText = Color(0xFF0B6A99),
+    violetText = Color(0xFF5847D6),
+    amberText = Color(0xFF8A5A00),
+    coralText = Color(0xFFB42333),
+    onAccent = Color(0xFF090D13),
     iconWell = Color(0x0D0B1220),
 )
 

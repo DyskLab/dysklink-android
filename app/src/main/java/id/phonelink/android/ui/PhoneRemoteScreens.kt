@@ -110,7 +110,7 @@ private fun CardTitle(text: String) {
 
 @Composable
 private fun Note(text: String, color: Color = Palette.TextSecondary) {
-    Text(text, color = color, fontSize = 12.sp, lineHeight = 17.sp)
+    Text(text, color = Palette.text(color), fontSize = 12.sp, lineHeight = 17.sp)
 }
 
 @Composable
@@ -318,7 +318,7 @@ private fun QuietCard(peer: Peer, link: PhoneRemoteLink, reply: Envelope?) {
 @Composable
 private fun Chip(label: String, color: Color, selected: Boolean = false, onClick: () -> Unit) {
     Text(
-        label, color = if (selected) Palette.Ink else color, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+        label, color = if (selected) Palette.OnAccent else Palette.text(color), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
         modifier = Modifier.clip(CircleShape).background(if (selected) color else color.copy(alpha = 0.14f))
             .border(1.dp, color.copy(alpha = 0.4f), CircleShape).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp),
     )

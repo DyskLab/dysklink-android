@@ -43,6 +43,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,9 +68,16 @@ import id.phonelink.android.core.Dictation
 import id.phonelink.android.core.InputEvent
 import java.util.UUID
 
-private val deckColors = listOf(Palette.Mint, Palette.Sky, Palette.Violet, Palette.Amber, Palette.Coral, Palette.TextSecondary)
-
-private fun deckColor(index: Int): Color = deckColors.getOrElse(index) { Palette.Mint }
+@Composable
+@ReadOnlyComposable
+private fun deckColor(index: Int): Color = when (index) {
+    1 -> Palette.Sky
+    2 -> Palette.Violet
+    3 -> Palette.Amber
+    4 -> Palette.Coral
+    5 -> Palette.TextSecondary
+    else -> Palette.Mint
+}
 
 @Composable
 fun DeckScreen(
@@ -159,13 +167,13 @@ fun DeckScreen(
                         connected -> "Buttons run on $macName."
                         else -> "Not connected to $macName. OBS buttons still work."
                     },
-                    color = if (connected || editing) Palette.TextSecondary else Palette.Amber,
+                    color = if (connected || editing) Palette.TextSecondary else Palette.AmberText,
                     fontSize = 13.sp,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     if (editing) "Done" else "Edit",
-                    color = Palette.Ink,
+                    color = Palette.OnAccent,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
@@ -281,7 +289,7 @@ fun DeckScreen(
                 TextButton(onClick = {
                     save(Deck.defaults)
                     confirmReset = false
-                }) { Text("Reset", color = Palette.Coral) }
+                }) { Text("Reset", color = Palette.CoralText) }
             },
             dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
         )
@@ -350,14 +358,14 @@ private fun DeckTile(
                     "record" -> "● REC"
                     else -> if (button.value.startsWith("mute:")) "MUTED" else "ON"
                 },
-                color = color,
+                color = Palette.text(color),
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
             )
         } else if (!compact) {
             Text(
                 detail,
-                color = if (enabled) color else Palette.TextFaint,
+                color = if (enabled) Palette.text(color) else Palette.TextFaint,
                 fontSize = 10.sp,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
@@ -387,7 +395,7 @@ private fun AddTile(onClick: () -> Unit) {
 private fun Chip(text: String, on: Boolean, color: Color = Palette.Mint, onClick: () -> Unit) {
     Text(
         text,
-        color = if (on) Palette.Ink else Palette.TextSecondary,
+        color = if (on) Palette.OnAccent else Palette.TextSecondary,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
@@ -484,7 +492,7 @@ private fun ButtonEditor(
                 }
                 Text(
                     if (showAllIcons) "Fewer icons" else "All ${allIcons.size - 1} icons",
-                    color = Palette.Mint,
+                    color = Palette.MintText,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(CircleShape).clickable { showAllIcons = !showAllIcons }.padding(vertical = 4.dp),
@@ -545,7 +553,7 @@ private fun ButtonEditor(
                     DeckKind.Command -> if (commands.isEmpty()) {
                         Text(
                             "This $computer has no commands yet. Add them in DyskLink on the $computer, under Commands.",
-                            color = Palette.Amber,
+                            color = Palette.AmberText,
                             fontSize = 12.sp,
                             lineHeight = 16.sp,
                         )
@@ -566,7 +574,7 @@ private fun ButtonEditor(
                     }
                     Text(
                         "Delete this button",
-                        color = Palette.Coral,
+                        color = Palette.CoralText,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.clip(CircleShape).clickable(onClick = onDelete).padding(vertical = 6.dp),
@@ -578,7 +586,7 @@ private fun ButtonEditor(
                 Modifier.fillMaxWidth().background(Palette.Panel).padding(horizontal = 20.dp, vertical = 14.dp).navigationBarsPadding(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                missing(draft)?.let { Text(it, color = Palette.Amber, fontSize = 12.sp) }
+                missing(draft)?.let { Text(it, color = Palette.AmberText, fontSize = 12.sp) }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SecondaryButton("Cancel", Modifier.weight(1f), onClick = onDismiss)
                     PrimaryButton("Save", Modifier.weight(1f).alpha(if (valid) 1f else 0.4f)) { if (valid) onSave(draft) }
@@ -606,7 +614,7 @@ private fun ObsActionPicker(obs: ObsState, value: String, onPick: (ObsAction) ->
     if (obs.status != ObsState.Status.Connected) {
         Text(
             "Connect to OBS first, in the OBS card under the buttons. Then its scenes, audio, and sources show up here.",
-            color = Palette.Amber,
+            color = Palette.AmberText,
             fontSize = 12.sp,
             lineHeight = 16.sp,
         )
@@ -663,7 +671,7 @@ private fun ObsCard(obs: ObsState, prefs: android.content.SharedPreferences, cli
             }
             Text(
                 if (open) "Hide" else "Settings",
-                color = Palette.Mint,
+                color = Palette.MintText,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.clip(CircleShape).clickable { open = !open }.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -671,7 +679,7 @@ private fun ObsCard(obs: ObsState, prefs: android.content.SharedPreferences, cli
         }
         obs.error?.let {
             Spacer(Modifier.height(6.dp))
-            Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 16.sp)
+            Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 16.sp)
         }
         if (open) {
             Spacer(Modifier.height(10.dp))
@@ -750,7 +758,7 @@ private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: Str
     val preview = Deck.normalizeShortcut(value)
     Text(
         preview?.let { (if (kind == "Mac") "On the Mac: " else "On a Mac: ") + Deck.describeShortcut(it) } ?: "Pick a ready-made shortcut, or tap the keys below.",
-        color = if (preview != null) Palette.Mint else Palette.TextSecondary,
+        color = if (preview != null) Palette.MintText else Palette.TextSecondary,
         fontSize = if (preview != null) 16.sp else 12.sp,
         fontWeight = if (preview != null) FontWeight.Bold else FontWeight.Normal,
     )
@@ -771,7 +779,7 @@ private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: Str
     }
     Text(
         if (showAll) "Show fewer" else "Show all ${Deck.commonShortcuts.size}",
-        color = Palette.Mint,
+        color = Palette.MintText,
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(CircleShape).clickable { showAll = !showAll }.padding(vertical = 4.dp),

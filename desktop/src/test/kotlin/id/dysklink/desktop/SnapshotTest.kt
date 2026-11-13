@@ -243,9 +243,16 @@ class SnapshotTest {
         override fun open(file: File) {}
     }
 
+    /** `DYSKLINK_SNAPSHOT_APPEARANCE=light` or `dark` draws every snapshot in that theme, for comparing the two. */
+    private val forcedDark: Boolean? = when (System.getenv("DYSKLINK_SNAPSHOT_APPEARANCE")) {
+        "light" -> false
+        "dark" -> true
+        else -> null
+    }
+
     private fun shoot(dir: File, name: String, model: DeskModel, ui: UiState = UiState(), dark: Boolean = true, height: Int = 700) {
         val scene = ImageComposeScene(1040 * 3 / 2, height * 3 / 2, Density(1.5f)) {
-            DyskTheme(dark) { MainScreen(model, ui, pickFiles = { emptyList() }, radarProgress = 0.45f, firewallAfterMs = 0) }
+            DyskTheme(forcedDark ?: dark) { MainScreen(model, ui, pickFiles = { emptyList() }, radarProgress = 0.45f, firewallAfterMs = 0) }
         }
         scene.render()
         val image = scene.render(1_000_000_000)
@@ -291,7 +298,7 @@ class SnapshotTest {
     }
 
     private fun shootContent(dir: File, name: String, width: Int, height: Int, dark: Boolean = true, content: @androidx.compose.runtime.Composable () -> Unit) {
-        val scene = ImageComposeScene(width * 3 / 2, height * 3 / 2, Density(1.5f)) { DyskTheme(dark) { content() } }
+        val scene = ImageComposeScene(width * 3 / 2, height * 3 / 2, Density(1.5f)) { DyskTheme(forcedDark ?: dark) { content() } }
         scene.render()
         val image = scene.render(1_000_000_000)
         File(dir, "$name.png").writeBytes(image.encodeToData(EncodedImageFormat.PNG)!!.bytes)
@@ -754,6 +761,18 @@ class SnapshotTest {
         shootContent(dir, "82-battery-windows-dark", 900, 900) { id.dysklink.desktop.ui.BatteryContent(battery) }
         shootContent(dir, "82b-battery-windows-light", 900, 900, dark = false) { id.dysklink.desktop.ui.BatteryContent(battery) }
         shootContent(dir, "82c-battery-linux-dark", 640, 1000) { id.dysklink.desktop.ui.BatteryContent(linuxBattery) }
+        val energyApps = listOf(
+            EnergyApp("chrome.exe", "Google Chrome", 74.0, ImpactLevel.High, 3.1),
+            EnergyApp("code.exe", "Visual Studio Code", 31.0, ImpactLevel.Medium, 1.3),
+            EnergyApp("spotify.exe", "Spotify", 12.0, ImpactLevel.Low, 0.5),
+        )
+        val onBattery = EnergyView(energyApps, loadPercent = 14.0, batteryWatts = 11.2, loadWatts = 4.2, onBattery = true, gpu = true, ready = true)
+        val plugged = EnergyView(energyApps.map { it.copy(watts = null) }, loadPercent = 9.0, ready = true)
+        shootContent(dir, "82d-battery-energy-apps-dark", 900, 1250) { id.dysklink.desktop.ui.BatteryContent(battery, onBattery) }
+        shootContent(dir, "82e-battery-energy-plugged-light", 900, 1250, dark = false) { id.dysklink.desktop.ui.BatteryContent(battery, plugged) }
+        shootContent(dir, "82f-battery-energy-none-linux", 640, 1350) {
+            id.dysklink.desktop.ui.BatteryContent(linuxBattery, EnergyView(loadPercent = 3.0, batteryWatts = 9.3, loadWatts = 1.6, onBattery = true, ready = true))
+        }
         assertTrue(File(dir, "81-clipboard-picker.png").length() > 0)
     }
 

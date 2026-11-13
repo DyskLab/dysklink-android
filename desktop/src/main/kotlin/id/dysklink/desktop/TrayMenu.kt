@@ -6,6 +6,7 @@ import id.phonelink.android.core.HubPhone
 enum class TraySection(val label: String, val needs: String?, private val block: Int) {
     Open("Open DyskLink", null, 0),
     Battery("This PC's battery", "Shows on a PC with a battery", 1),
+    EnergyApp("Top energy app", "Shows on battery when an app uses significant energy", 1),
     Pomodoro("Pomodoro", null, 1),
     Water("Drink a glass of water", null, 1),
     Tools("Tools", null, 1),
@@ -64,6 +65,8 @@ data class TrayMenuState(
     val pomodoroRunning: Boolean = false,
     val pomodoroStarted: Boolean = false,
     val battery: String? = null,
+    /** The app using the most energy, such as "Google Chrome (high)", while one is above the threshold. */
+    val topEnergyApp: String? = null,
     val clipboardHistory: Boolean = false,
     val pcCare: Boolean = false,
     val launcher: Boolean = false,
@@ -95,6 +98,7 @@ object TrayMenu {
                 when (section) {
                     TraySection.Open -> add(TrayEntry.Item("Open DyskLink", onClick = actions.open))
                     TraySection.Battery -> state.battery?.let { add(TrayEntry.Item("Battery: $it", enabled = false)) }
+                    TraySection.EnergyApp -> state.topEnergyApp?.let { add(TrayEntry.Item("Top energy app: $it", enabled = false)) }
                     TraySection.Pomodoro -> {
                         state.trayStatus?.let { add(TrayEntry.Item(it, enabled = false)) }
                         add(TrayEntry.Item(if (state.pomodoroRunning) "Pause focus" else if (state.pomodoroStarted) "Resume focus" else "Start focus", onClick = actions.togglePomodoro))

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -61,6 +62,8 @@ private fun rememberPomodoroNow(running: Boolean): Long {
     return now
 }
 
+@Composable
+@ReadOnlyComposable
 private fun phaseColor(phase: PomodoroPhase): Color = when (phase) {
     PomodoroPhase.Focus -> Palette.Coral
     PomodoroPhase.ShortBreak -> Palette.Mint
@@ -101,7 +104,7 @@ fun PomodoroScreen(onBack: () -> Unit, openExactAlarms: () -> Unit) {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     PomodoroRing(state.progress(now, settings), color, Modifier.size(210.dp))
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(state.title(settings), color = color, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text(state.title(settings), color = Palette.text(color), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Text(PomodoroState.clock(state.remaining(now, settings)), color = Palette.TextPrimary, fontSize = 40.sp, fontWeight = FontWeight.Bold)
                         Text(
                             when {
@@ -199,7 +202,7 @@ private fun SessionDots(state: PomodoroState, settings: PomodoroSettings) {
                         when {
                             done -> Palette.Coral
                             current -> Palette.Coral.copy(alpha = 0.5f)
-                            else -> Color.White.copy(alpha = 0.12f)
+                            else -> Palette.Contrast.copy(alpha = 0.12f)
                         },
                     ),
             )
@@ -209,11 +212,12 @@ private fun SessionDots(state: PomodoroState, settings: PomodoroSettings) {
 
 @Composable
 private fun PomodoroRing(progress: Float, color: Color, modifier: Modifier) {
+    val track = Palette.Contrast.copy(alpha = 0.08f)
     Canvas(modifier) {
         val stroke = 12.dp.toPx()
         val inset = stroke / 2
         val arcSize = Size(size.width - stroke, size.height - stroke)
-        drawArc(Color.White.copy(alpha = 0.08f), 0f, 360f, false, Offset(inset, inset), arcSize, style = Stroke(stroke))
+        drawArc(track, 0f, 360f, false, Offset(inset, inset), arcSize, style = Stroke(stroke))
         // The ring empties as the step runs down.
         val left = 1f - progress
         if (left > 0f) {

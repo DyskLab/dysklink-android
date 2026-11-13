@@ -80,7 +80,7 @@ internal fun ScanTargetPicker(title: String, targets: List<Peer>, selected: Stri
 internal fun ScanChip(text: String, on: Boolean, onClick: () -> Unit) {
     Text(
         text,
-        color = if (on) Palette.Ink else Palette.TextSecondary,
+        color = if (on) Palette.OnAccent else Palette.TextSecondary,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
@@ -98,7 +98,7 @@ internal fun ScanChip(text: String, on: Boolean, onClick: () -> Unit) {
 internal fun ScanAction(text: String, color: Color = Palette.TextSecondary, onClick: () -> Unit) {
     Text(
         text,
-        color = color,
+        color = Palette.text(color),
         fontSize = 12.5.sp,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,

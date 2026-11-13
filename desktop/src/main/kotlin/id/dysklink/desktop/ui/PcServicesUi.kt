@@ -194,7 +194,7 @@ fun CommandsSettings(model: DeskModel) {
                 if (model.addCommand(name, line)) { name = ""; line = "" } else problem = "Give it a name and a command line."
             }
         }
-        problem?.let { Spacer(Modifier.height(6.dp)); Text(it, color = colors.coral, fontSize = 12.sp) }
+        problem?.let { Spacer(Modifier.height(6.dp)); Text(it, color = colors.coralText, fontSize = 12.sp) }
     }
 }
 
@@ -279,7 +279,7 @@ fun SourceSettings(model: DeskModel, computersOn: Boolean) {
     Spacer(Modifier.height(Space.sm))
     val status = sourceStatus(mac, macs)
     if (status != null) {
-        Text(status, color = colors.amber, fontSize = 12.sp)
+        Text(status, color = colors.amberText, fontSize = 12.sp)
     } else {
         Body(
             "Push the pointer twice past the ${view.edge.wire} edge to move onto ${mac?.name}. To come home, push it back past the same edge on the Mac, " +

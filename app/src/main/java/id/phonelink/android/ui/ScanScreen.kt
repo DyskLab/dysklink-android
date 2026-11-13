@@ -170,13 +170,13 @@ fun ScanScreen(peers: List<Peer>, preselected: String?, onBack: () -> Unit, send
                     )
                     Spacer(Modifier.height(14.dp))
                     if (unavailable != null) {
-                        Text(unavailable, color = Palette.Amber, fontSize = 12.5.sp, lineHeight = 17.sp)
+                        Text(unavailable, color = Palette.AmberText, fontSize = 12.5.sp, lineHeight = 17.sp)
                     } else {
                         PrimaryButton(if (continuous) "Start scanning" else "Scan a code", Modifier.fillMaxWidth(), onClick = scan)
                     }
                     problem?.let {
                         Spacer(Modifier.height(8.dp))
-                        Text(it, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+                        Text(it, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
                     }
                     Spacer(Modifier.height(10.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -279,7 +279,7 @@ fun ScanScreen(peers: List<Peer>, preselected: String?, onBack: () -> Unit, send
             onDismissRequest = { confirmClear = false },
             title = { Text("Clear the history?") },
             text = { Text("All ${history.size} scanned codes are removed from this phone.") },
-            confirmButton = { TextButton(onClick = { confirmClear = false; save(emptyList()); shown = null }) { Text("Clear", color = Palette.Coral) } },
+            confirmButton = { TextButton(onClick = { confirmClear = false; save(emptyList()); shown = null }) { Text("Clear", color = Palette.CoralText) } },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
         )
     }
@@ -313,7 +313,7 @@ private fun writeCsv(context: Context, history: List<ScanRecord>): File {
 private fun HeaderAction(text: String, color: androidx.compose.ui.graphics.Color = Palette.Mint, onClick: () -> Unit) {
     Text(
         text,
-        color = color,
+        color = Palette.text(color),
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(CircleShape).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 4.dp),
@@ -357,7 +357,7 @@ private fun ResultCard(record: ScanRecord, typeOn: String?, onType: () -> Unit, 
     GlassCard {
         Text(
             "${record.format} · ${content.label}".uppercase(),
-            color = Palette.Mint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp,
+            color = Palette.MintText, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp,
         )
         Spacer(Modifier.height(8.dp))
         when (content) {

@@ -538,7 +538,7 @@ private fun ThreadRow(thread: SmsThread, selected: Boolean, onClick: () -> Unit)
             val first = thread.address.trim().firstOrNull()
             // A number gets a phone; a sender name such as a carrier gets its first letter.
             if (first == null || first.isDigit() || first == '+') DyskIcon(DyskIcons.Phone, colors.sky, 15.dp)
-            else Text(first.uppercase(), color = colors.sky, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            else Text(first.uppercase(), color = colors.skyText, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
@@ -572,7 +572,7 @@ private fun Bubble(text: String, outgoing: Boolean, detail: String, tint: Color?
         ) {
             SelectionContainer { Text(text, color = colors.textPrimary, fontSize = 13.sp, lineHeight = 18.sp) }
             Spacer(Modifier.height(2.dp))
-            Text(detail, color = tint ?: colors.textFaint, fontSize = 10.5.sp)
+            Text(detail, color = tint?.let { colors.text(it) } ?: colors.textFaint, fontSize = 10.5.sp)
         }
     }
 }

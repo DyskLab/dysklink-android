@@ -167,7 +167,7 @@ fun PrayerScreen(onBack: () -> Unit, openExactAlarms: () -> Unit) {
                     )
                 } else if (upcoming != null && today != null) {
                     Spacer(Modifier.height(14.dp))
-                    Text(upcoming.prayer.label, color = Palette.Mint, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(upcoming.prayer.label, color = Palette.MintText, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(upcoming.time.format(clockFormat), color = Palette.TextPrimary, fontSize = 40.sp, fontWeight = FontWeight.Bold)
                         Text(
@@ -193,7 +193,7 @@ fun PrayerScreen(onBack: () -> Unit, openExactAlarms: () -> Unit) {
                             ) {
                                 Text(
                                     time.prayer.label,
-                                    color = if (next) Palette.Mint else if (past) Palette.TextFaint else Palette.TextSecondary,
+                                    color = if (next) Palette.MintText else if (past) Palette.TextFaint else Palette.TextSecondary,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
                                 )
@@ -227,7 +227,7 @@ fun PrayerScreen(onBack: () -> Unit, openExactAlarms: () -> Unit) {
                             Spacer(Modifier.height(6.dp))
                             Text(
                                 "Android may send these a few minutes late. Allow alarms and reminders to get them on time.",
-                                color = Palette.Amber,
+                                color = Palette.AmberText,
                                 fontSize = 12.sp,
                                 lineHeight = 17.sp,
                             )
@@ -338,7 +338,7 @@ private fun WeatherBody(report: WeatherReport) {
                 if (day.rainChance > 0) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.material3.Icon(FlatIcons.rain, contentDescription = "Rain", tint = Palette.Sky, modifier = Modifier.size(11.dp))
-                        Text(" ${day.rainChance}%", color = Palette.Sky, fontSize = 11.sp)
+                        Text(" ${day.rainChance}%", color = Palette.SkyText, fontSize = 11.sp)
                     }
                 }
             }
@@ -400,7 +400,7 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
 private fun SmallLink(text: String, onClick: () -> Unit) {
     Text(
         text,
-        color = Palette.Mint,
+        color = Palette.MintText,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(CircleShape).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 6.dp),

@@ -90,7 +90,7 @@ fun StatusPill(text: String, color: Color) {
     ) {
         Box(Modifier.size(7.dp).background(color, CircleShape))
         Spacer(Modifier.width(6.dp))
-        Text(text, color = color, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+        Text(text, color = Dysk.colors.text(color), fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -233,7 +233,7 @@ fun SecondaryButton(text: String, tint: Color = Dysk.colors.textPrimary, enabled
         verticalAlignment = Alignment.CenterVertically,
     ) {
         icon?.let { DyskIcon(it, tint, 15.dp); Spacer(Modifier.width(8.dp)) }
-        Text(text, color = tint, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+        Text(text, color = colors.text(tint), fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -242,7 +242,7 @@ fun SecondaryButton(text: String, tint: Color = Dysk.colors.textPrimary, enabled
 fun TextAction(text: String, color: Color, onClick: () -> Unit) {
     Text(
         text, Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 6.dp, vertical = 4.dp),
-        color = color, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
+        color = Dysk.colors.text(color), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
     )
 }
 
@@ -326,12 +326,12 @@ fun Banner(text: String, color: Color, icon: ImageVector = DyskIcons.Info, actio
     ) {
         DyskIcon(icon, color, 15.dp)
         Spacer(Modifier.width(10.dp))
-        Text(text, Modifier.weight(1f), color = color, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Text(text, Modifier.weight(1f), color = Dysk.colors.text(color), fontSize = 13.sp, fontWeight = FontWeight.Medium)
         action?.let { (label, onClick) ->
             Text(
                 label, Modifier.clip(CircleShape).background(color.copy(alpha = 0.18f)).clickable(onClick = onClick)
                     .padding(horizontal = 12.dp, vertical = 5.dp),
-                color = color, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                color = Dysk.colors.text(color), fontSize = 12.sp, fontWeight = FontWeight.Bold,
             )
         }
     }
@@ -355,5 +355,5 @@ fun Title(text: String, size: TextUnit = 22.sp) {
 
 @Composable
 fun Body(text: String, color: Color = Dysk.colors.textSecondary, modifier: Modifier = Modifier) {
-    Text(text, modifier, color = color, fontSize = 13.sp, lineHeight = 18.sp)
+    Text(text, modifier, color = Dysk.colors.text(color), fontSize = 13.sp, lineHeight = 18.sp)
 }

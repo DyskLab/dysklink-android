@@ -108,7 +108,7 @@ fun WaterScreen(onBack: () -> Unit) {
                         Text("of ${WaterLog.amount(settings.goalMl)}", color = Palette.TextSecondary, fontSize = 13.sp)
                         Text(
                             if (total >= settings.goalMl) "Goal reached" else "${(log.fraction(now, zone) * 100).toInt()}%",
-                            color = Palette.Sky,
+                            color = Palette.SkyText,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                         )
@@ -187,14 +187,17 @@ private fun nextReminderText(log: WaterLog, now: Long, zone: ZoneId): String {
 
 @Composable
 private fun WaterRing(fraction: Float, modifier: Modifier) {
+    val track = Palette.Contrast.copy(alpha = 0.08f)
+    val sky = Palette.Sky
+    val light = if (Palette.IsDark) Color(0xFF6FD0FF) else Color(0xFF3FB6E8)
     Canvas(modifier) {
         val stroke = 14.dp.toPx()
         val inset = stroke / 2
         val arcSize = Size(size.width - stroke, size.height - stroke)
-        drawArc(Color.White.copy(alpha = 0.08f), 0f, 360f, false, Offset(inset, inset), arcSize, style = Stroke(stroke))
+        drawArc(track, 0f, 360f, false, Offset(inset, inset), arcSize, style = Stroke(stroke))
         if (fraction > 0f) {
             drawArc(
-                Brush.sweepGradient(listOf(Color(0xFF6FD0FF), Palette.Sky, Color(0xFF4A63F5), Color(0xFF6FD0FF))),
+                Brush.sweepGradient(listOf(light, sky, Color(0xFF4A63F5), light)),
                 -90f,
                 360f * fraction,
                 false,
@@ -220,7 +223,7 @@ private fun WeekChart(days: List<Pair<LocalDate, Int>>, goal: Int, today: LocalD
                 )
                 Spacer(Modifier.height(4.dp))
                 Box(
-                    Modifier.weight(1f).width(18.dp).clip(RoundedCornerShape(9.dp)).background(Color.White.copy(alpha = 0.06f)),
+                    Modifier.weight(1f).width(18.dp).clip(RoundedCornerShape(9.dp)).background(Palette.Contrast.copy(alpha = 0.06f)),
                     contentAlignment = Alignment.BottomCenter,
                 ) {
                     if (ml > 0) {

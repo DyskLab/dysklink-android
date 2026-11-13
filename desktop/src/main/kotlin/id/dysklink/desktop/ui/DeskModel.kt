@@ -194,6 +194,9 @@ interface DeskModel {
     fun pickDittoFile(): File? = null
     /** Null on a PC without a battery, and the section is hidden. */
     val battery: StateFlow<id.dysklink.desktop.BatteryView?>? get() = null
+    /** Apps using significant energy, sampled while [watchEnergy] says the card is on screen. */
+    val energy: StateFlow<id.dysklink.desktop.EnergyView?>? get() = null
+    fun watchEnergy(on: Boolean) {}
     val isWindows: Boolean get() = id.dysklink.desktop.Platform.isWindows
     /** PC care on the Tools page: cleaner, duplicates, uninstall, startup. Null where it isn't offered. */
     val pcCare: id.dysklink.desktop.PcCareModel? get() = null

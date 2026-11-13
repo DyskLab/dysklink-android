@@ -88,12 +88,13 @@ fun Radar(modifier: Modifier = Modifier) {
         animationSpec = infiniteRepeatable(tween(2700, easing = LinearEasing), RepeatMode.Restart),
         label = "radar-progress",
     )
+    val mint = Palette.Mint
     Box(modifier.size(230.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxWidth().fillMaxHeight()) {
             repeat(3) { index ->
                 val phase = (progress + index / 3f) % 1f
                 drawCircle(
-                    Palette.Mint.copy(alpha = 0.55f * (1 - phase)),
+                    mint.copy(alpha = 0.55f * (1 - phase)),
                     radius = this.size.minDimension / 2 * (0.25f + 0.75f * phase),
                     style = Stroke(1.5.dp.toPx()),
                 )
@@ -103,7 +104,7 @@ fun Radar(modifier: Modifier = Modifier) {
             Modifier.size(74.dp).clip(CircleShape).background(Palette.Accent),
             contentAlignment = Alignment.Center,
         ) {
-            LaptopGlyph(Palette.Ink, Modifier.size(40.dp))
+            LaptopGlyph(Palette.OnAccent, Modifier.size(40.dp))
         }
     }
 }
@@ -112,7 +113,7 @@ fun Radar(modifier: Modifier = Modifier) {
 fun StorageBar(free: Long, total: Long) {
     val used = ((total - free).toFloat() / total.coerceAtLeast(1)).coerceIn(0.02f, 1f)
     Box(
-        Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.08f)),
+        Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(Palette.Contrast.copy(alpha = 0.08f)),
     ) {
         Box(
             Modifier.fillMaxWidth(used).fillMaxHeight().clip(CircleShape)

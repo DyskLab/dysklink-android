@@ -209,172 +209,174 @@ fun PhoneScreenScreen(peerId: String, name: String, connected: Boolean, link: Ph
     }
     fun key(name: String) = link?.control(peerId, ControlEvent("key", key = name))
 
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹", color = Color.White, fontSize = 28.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = ::close).padding(horizontal = 12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(
-                    when (val s = state) {
-                        is ShareState.Showing -> buildString {
-                            append(if (controlling) "Controlling" else "Viewing")
-                            if (zoom > 1.01f) append(" · ${"%.1f".format(zoom)}x")
-                        }
-                        ShareState.Asking -> "Waiting for $name…"
-                        is ShareState.Stopped -> "Stopped"
-                    },
-                    color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, maxLines = 1,
-                )
+    ForceDark {
+        Column(Modifier.fillMaxSize().background(Color.Black)) {
+            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("‹", color = Color.White, fontSize = 28.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = ::close).padding(horizontal = 12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text(
+                        when (val s = state) {
+                            is ShareState.Showing -> buildString {
+                                append(if (controlling) "Controlling" else "Viewing")
+                                if (zoom > 1.01f) append(" · ${"%.1f".format(zoom)}x")
+                            }
+                            ShareState.Asking -> "Waiting for $name…"
+                            is ShareState.Stopped -> "Stopped"
+                        },
+                        color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, maxLines = 1,
+                    )
+                }
+                if (zoom > 1.01f) ShareChip("1x") { zoom = 1f; panX = 0f; panY = 0f }
             }
-            if (zoom > 1.01f) ShareChip("1x") { zoom = 1f; panX = 0f; panY = 0f }
-        }
 
-        Box(
-            Modifier.weight(1f).fillMaxWidth()
-                .onSizeChanged { viewW = it.width.toFloat(); viewH = it.height.toFloat() }
-                .pointerInput(state, controlling, link) {
-                    awaitEachGesture {
-                        val first = awaitFirstDown(requireUnconsumed = false)
-                        val downAt = System.currentTimeMillis()
-                        // 0 undecided, 1 one-finger touch on the other phone, 2 two-finger scroll, 3 zoom, 4 pan here
-                        var mode = 0
-                        var last = first.position
-                        var lastCentroid = Offset.Zero
-                        var lastSpread = 0f
-                        var lastSent = 0L
-                        var scrollAt = Offset.Zero
-                        while (true) {
-                            // A finger held still sends no events, so the long press is noticed by the clock too.
-                            val waitMs = LONG_PRESS_MS - (System.currentTimeMillis() - downAt)
-                            val event = if (controlling && mode == 0 && waitMs > 0) {
-                                withTimeoutOrNull(waitMs) { awaitPointerEvent() }
-                            } else {
-                                awaitPointerEvent()
-                            }
-                            if (event == null) {
-                                mode = 1
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                touch("down", first.position)
-                                continue
-                            }
-                            val pressed = event.changes.filter { it.pressed }
-                            if (pressed.isEmpty()) break
-                            val now = System.currentTimeMillis()
-                            if (pressed.size >= 2) {
-                                val a = pressed[0].position
-                                val b = pressed[1].position
-                                val centroid = Offset((a.x + b.x) / 2, (a.y + b.y) / 2)
-                                val spread = hypot(a.x - b.x, a.y - b.y)
-                                if (mode == 1) { touch("up", last); mode = 0 }
-                                if (mode != 2 && mode != 3) {
-                                    if (lastSpread == 0f) { lastSpread = spread; lastCentroid = centroid; continue }
-                                    if (abs(spread / lastSpread - 1) > 0.12f) mode = 3
-                                    else if ((centroid - lastCentroid).getDistance() > 14f) {
-                                        mode = 2
-                                        // A scroll on Android is one finger dragging: it starts where the two fingers are.
-                                        scrollAt = lastCentroid
-                                        if (controlling) touch("down", scrollAt)
-                                    } else continue
-                                }
-                                val delta = centroid - lastCentroid
-                                if (mode == 3 || !controlling) {
-                                    if (mode == 3) zoom = (zoom * spread / lastSpread).coerceIn(1f, 5f)
-                                    panX = MacScreenMath.clampPan(panX + delta.x, zoom, viewW)
-                                    panY = MacScreenMath.clampPan(panY + delta.y, zoom, viewH)
+            Box(
+                Modifier.weight(1f).fillMaxWidth()
+                    .onSizeChanged { viewW = it.width.toFloat(); viewH = it.height.toFloat() }
+                    .pointerInput(state, controlling, link) {
+                        awaitEachGesture {
+                            val first = awaitFirstDown(requireUnconsumed = false)
+                            val downAt = System.currentTimeMillis()
+                            // 0 undecided, 1 one-finger touch on the other phone, 2 two-finger scroll, 3 zoom, 4 pan here
+                            var mode = 0
+                            var last = first.position
+                            var lastCentroid = Offset.Zero
+                            var lastSpread = 0f
+                            var lastSent = 0L
+                            var scrollAt = Offset.Zero
+                            while (true) {
+                                // A finger held still sends no events, so the long press is noticed by the clock too.
+                                val waitMs = LONG_PRESS_MS - (System.currentTimeMillis() - downAt)
+                                val event = if (controlling && mode == 0 && waitMs > 0) {
+                                    withTimeoutOrNull(waitMs) { awaitPointerEvent() }
                                 } else {
-                                    scrollAt += delta
-                                    if (now - lastSent >= DRAG_MS) { touch("drag", scrollAt); lastSent = now }
+                                    awaitPointerEvent()
                                 }
-                                lastCentroid = centroid
-                                lastSpread = spread
-                                event.changes.forEach { it.consume() }
-                                continue
-                            }
-                            if (mode == 2 || mode == 3) continue
-                            val change = pressed[0]
-                            if (!controlling) {
-                                // View only: one finger moves a zoomed picture.
-                                if (zoom > 1.01f) {
-                                    val delta = change.position - last
-                                    panX = MacScreenMath.clampPan(panX + delta.x, zoom, viewW)
-                                    panY = MacScreenMath.clampPan(panY + delta.y, zoom, viewH)
-                                    mode = 4
-                                }
-                            } else {
-                                if (mode == 0 && (change.position - first.position).getDistance() > viewConfiguration.touchSlop) {
-                                    mode = 1
-                                    touch("down", first.position)
-                                }
-                                if (mode == 0 && now - downAt > LONG_PRESS_MS) {
-                                    // Held: the finger goes down there and stays, so the other phone sees a long press.
+                                if (event == null) {
                                     mode = 1
                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                     touch("down", first.position)
+                                    continue
                                 }
-                                if (mode == 1 && now - lastSent >= DRAG_MS && change.position != last) {
-                                    touch("drag", change.position)
-                                    lastSent = now
+                                val pressed = event.changes.filter { it.pressed }
+                                if (pressed.isEmpty()) break
+                                val now = System.currentTimeMillis()
+                                if (pressed.size >= 2) {
+                                    val a = pressed[0].position
+                                    val b = pressed[1].position
+                                    val centroid = Offset((a.x + b.x) / 2, (a.y + b.y) / 2)
+                                    val spread = hypot(a.x - b.x, a.y - b.y)
+                                    if (mode == 1) { touch("up", last); mode = 0 }
+                                    if (mode != 2 && mode != 3) {
+                                        if (lastSpread == 0f) { lastSpread = spread; lastCentroid = centroid; continue }
+                                        if (abs(spread / lastSpread - 1) > 0.12f) mode = 3
+                                        else if ((centroid - lastCentroid).getDistance() > 14f) {
+                                            mode = 2
+                                            // A scroll on Android is one finger dragging: it starts where the two fingers are.
+                                            scrollAt = lastCentroid
+                                            if (controlling) touch("down", scrollAt)
+                                        } else continue
+                                    }
+                                    val delta = centroid - lastCentroid
+                                    if (mode == 3 || !controlling) {
+                                        if (mode == 3) zoom = (zoom * spread / lastSpread).coerceIn(1f, 5f)
+                                        panX = MacScreenMath.clampPan(panX + delta.x, zoom, viewW)
+                                        panY = MacScreenMath.clampPan(panY + delta.y, zoom, viewH)
+                                    } else {
+                                        scrollAt += delta
+                                        if (now - lastSent >= DRAG_MS) { touch("drag", scrollAt); lastSent = now }
+                                    }
+                                    lastCentroid = centroid
+                                    lastSpread = spread
+                                    event.changes.forEach { it.consume() }
+                                    continue
                                 }
+                                if (mode == 2 || mode == 3) continue
+                                val change = pressed[0]
+                                if (!controlling) {
+                                    // View only: one finger moves a zoomed picture.
+                                    if (zoom > 1.01f) {
+                                        val delta = change.position - last
+                                        panX = MacScreenMath.clampPan(panX + delta.x, zoom, viewW)
+                                        panY = MacScreenMath.clampPan(panY + delta.y, zoom, viewH)
+                                        mode = 4
+                                    }
+                                } else {
+                                    if (mode == 0 && (change.position - first.position).getDistance() > viewConfiguration.touchSlop) {
+                                        mode = 1
+                                        touch("down", first.position)
+                                    }
+                                    if (mode == 0 && now - downAt > LONG_PRESS_MS) {
+                                        // Held: the finger goes down there and stays, so the other phone sees a long press.
+                                        mode = 1
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        touch("down", first.position)
+                                    }
+                                    if (mode == 1 && now - lastSent >= DRAG_MS && change.position != last) {
+                                        touch("drag", change.position)
+                                        lastSent = now
+                                    }
+                                }
+                                last = change.position
+                                if (change.positionChange() != Offset.Zero) change.consume()
                             }
-                            last = change.position
-                            if (change.positionChange() != Offset.Zero) change.consume()
-                        }
-                        if (controlling) when (mode) {
-                            0 -> { touch("down", first.position); touch("up", first.position) }
-                            1 -> touch("up", last)
-                            2 -> touch("up", scrollAt)
-                        }
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            val s = state
-            if (s is ShareState.Showing) {
-                AndroidView(
-                    factory = { ctx ->
-                        SurfaceView(ctx).apply {
-                            keepScreenOn = true
-                            holder.addCallback(object : SurfaceHolder.Callback {
-                                override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface }
-                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                                override fun surfaceDestroyed(holder: SurfaceHolder) { surface = null }
-                            })
+                            if (controlling) when (mode) {
+                                0 -> { touch("down", first.position); touch("up", first.position) }
+                                1 -> touch("up", last)
+                                2 -> touch("up", scrollAt)
+                            }
                         }
                     },
-                    modifier = Modifier
-                        .aspectRatio(s.width.toFloat() / s.height, matchHeightConstraintsFirst = viewW / viewH.coerceAtLeast(1f) > s.width.toFloat() / s.height)
-                        .graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = panX; translationY = panY },
-                )
-            }
-            when (s) {
-                ShareState.Asking -> Waiting("Asking $name for its screen. On $name, tap the DyskLink notification and allow sharing.")
-                is ShareState.Stopped -> StoppedNote(s.message, if (connected) "Ask again" else null, ::ask)
-                else -> Unit
-            }
-        }
-
-        val shown = state as? ShareState.Showing
-        if (shown != null && !shown.canControl) {
-            Text(
-                "View only. To control it, turn on \"Allow control\" for this phone on $name, and Accessibility for DyskLink there.",
-                color = Palette.Amber, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 16.sp,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            )
-        }
-        Row(
-            Modifier.fillMaxWidth().navigationBarsPadding().horizontalScroll(rememberScrollState()).padding(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (shown?.canControl == true) {
-                ShareChip(if (controlling) "Control: on" else "Control: off", active = controlling) { controlling = !controlling }
-                if (controlling) {
-                    ShareChip("Back") { key("back") }
-                    ShareChip("Home") { key("home") }
-                    ShareChip("Recents") { key("recents") }
+                contentAlignment = Alignment.Center,
+            ) {
+                val s = state
+                if (s is ShareState.Showing) {
+                    AndroidView(
+                        factory = { ctx ->
+                            SurfaceView(ctx).apply {
+                                keepScreenOn = true
+                                holder.addCallback(object : SurfaceHolder.Callback {
+                                    override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface }
+                                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                                    override fun surfaceDestroyed(holder: SurfaceHolder) { surface = null }
+                                })
+                            }
+                        },
+                        modifier = Modifier
+                            .aspectRatio(s.width.toFloat() / s.height, matchHeightConstraintsFirst = viewW / viewH.coerceAtLeast(1f) > s.width.toFloat() / s.height)
+                            .graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = panX; translationY = panY },
+                    )
+                }
+                when (s) {
+                    ShareState.Asking -> Waiting("Asking $name for its screen. On $name, tap the DyskLink notification and allow sharing.")
+                    is ShareState.Stopped -> StoppedNote(s.message, if (connected) "Ask again" else null, ::ask)
+                    else -> Unit
                 }
             }
-            ShareChip(if (landscape) "Portrait" else "Landscape") { landscape = !landscape }
-            if (shown != null) ShareChip("Stop") { close() }
+
+            val shown = state as? ShareState.Showing
+            if (shown != null && !shown.canControl) {
+                Text(
+                    "View only. To control it, turn on \"Allow control\" for this phone on $name, and Accessibility for DyskLink there.",
+                    color = Palette.AmberText, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 16.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+            Row(
+                Modifier.fillMaxWidth().navigationBarsPadding().horizontalScroll(rememberScrollState()).padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (shown?.canControl == true) {
+                    ShareChip(if (controlling) "Control: on" else "Control: off", active = controlling) { controlling = !controlling }
+                    if (controlling) {
+                        ShareChip("Back") { key("back") }
+                        ShareChip("Home") { key("home") }
+                        ShareChip("Recents") { key("recents") }
+                    }
+                }
+                ShareChip(if (landscape) "Portrait" else "Landscape") { landscape = !landscape }
+                if (shown != null) ShareChip("Stop") { close() }
+            }
         }
     }
 }
@@ -484,138 +486,140 @@ fun RemoteCameraScreen(peerId: String, name: String, connected: Boolean, link: P
         }
     }
 
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹", color = Color.White, fontSize = 28.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = ::close).padding(horizontal = 12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("$name camera", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(
-                    when (val s = state) {
-                        is ShareState.Showing -> buildString {
-                            append(if (s.front) "Front" else "Back")
-                            if (zoom > 1.01f) append(" · ${"%.1f".format(zoom)}x")
-                            if (s.camera?.recording == true) append(" · Recording")
-                        }
-                        ShareState.Asking -> "Waiting for $name…"
-                        is ShareState.Stopped -> "Stopped"
-                    },
-                    color = if ((state as? ShareState.Showing)?.camera?.recording == true) Palette.Coral else Color.White.copy(alpha = 0.55f),
-                    fontSize = 12.sp, maxLines = 1,
-                )
+    ForceDark {
+        Column(Modifier.fillMaxSize().background(Color.Black)) {
+            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("‹", color = Color.White, fontSize = 28.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = ::close).padding(horizontal = 12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("$name camera", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text(
+                        when (val s = state) {
+                            is ShareState.Showing -> buildString {
+                                append(if (s.front) "Front" else "Back")
+                                if (zoom > 1.01f) append(" · ${"%.1f".format(zoom)}x")
+                                if (s.camera?.recording == true) append(" · Recording")
+                            }
+                            ShareState.Asking -> "Waiting for $name…"
+                            is ShareState.Stopped -> "Stopped"
+                        },
+                        color = if ((state as? ShareState.Showing)?.camera?.recording == true) Palette.CoralText else Color.White.copy(alpha = 0.55f),
+                        fontSize = 12.sp, maxLines = 1,
+                    )
+                }
             }
-        }
 
-        Box(
-            Modifier.weight(1f).fillMaxWidth()
-                .onSizeChanged { viewW = it.width.toFloat(); viewH = it.height.toFloat() }
-                .pointerInput(state) {
-                    val max = (state as? ShareState.Showing)?.camera?.maxZoom ?: return@pointerInput
-                    detectTransformGestures { _, _, change, _ ->
-                        if (change != 1f) {
-                            zoom = (zoom * change).coerceIn(1f, max)
-                            sendZoom(zoom)
-                        }
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            val s = state
-            if (s is ShareState.Showing && viewW > 0 && viewH > 0) {
-                // The picture comes as the sensor sees it: turned here by the rotation the other phone sends.
-                val turned = s.rotation % 180 != 0
-                val shownW = if (turned) s.height.toFloat() else s.width.toFloat()
-                val shownH = if (turned) s.width.toFloat() else s.height.toFloat()
-                val box = MacScreenMath.fit(viewW, viewH, shownW, shownH)
-                val (texW, texH) = if (turned) box[3] to box[2] else box[2] to box[3]
-                AndroidView(
-                    factory = { ctx ->
-                        TextureView(ctx).apply {
-                            keepScreenOn = true
-                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) { surface = android.view.Surface(texture) }
-                                override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {}
-                                override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
-                                    surface?.release()
-                                    surface = null
-                                    return true
-                                }
-                                override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {}
+            Box(
+                Modifier.weight(1f).fillMaxWidth()
+                    .onSizeChanged { viewW = it.width.toFloat(); viewH = it.height.toFloat() }
+                    .pointerInput(state) {
+                        val max = (state as? ShareState.Showing)?.camera?.maxZoom ?: return@pointerInput
+                        detectTransformGestures { _, _, change, _ ->
+                            if (change != 1f) {
+                                zoom = (zoom * change).coerceIn(1f, max)
+                                sendZoom(zoom)
                             }
                         }
                     },
-                    modifier = Modifier
-                        .requiredSize(with(density) { texW.toDp() }, with(density) { texH.toDp() })
-                        .graphicsLayer { rotationZ = s.rotation.toFloat() },
-                )
+                contentAlignment = Alignment.Center,
+            ) {
+                val s = state
+                if (s is ShareState.Showing && viewW > 0 && viewH > 0) {
+                    // The picture comes as the sensor sees it: turned here by the rotation the other phone sends.
+                    val turned = s.rotation % 180 != 0
+                    val shownW = if (turned) s.height.toFloat() else s.width.toFloat()
+                    val shownH = if (turned) s.width.toFloat() else s.height.toFloat()
+                    val box = MacScreenMath.fit(viewW, viewH, shownW, shownH)
+                    val (texW, texH) = if (turned) box[3] to box[2] else box[2] to box[3]
+                    AndroidView(
+                        factory = { ctx ->
+                            TextureView(ctx).apply {
+                                keepScreenOn = true
+                                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                    override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) { surface = android.view.Surface(texture) }
+                                    override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {}
+                                    override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                                        surface?.release()
+                                        surface = null
+                                        return true
+                                    }
+                                    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {}
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .requiredSize(with(density) { texW.toDp() }, with(density) { texH.toDp() })
+                            .graphicsLayer { rotationZ = s.rotation.toFloat() },
+                    )
+                }
+                when (s) {
+                    ShareState.Asking -> Waiting("Asking $name for its camera. On $name, tap the DyskLink notification to start it.")
+                    is ShareState.Stopped -> StoppedNote(s.message, if (connected) "Ask again" else null, ::ask)
+                    else -> Unit
+                }
+                if (countdown > 0) {
+                    Text("$countdown", color = Color.White, fontSize = 96.sp, fontWeight = FontWeight.Bold)
+                }
             }
-            when (s) {
-                ShareState.Asking -> Waiting("Asking $name for its camera. On $name, tap the DyskLink notification to start it.")
-                is ShareState.Stopped -> StoppedNote(s.message, if (connected) "Ask again" else null, ::ask)
-                else -> Unit
-            }
-            if (countdown > 0) {
-                Text("$countdown", color = Color.White, fontSize = 96.sp, fontWeight = FontWeight.Bold)
-            }
-        }
 
-        val shown = state as? ShareState.Showing
-        val camera = shown?.camera
-        note?.let {
-            Text(it, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
-        }
-        if (camera != null && (camera.maxZoom ?: 1f) > 1.01f) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("1x", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
-                Slider(
-                    value = zoom,
-                    onValueChange = { zoom = it; sendZoom(it) },
-                    onValueChangeFinished = { sendZoom(zoom, force = true) },
-                    valueRange = 1f..(camera.maxZoom ?: 1f),
-                    colors = SliderDefaults.colors(thumbColor = Palette.Mint, activeTrackColor = Palette.Mint),
-                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                )
-                Text("${"%.0f".format(camera.maxZoom ?: 1f)}x", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+            val shown = state as? ShareState.Showing
+            val camera = shown?.camera
+            note?.let {
+                Text(it, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
             }
-        }
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (shown != null) {
-                ShareChip("Switch lens") { send(Envelope(MessageType.CAMERA_CONTROL, text = "switch")) }
-                if (camera?.flash == true) {
-                    ShareChip(if (camera.torch == true) "Torch: on" else "Torch: off", active = camera.torch == true) {
-                        send(Envelope(MessageType.CAMERA_CONTROL, text = "torch"))
-                    }
-                }
-                ShareChip(if (timer == 0) "Timer: off" else "Timer: $timer s", active = timer > 0) {
-                    timer = when (timer) { 0 -> 3; 3 -> 10; else -> 0 }
-                }
-                if (camera != null) {
-                    val recording = camera.recording == true
-                    ShareChip(if (recording) "Stop recording" else "Record video", active = recording) {
-                        send(Envelope(MessageType.CAMERA_CONTROL, text = if (recording) "record.stop" else "record.start"))
-                    }
+            if (camera != null && (camera.maxZoom ?: 1f) > 1.01f) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("1x", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                    Slider(
+                        value = zoom,
+                        onValueChange = { zoom = it; sendZoom(it) },
+                        onValueChangeFinished = { sendZoom(zoom, force = true) },
+                        valueRange = 1f..(camera.maxZoom ?: 1f),
+                        colors = SliderDefaults.colors(thumbColor = Palette.Mint, activeTrackColor = Palette.Mint),
+                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                    )
+                    Text("${"%.0f".format(camera.maxZoom ?: 1f)}x", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
                 }
             }
-        }
-        Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-            val ready = shown != null && camera?.stills == true && countdown == 0
-            Box(
-                Modifier
-                    .size(72.dp)
-                    .clip(CircleShape)
-                    .border(4.dp, Color.White.copy(alpha = if (ready) 1f else 0.3f), CircleShape)
-                    .padding(6.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = if (ready) 0.95f else 0.2f))
-                    .clickable(enabled = ready) { shutterRequest++ },
-            )
-            if (shown != null && camera?.stills != true) {
-                Text(
-                    "This camera can't take photos while streaming.",
-                    color = Palette.Amber, fontSize = 12.sp, modifier = Modifier.align(Alignment.BottomCenter),
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (shown != null) {
+                    ShareChip("Switch lens") { send(Envelope(MessageType.CAMERA_CONTROL, text = "switch")) }
+                    if (camera?.flash == true) {
+                        ShareChip(if (camera.torch == true) "Torch: on" else "Torch: off", active = camera.torch == true) {
+                            send(Envelope(MessageType.CAMERA_CONTROL, text = "torch"))
+                        }
+                    }
+                    ShareChip(if (timer == 0) "Timer: off" else "Timer: $timer s", active = timer > 0) {
+                        timer = when (timer) { 0 -> 3; 3 -> 10; else -> 0 }
+                    }
+                    if (camera != null) {
+                        val recording = camera.recording == true
+                        ShareChip(if (recording) "Stop recording" else "Record video", active = recording) {
+                            send(Envelope(MessageType.CAMERA_CONTROL, text = if (recording) "record.stop" else "record.start"))
+                        }
+                    }
+                }
+            }
+            Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+                val ready = shown != null && camera?.stills == true && countdown == 0
+                Box(
+                    Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .border(4.dp, Color.White.copy(alpha = if (ready) 1f else 0.3f), CircleShape)
+                        .padding(6.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = if (ready) 0.95f else 0.2f))
+                        .clickable(enabled = ready) { shutterRequest++ },
                 )
+                if (shown != null && camera?.stills != true) {
+                    Text(
+                        "This camera can't take photos while streaming.",
+                        color = Palette.AmberText, fontSize = 12.sp, modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
             }
         }
     }
@@ -643,7 +647,7 @@ private fun StoppedNote(message: String, action: String?, onAction: () -> Unit) 
 private fun ShareChip(label: String, active: Boolean = false, onClick: () -> Unit) {
     Text(
         label,
-        color = if (active) Palette.Ink else Color.White,
+        color = if (active) Palette.OnAccent else Color.White,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier

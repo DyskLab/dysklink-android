@@ -39,6 +39,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
@@ -426,7 +427,7 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                 Text(
                     "Accessibility permission is off on the Mac, so the touchpad, keyboard, and remotes won't work. " +
                         "Press Allow in the DyskLink app on the Mac.",
-                    color = Palette.Ink,
+                    color = if (Palette.IsDark) Palette.OnAccent else Palette.TextPrimary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     lineHeight = 18.sp,
@@ -567,6 +568,8 @@ private fun HomeScreen(
             ChargeCard(state.charge, state.chargeSessions, actions)
             Spacer(Modifier.height(24.dp))
             SectionLabel("APP")
+            AppearanceCard()
+            Spacer(Modifier.height(12.dp))
             UpdatesCard(state.updates, state.appVersion, actions)
             Spacer(Modifier.height(12.dp))
             SupportCard()
@@ -632,7 +635,7 @@ private fun HomeScreen(
 
         // A manual address attempt can fail even when the device is connected another way.
         state.lastError?.takeIf { state.peers.none(Peer::isConnected) }?.let {
-            Text(it, color = Palette.Coral, fontSize = 13.sp, modifier = Modifier.padding(bottom = 12.dp))
+            Text(it, color = Palette.CoralText, fontSize = 13.sp, modifier = Modifier.padding(bottom = 12.dp))
         }
 
         if (state.manualTargets.isNotEmpty()) {
@@ -656,7 +659,7 @@ private fun HomeScreen(
                         )
                         Text(
                             "Remove",
-                            color = Palette.Coral,
+                            color = Palette.CoralText,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier
@@ -683,11 +686,12 @@ enum class HomeTab(val label: String) { Devices("Devices"), Tools("Tools") }
 /** Two tabs at the bottom: the Macs on the left, the phone's own tools on the right. */
 @Composable
 private fun HomeTabBar(tab: HomeTab, connected: Int, updateReady: Boolean, onTab: (HomeTab) -> Unit) {
+    val stroke = Palette.Stroke
     Row(
         Modifier
             .fillMaxWidth()
             .background(Palette.Ink.copy(alpha = 0.92f))
-            .drawBehind { drawLine(Palette.Stroke, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }
+            .drawBehind { drawLine(stroke, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }
             .navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -726,7 +730,7 @@ private fun HomeTabBar(tab: HomeTab, connected: Int, updateReady: Boolean, onTab
                     Spacer(Modifier.width(6.dp))
                     Text(
                         it,
-                        color = Palette.Ink,
+                        color = Palette.OnAccent,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier
@@ -771,7 +775,7 @@ private fun ChargeCard(settings: ChargeReminder.Settings, sessions: List<ChargeS
                     val chosen = limit == settings.limit
                     Text(
                         "$limit%",
-                        color = if (chosen) Palette.Ink else Palette.TextSecondary,
+                        color = if (chosen) Palette.OnAccent else Palette.TextSecondary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
@@ -800,7 +804,7 @@ private fun ChargeCard(settings: ChargeReminder.Settings, sessions: List<ChargeS
                     Text(
                         if (end == null) "${session.startLevel}% → charging"
                         else "${session.startLevel}% → ${session.endLevel}% in ${((end - session.start) / 60_000).coerceAtLeast(1)} min",
-                        color = if (end == null) Palette.Mint else Palette.TextPrimary,
+                        color = if (end == null) Palette.MintText else Palette.TextPrimary,
                         fontSize = 12.sp,
                     )
                 }
@@ -820,7 +824,7 @@ private fun ChargeCard(settings: ChargeReminder.Settings, sessions: List<ChargeS
 @Composable
 private fun UpdateBanner(version: String, onDownload: () -> Unit, onSkip: () -> Unit) {
     GlassCard {
-        Text("DyskLink $version is available", color = Palette.Mint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text("DyskLink $version is available", color = Palette.MintText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text(
             "Download opens the new APK in your browser. Android asks before it installs, and your pairings stay.",
@@ -870,6 +874,39 @@ private fun UpdatesCard(updates: Updates.State, version: String, actions: UiActi
     }
 }
 
+/** System, Dark, or Light. Applies at once, since the theme reads the setting at the root. */
+@Composable
+private fun AppearanceCard() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val mode = AppearanceStore.mode(context)
+    GlassCard {
+        Text("Appearance", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "System follows the phone's dark theme setting.",
+            color = Palette.TextSecondary,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Appearance.entries.forEach { option ->
+                val chosen = option == mode
+                Text(
+                    option.label,
+                    color = if (chosen) Palette.OnAccent else Palette.TextSecondary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (chosen) Palette.Mint else Palette.PanelRaised)
+                        .clickable { AppearanceStore.set(context, option) }
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                )
+            }
+        }
+    }
+}
+
 /** Same as the Support card in the Mac app's Advanced page. */
 @Composable
 private fun SupportCard() {
@@ -900,7 +937,7 @@ private const val DONATION_URL = "https://buymeacoffee.com/fannydevz"
 @Composable
 private fun BackgroundCard(onAllow: () -> Unit, onOpenSettings: () -> Unit) {
     GlassCard {
-        Text("Keep the connection alive", color = Palette.Amber, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text("Keep the connection alive", color = Palette.AmberText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text(
             "Android can drop the connection to save battery. Allow DyskLink to run in the " +
@@ -937,7 +974,7 @@ private fun PeerCard(peer: Peer, onClick: () -> Unit) {
                 Modifier
                     .size(46.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(Color.White.copy(alpha = 0.06f)),
+                    .background(Palette.Contrast.copy(alpha = 0.06f)),
                 contentAlignment = Alignment.Center,
             ) {
                 if (peer.isPhone) {
@@ -961,13 +998,13 @@ private fun PeerCard(peer: Peer, onClick: () -> Unit) {
                         peer.isConnected -> "Connected"
                         else -> "Not connected"
                     },
-                    color = if (!peer.isPaired) Palette.Mint else Palette.TextSecondary,
+                    color = if (!peer.isPaired) Palette.MintText else Palette.TextSecondary,
                     fontSize = 13.sp,
                 )
             }
             val percent = peer.info?.batteryPercent
             if (peer.isConnected && percent != null) {
-                Text("$percent%", color = Palette.battery(percent), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text("$percent%", color = Palette.text(Palette.battery(percent)), fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -997,12 +1034,12 @@ private fun ChargeChip(label: String, on: Boolean, modifier: Modifier, onClick: 
     Box(
         modifier
             .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-            .background(if (on) Palette.Mint else Color.White.copy(alpha = 0.08f))
+            .background(if (on) Palette.Mint else Palette.Contrast.copy(alpha = 0.08f))
             .clickable(onClick = onClick)
             .padding(vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = if (on) Palette.Ink else Palette.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text(label, color = if (on) Palette.OnAccent else Palette.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -1178,7 +1215,7 @@ private fun DetailScreen(
                 if (peer.info?.inputTrusted == false) {
                     Text(
                         "The touchpad and keyboard are off on this PC. Turn on \"Phones can control this PC\" in DyskLink there. On Linux, also allow remote control when the PC asks, or follow the steps DyskLink shows there.",
-                        color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp,
+                        color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp,
                     )
                 }
             }
@@ -1313,7 +1350,7 @@ private fun DetailScreen(
         Spacer(Modifier.height(20.dp))
         Text(
             "Unpair this $kind",
-            color = Palette.Coral,
+            color = Palette.CoralText,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
@@ -1360,7 +1397,7 @@ private val Feature.icon: androidx.compose.ui.graphics.vector.ImageVector
     }
 
 private val Feature.tint: Color
-    get() = when (this) {
+    @Composable @ReadOnlyComposable get() = when (this) {
         Feature.Touchpad, Feature.Commands, Feature.Terminal -> Palette.Sky
         Feature.MacScreen -> Palette.Violet
         Feature.Camera -> Palette.Coral
@@ -1422,7 +1459,7 @@ internal fun QuickAction(
         Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(24.dp))
         Spacer(Modifier.height(6.dp))
         Text(label, color = Palette.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(detail, color = if (active) color else Palette.TextFaint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(detail, color = if (active) Palette.text(color) else Palette.TextFaint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1495,7 +1532,7 @@ internal fun PhotoSyncCard(peer: Peer) {
         }
         stopped[peer.id]?.takeIf { peer.isPhone }?.let { why ->
             Spacer(Modifier.height(8.dp))
-            Text(why, color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+            Text(why, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
         }
         val count = sent[peer.id] ?: 0
         if (on && canRead && count > 0) {
@@ -1503,7 +1540,7 @@ internal fun PhotoSyncCard(peer: Peer) {
             Text("$count photo${if (count == 1) "" else "s"} sent since DyskLink started", color = Palette.TextFaint, fontSize = 12.sp)
         } else if (on && !canRead) {
             Spacer(Modifier.height(8.dp))
-            Text("Allow DyskLink to read photos to send them.", color = Palette.Amber, fontSize = 12.sp)
+            Text("Allow DyskLink to read photos to send them.", color = Palette.AmberText, fontSize = 12.sp)
         }
     }
 }
@@ -1523,7 +1560,7 @@ private fun EarlierPhotos(peer: Peer) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "Stop", color = Palette.Coral, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            "Stop", color = Palette.CoralText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clickable { id.phonelink.android.service.PhotoSync.stopEarlier(context, peer.id) }.padding(vertical = 4.dp),
         )
     } else {
@@ -1565,13 +1602,14 @@ private fun DetailRow(label: String, value: String) {
 /** A small battery ring for the Mac's card. */
 @Composable
 private fun MiniBattery(percent: Int?, charging: Boolean) {
-    val color = percent?.let(Palette::battery) ?: Palette.TextFaint
+    val color = if (percent != null) Palette.battery(percent) else Palette.TextFaint
+    val track = Palette.Contrast.copy(alpha = 0.07f)
     Box(Modifier.size(76.dp), contentAlignment = Alignment.Center) {
         androidx.compose.foundation.Canvas(Modifier.size(76.dp)) {
             val stroke = 7.dp.toPx()
             val arc = androidx.compose.ui.geometry.Size(size.width - stroke, size.height - stroke)
             val topLeft = Offset(stroke / 2, stroke / 2)
-            drawArc(Color.White.copy(alpha = 0.07f), 0f, 360f, false, topLeft, arc, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
+            drawArc(track, 0f, 360f, false, topLeft, arc, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
             drawArc(
                 color, -90f, 360f * (percent ?: 0) / 100f, false, topLeft, arc,
                 style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round),
@@ -1589,7 +1627,7 @@ private fun Scrim(content: @Composable () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.68f))
+            .background(Color.Black.copy(alpha = if (Palette.IsDark) 0.68f else 0.4f))
             // Stops taps from reaching the screen behind.
             .clickable(remember { MutableInteractionSource() }, null) { }
             .imePadding()
@@ -1695,7 +1733,7 @@ private fun PairingTitle(title: String, detail: String) {
 @Composable
 private fun PairingError(text: String) {
     Spacer(Modifier.height(12.dp))
-    Text(text, color = Palette.Coral, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, lineHeight = 18.sp, textAlign = TextAlign.Center)
+    Text(text, color = Palette.CoralText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, lineHeight = 18.sp, textAlign = TextAlign.Center)
 }
 
 @Composable

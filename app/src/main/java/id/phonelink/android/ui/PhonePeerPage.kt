@@ -81,7 +81,7 @@ internal fun PermissionRow(title: String, state: String?, checked: Boolean, onCh
     Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }, verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            state?.let { Text(it, color = if (checked) Palette.Mint else Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp) }
+            state?.let { Text(it, color = if (checked) Palette.MintText else Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp) }
         }
         Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.padding(start = 10.dp))
     }
@@ -134,7 +134,7 @@ private fun PhoneTile(icon: ImageVector, tint: Color, label: String, blurb: Stri
             if (badge > 0) {
                 Text(
                     if (badge > 99) "99+" else badge.toString(),
-                    color = Palette.Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
+                    color = Palette.OnAccent, fontSize = 10.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                     modifier = Modifier.align(Alignment.TopEnd).offset(x = 8.dp, y = (-6).dp)
                         .widthIn(min = 18.dp).clip(CircleShape).background(Palette.Coral).padding(horizontal = 4.dp, vertical = 1.dp),
                 )
@@ -148,7 +148,7 @@ private fun PhoneTile(icon: ImageVector, tint: Color, label: String, blurb: Stri
         Spacer(Modifier.height(2.dp))
         // A short description, or what's happening now (Talking, Playing, On…) in the tile's colour.
         Text(
-            live ?: blurb, color = if (live != null) tint else Palette.TextFaint, fontSize = 11.sp, lineHeight = 14.sp,
+            live ?: blurb, color = if (live != null) Palette.text(tint) else Palette.TextFaint, fontSize = 11.sp, lineHeight = 14.sp,
             textAlign = TextAlign.Center, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis,
         )
     }
@@ -294,7 +294,7 @@ internal fun PhonePageScaffold(peer: Peer, title: String, onBack: () -> Unit, co
         Text(title, color = Palette.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
         if (!peer.isConnected) {
-            Text("${peer.name} isn't connected.", color = Palette.Amber, fontSize = 12.sp)
+            Text("${peer.name} isn't connected.", color = Palette.AmberText, fontSize = 12.sp)
             Spacer(Modifier.height(12.dp))
         }
         content()
@@ -354,7 +354,7 @@ private fun PhoneTalkScreen(peer: Peer, onBack: () -> Unit) {
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Column(Modifier.fillMaxWidth()) {
                 if (!peer.isConnected) {
-                    Text("${peer.name} isn't connected.", color = Palette.Amber, fontSize = 12.sp)
+                    Text("${peer.name} isn't connected.", color = Palette.AmberText, fontSize = 12.sp)
                     Spacer(Modifier.height(12.dp))
                 }
                 HoldToTalk(peer, height = 240.dp)
@@ -422,7 +422,7 @@ private fun PhoneCanCard(peer: Peer, access: PeerAccess, onChange: (PeerAccess) 
             PermissionRow("Control", if (access.control) "Taps, Back, Home, Recents" else "Off", access.control) { on -> onChange(access.copy(control = on)) }
             if (access.control && !accessibility) {
                 Spacer(Modifier.height(8.dp))
-                Text("Control needs Accessibility. Until then ${peer.name} can only view.", color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Control needs Accessibility. Until then ${peer.name} can only view.", color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp)
                 Spacer(Modifier.height(8.dp))
                 SecondaryButton("Open Accessibility settings", Modifier.fillMaxWidth(), onClick = onOpenAccessibility)
             }

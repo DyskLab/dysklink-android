@@ -238,6 +238,7 @@ fun main(args: Array<String>) {
 
         val trayStatus by app.trayStatus.collectAsState()
         val batteryView by app.battery.view.collectAsState()
+        val energyView by app.energy.view.collectAsState()
         val clipView by app.clipHistory.view.collectAsState()
         val tools by app.tools.collectAsState()
         val source by app.source.collectAsState()
@@ -253,7 +254,8 @@ fun main(args: Array<String>) {
             trayConfig,
             TrayMenuState(
                 phones, trayStatus, tools.pomodoro.state.isRunning, tools.pomodoro.state.isStarted,
-                battery = batteryView?.reading?.trayText, clipboardHistory = clipView.settings.enabled, pcCare = true,
+                battery = batteryView?.reading?.trayText, topEnergyApp = energyView?.apps?.firstOrNull()?.let { "${it.name} (${it.level.label.lowercase()})" },
+                clipboardHistory = clipView.settings.enabled, pcCare = true,
                 launcher = launcherView.enabled,
                 layouts = if (tidyView.enabled && tidyView.supported) Layouts.forMonitors(tidyView.layouts, tidyView.monitorKey).map { it.id to it.name } else emptyList(),
             ),
@@ -499,6 +501,8 @@ private class AppModel(private val app: DesktopApp, override val hasTray: Boolea
         return dialog.files.orEmpty().firstOrNull()
     }
     override val battery = app.battery.view
+    override val energy = app.energy.view
+    override fun watchEnergy(on: Boolean) = app.energy.watch(on)
     override val pcCare: PcCareModel? by lazy {
         PcCareModel(RealCareSystem(), kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default), Platform.dataDir)
     }

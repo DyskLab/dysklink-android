@@ -238,7 +238,7 @@ fun LauncherCard(model: DeskModel) {
                 SecondaryButton("Use it") { launcher.setCombo(draft); custom = false }
             }
         }
-        view.comboProblem?.let { Spacer(Modifier.height(6.dp)); Text(it, color = colors.coral, fontSize = 12.sp) }
+        view.comboProblem?.let { Spacer(Modifier.height(6.dp)); Text(it, color = colors.coralText, fontSize = 12.sp) }
         Divider()
         Text("What to type", color = colors.textPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
@@ -250,7 +250,7 @@ fun LauncherCard(model: DeskModel) {
             "yt, w, gh, maps, ddg" to "searches YouTube, Wikipedia, GitHub, Maps, DuckDuckGo; anything else searches Google",
         ).forEach { (what, does) ->
             Row(Modifier.padding(vertical = 2.dp)) {
-                Text(what, Modifier.width(170.dp), color = colors.mint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                Text(what, Modifier.width(170.dp), color = colors.mintText, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                 Text(does, color = colors.textSecondary, fontSize = 12.sp)
             }
         }
@@ -305,7 +305,7 @@ fun WindowTidyCard(model: DeskModel) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(s.label, Modifier.weight(1f), color = if (taken) colors.textFaint else colors.textPrimary, fontSize = 12.sp)
-                            Text(s.combo.label.removePrefix(view.mods.label + "+").let { if (taken) "$it (taken)" else it }, color = if (taken) colors.amber else colors.mint, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+                            Text(s.combo.label.removePrefix(view.mods.label + "+").let { if (taken) "$it (taken)" else it }, color = if (taken) colors.amberText else colors.mintText, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
                         }
                     }
                     if (pair.size == 1) Spacer(Modifier.weight(1f))
@@ -335,7 +335,7 @@ fun WindowTidyCard(model: DeskModel) {
                     Text(layout.name, color = colors.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         "${layout.windows.size} window${if (layout.windows.size == 1) "" else "s"}  ·  " + if (here) "these monitors" else "saved on ${if (layout.monitorCount == 1) "1 monitor" else "${layout.monitorCount} monitors"}, fitted to these",
-                        color = if (here) colors.mint else colors.textFaint, fontSize = 11.sp,
+                        color = if (here) colors.mintText else colors.textFaint, fontSize = 11.sp,
                     )
                 }
                 SecondaryButton("Restore") { model.tidyAction(TidyAction.Restore(layout.id)) }

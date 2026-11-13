@@ -278,7 +278,7 @@ private fun EntryLead(entry: ClipEntry, model: DeskModel, width: Int, height: In
             DyskIcon(DyskIcons.File, colors.sky, 16.dp)
         }
         ClipKind.Text -> Box(Modifier.size(width.dp, height.dp).clip(RoundedCornerShape(6.dp)).background(colors.violet.copy(alpha = 0.10f)), contentAlignment = Alignment.Center) {
-            Text("Aa", color = colors.violet, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("Aa", color = colors.violetText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
     }
 }

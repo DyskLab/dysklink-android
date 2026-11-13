@@ -211,7 +211,7 @@ private fun PomodoroCard(model: DeskModel, tools: PcToolsState, now: Long) {
             Body("New lengths start with the next round.", colors.textFaint)
             return@GlassCard
         }
-        Text(state.title(settings), color = tint, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+        Text(state.title(settings), color = Dysk.colors.text(tint), fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
         Text(
             PomodoroState.clock(state.remaining(now, settings)),
             color = colors.textPrimary, fontSize = 46.sp, fontWeight = FontWeight.Bold,
@@ -297,7 +297,7 @@ private fun WaterCard(model: DeskModel, tools: PcToolsState, now: Long) {
             Spacer(Modifier.weight(1f))
             Text(
                 if (settings.reminds) "Reminders every ${settings.remindEveryMinutes} min" else "Reminders off",
-                color = if (settings.reminds) colors.sky else colors.textFaint, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold,
+                color = if (settings.reminds) colors.skyText else colors.textFaint, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold,
             )
         }
     }
@@ -364,7 +364,7 @@ private fun TodoCard(model: DeskModel, tools: PcToolsState, now: Long) {
             Spacer(Modifier.width(Space.xs))
             PrimaryButton("Add", enabled = draft.isNotBlank(), icon = DyskIcons.Plus, onClick = add)
         }
-        problem?.let { Spacer(Modifier.height(6.dp)); Text(it, color = colors.coral, fontSize = 12.sp) }
+        problem?.let { Spacer(Modifier.height(6.dp)); Text(it, color = colors.coralText, fontSize = 12.sp) }
         Spacer(Modifier.height(Space.sm))
         if (tasks.isEmpty()) {
             Text("No tasks yet. Tasks done on an earlier day are cleared each morning.", color = colors.textFaint, fontSize = 12.5.sp)

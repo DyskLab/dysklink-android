@@ -26,6 +26,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,12 +50,20 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 
-enum class HistoryFilter(val label: String, val symbol: String, val tint: Color) {
-    All("All", "≡", Palette.TextPrimary),
-    Received("Received", "↓", Palette.Mint),
-    Sent("Sent", "↑", Palette.Sky),
-    Failed("Failed", "!", Palette.Coral),
+enum class HistoryFilter(val label: String, val symbol: String) {
+    All("All", "≡"),
+    Received("Received", "↓"),
+    Sent("Sent", "↑"),
+    Failed("Failed", "!"),
     ;
+
+    val tint: Color
+        @Composable @ReadOnlyComposable get() = when (this) {
+            All -> Palette.TextPrimary
+            Received -> Palette.Mint
+            Sent -> Palette.Sky
+            Failed -> Palette.Coral
+        }
 
     fun includes(transfer: Transfer): Boolean = when (this) {
         All -> true
@@ -147,13 +156,13 @@ fun FileHistoryScreen(
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(option.symbol, color = if (on) option.tint else Palette.TextFaint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text(option.symbol, color = if (on) Palette.text(option.tint) else Palette.TextFaint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(5.dp))
                         Text(option.label, color = if (on) Palette.TextPrimary else Palette.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                         Spacer(Modifier.width(6.dp))
                         Text(
                             "$count",
-                            color = if (on) option.tint else Palette.TextFaint,
+                            color = if (on) Palette.text(option.tint) else Palette.TextFaint,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
@@ -169,7 +178,7 @@ fun FileHistoryScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "Only ${names[id] ?: "this device"}   ✕",
-                        color = Palette.Sky,
+                        color = Palette.SkyText,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
@@ -285,7 +294,7 @@ fun FileHistoryScreen(
                 TextButton(onClick = {
                     confirmClear = false
                     onClear()
-                }) { Text("Clear", color = Palette.Coral) }
+                }) { Text("Clear", color = Palette.CoralText) }
             },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
         )
@@ -321,7 +330,7 @@ fun DeviceFilesCard(
                         transfers.isEmpty() -> "Nothing sent or received yet"
                         else -> "↓ $received received · ↑ $sent sent"
                     },
-                    color = if (active.isNotEmpty()) Palette.Sky else Palette.TextPrimary,
+                    color = if (active.isNotEmpty()) Palette.SkyText else Palette.TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -329,7 +338,7 @@ fun DeviceFilesCard(
             if (transfers.isNotEmpty()) {
                 Text(
                     "See all ›",
-                    color = Palette.Mint,
+                    color = Palette.MintText,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(CircleShape).clickable(onClick = onSeeAll).padding(horizontal = 8.dp, vertical = 6.dp),
@@ -419,7 +428,7 @@ private fun HistoryRow(
                             transfer.outgoing -> "↑"
                             else -> "↓"
                         },
-                        color = Palette.Ink,
+                        color = Palette.OnAccent,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                     )
@@ -457,7 +466,7 @@ private fun HistoryRow(
             }
         }
         if (transfer.status == TransferStatus.Failed) {
-            Text(transfer.detail ?: "Failed", color = Palette.Coral, fontSize = 12.sp, modifier = Modifier.padding(start = 52.dp, top = 2.dp))
+            Text(transfer.detail ?: "Failed", color = Palette.CoralText, fontSize = 12.sp, modifier = Modifier.padding(start = 52.dp, top = 2.dp))
         }
         if (expanded) {
             Spacer(Modifier.height(8.dp))
@@ -476,7 +485,7 @@ private fun HistoryRow(
 private fun RowAction(text: String, color: Color, onClick: () -> Unit) {
     Text(
         text,
-        color = color,
+        color = Palette.text(color),
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
@@ -489,8 +498,10 @@ private fun RowAction(text: String, color: Color, onClick: () -> Unit) {
 }
 
 /** One row of a card split across lazy items: the panel, with the outline and rounded corners only at its ends. */
+@Composable
 private fun Modifier.cardSegment(first: Boolean, last: Boolean): Modifier {
     val radius = 22.dp
+    val outline = Palette.Stroke
     val shape = RoundedCornerShape(
         topStart = if (first) radius else 0.dp,
         topEnd = if (first) radius else 0.dp,
@@ -508,7 +519,7 @@ private fun Modifier.cardSegment(first: Boolean, last: Boolean): Modifier {
             val top = if (first) stroke / 2 else -2 * r
             val bottom = if (last) size.height - stroke / 2 else size.height + 2 * r
             drawRoundRect(
-                color = Palette.Stroke,
+                color = outline,
                 topLeft = androidx.compose.ui.geometry.Offset(stroke / 2, top),
                 size = androidx.compose.ui.geometry.Size(size.width - stroke, bottom - top),
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(r - stroke / 2),

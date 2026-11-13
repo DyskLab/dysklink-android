@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The window behind the app, shown at launch before the first frame. Dark by default, as the app is.
+  On Android 12 and later the app's night mode follows the Appearance setting (UiModeManager), so
+  values-v31 and values-night-v31 pick light or dark from it and the launch screen matches.
+-->
+<resources>
+    <style name="Theme.DyskLink" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:colorBackground">@color/window_background</item>
+    </style>
+
+    <color name="window_background">#090D13</color>
+</resources>

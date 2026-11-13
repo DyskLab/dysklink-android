@@ -73,7 +73,7 @@ fun UsbCard(model: DeskModel, viaUsb: Boolean = false) {
             }
             usb.downloadError?.let {
                 Spacer(Modifier.height(Space.xs))
-                Text(it, color = colors.coral, fontSize = 12.sp)
+                Text(it, color = colors.coralText, fontSize = 12.sp)
             }
         }
         if (usb.devices.isNotEmpty()) {
@@ -106,7 +106,7 @@ private fun UsbDeviceRow(device: AdbDevice) {
         }
         Text(
             label, Modifier.background(color.copy(alpha = 0.13f), CircleShape).padding(horizontal = 9.dp, vertical = 3.dp),
-            color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            color = Dysk.colors.text(color), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
         )
     }
 }

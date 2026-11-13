@@ -46,6 +46,7 @@ import id.phonelink.android.service.ChargeReminder
 import id.phonelink.android.service.PhoneLinkService
 import id.phonelink.android.service.PrayerWeatherStore
 import id.phonelink.android.service.ScreenCaptureService
+import id.phonelink.android.ui.AppearanceStore
 import id.phonelink.android.ui.Palette
 import id.phonelink.android.ui.PhoneLinkApp
 import id.phonelink.android.ui.PhoneLinkTheme
@@ -101,8 +102,12 @@ class MainActivity : ComponentActivity() {
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // PhoneLinkTheme sets the bar styles again once it knows the Appearance setting.
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // The window shows before the first frame: give it the saved Appearance's colour, not the theme's.
+        AppearanceStore.applyNightMode(this)
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(AppearanceStore.windowBackground(this)))
 
         // The service keeps running even if the notification permission is denied.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

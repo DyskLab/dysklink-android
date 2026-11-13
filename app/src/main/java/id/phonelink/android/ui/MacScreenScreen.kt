@@ -266,214 +266,216 @@ fun MacScreenScreen(
         link?.pointer(peerId, kind, point.first, point.second)
     }
 
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Row(
-            Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("‹", color = Color.White, fontSize = 28.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = ::close).padding(horizontal = 12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(if (extend) "$macName · extra display" else macName, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(
-                    when (val s = state) {
-                        is ViewState.Showing -> if (zoom > 1.01f) "${s.name} · ${"%.1f".format(zoom)}×" else s.name
-                        ViewState.Starting -> "Connecting…"
-                        is ViewState.Stopped -> "Stopped"
-                    },
-                    color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, maxLines = 1,
-                )
+    ForceDark {
+        Column(Modifier.fillMaxSize().background(Color.Black)) {
+            Row(
+                Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("‹", color = Color.White, fontSize = 28.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = ::close).padding(horizontal = 12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(if (extend) "$macName · extra display" else macName, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text(
+                        when (val s = state) {
+                            is ViewState.Showing -> if (zoom > 1.01f) "${s.name} · ${"%.1f".format(zoom)}×" else s.name
+                            ViewState.Starting -> "Connecting…"
+                            is ViewState.Stopped -> "Stopped"
+                        },
+                        color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, maxLines = 1,
+                    )
+                }
+                if (zoom > 1.01f) ToolChip("1×") { zoom = 1f; panX = 0f; panY = 0f }
             }
-            if (zoom > 1.01f) ToolChip("1×") { zoom = 1f; panX = 0f; panY = 0f }
-        }
 
-        Box(
-            Modifier.weight(1f).fillMaxWidth()
-                .onSizeChanged { viewW = it.width.toFloat(); viewH = it.height.toFloat() }
-                .pointerInput(state, link) {
-                    var lastTapAt = 0L
-                    var lastTapPos = Offset.Zero
-                    awaitEachGesture {
-                        val first = awaitFirstDown(requireUnconsumed = false)
-                        val downAt = System.currentTimeMillis()
-                        var mode = 0 // 0 = undecided, 1 = drag, 2 = two-finger scroll, 3 = zoom, 4 = held
-                        var lastPos = first.position
-                        var lastCentroid = Offset.Zero
-                        var lastSpread = 0f
-                        var lastDragSent = 0L
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val pressed = event.changes.filter { it.pressed }
-                            if (pressed.isEmpty()) break
-                            if (pressed.size >= 2) {
-                                val a = pressed[0].position
-                                val b = pressed[1].position
-                                val centroid = Offset((a.x + b.x) / 2, (a.y + b.y) / 2)
-                                val spread = hypot(a.x - b.x, a.y - b.y)
-                                if (mode == 1) send("up", lastPos)
-                                if (mode != 2 && mode != 3) {
-                                    if (lastSpread == 0f) { lastSpread = spread; lastCentroid = centroid; mode = 0; continue }
-                                    if (abs(spread / lastSpread - 1) > 0.12f) mode = 3
-                                    else if ((centroid - lastCentroid).getDistance() > 14f) mode = 2
-                                    else continue
+            Box(
+                Modifier.weight(1f).fillMaxWidth()
+                    .onSizeChanged { viewW = it.width.toFloat(); viewH = it.height.toFloat() }
+                    .pointerInput(state, link) {
+                        var lastTapAt = 0L
+                        var lastTapPos = Offset.Zero
+                        awaitEachGesture {
+                            val first = awaitFirstDown(requireUnconsumed = false)
+                            val downAt = System.currentTimeMillis()
+                            var mode = 0 // 0 = undecided, 1 = drag, 2 = two-finger scroll, 3 = zoom, 4 = held
+                            var lastPos = first.position
+                            var lastCentroid = Offset.Zero
+                            var lastSpread = 0f
+                            var lastDragSent = 0L
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                if (pressed.isEmpty()) break
+                                if (pressed.size >= 2) {
+                                    val a = pressed[0].position
+                                    val b = pressed[1].position
+                                    val centroid = Offset((a.x + b.x) / 2, (a.y + b.y) / 2)
+                                    val spread = hypot(a.x - b.x, a.y - b.y)
+                                    if (mode == 1) send("up", lastPos)
+                                    if (mode != 2 && mode != 3) {
+                                        if (lastSpread == 0f) { lastSpread = spread; lastCentroid = centroid; mode = 0; continue }
+                                        if (abs(spread / lastSpread - 1) > 0.12f) mode = 3
+                                        else if ((centroid - lastCentroid).getDistance() > 14f) mode = 2
+                                        else continue
+                                    }
+                                    val delta = centroid - lastCentroid
+                                    if (mode == 3) {
+                                        zoom = (zoom * spread / lastSpread).coerceIn(1f, 5f)
+                                        panX = MacScreenMath.clampPan(panX + delta.x, zoom, viewW)
+                                        panY = MacScreenMath.clampPan(panY + delta.y, zoom, viewH)
+                                    } else {
+                                        link?.input(peerId, InputEvent("scroll", dx = delta.x, dy = delta.y))
+                                    }
+                                    lastCentroid = centroid
+                                    lastSpread = spread
+                                    event.changes.forEach { it.consume() }
+                                    continue
                                 }
-                                val delta = centroid - lastCentroid
-                                if (mode == 3) {
-                                    zoom = (zoom * spread / lastSpread).coerceIn(1f, 5f)
-                                    panX = MacScreenMath.clampPan(panX + delta.x, zoom, viewW)
-                                    panY = MacScreenMath.clampPan(panY + delta.y, zoom, viewH)
-                                } else {
-                                    link?.input(peerId, InputEvent("scroll", dx = delta.x, dy = delta.y))
-                                }
-                                lastCentroid = centroid
-                                lastSpread = spread
-                                event.changes.forEach { it.consume() }
-                                continue
-                            }
-                            val change = pressed[0]
-                            val now = System.currentTimeMillis()
-                            if (mode == 0 && (change.position - first.position).getDistance() > viewConfiguration.touchSlop) {
-                                mode = 1
-                                send("down", first.position)
-                            }
-                            if (mode == 0 && now - downAt > LONG_PRESS_MS) {
-                                mode = 4
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                send("right", first.position)
-                            }
-                            if (mode == 1 && now - lastDragSent >= DRAG_INTERVAL_MS) {
-                                send("drag", change.position)
-                                lastDragSent = now
-                            }
-                            lastPos = change.position
-                            if (change.positionChange() != Offset.Zero) change.consume()
-                        }
-                        when (mode) {
-                            1 -> send("up", lastPos)
-                            0 -> {
+                                val change = pressed[0]
                                 val now = System.currentTimeMillis()
-                                val double = now - lastTapAt < DOUBLE_TAP_MS && (first.position - lastTapPos).getDistance() < 60f
-                                send(if (double) "double" else "click", first.position)
-                                lastTapAt = if (double) 0L else now
-                                lastTapPos = first.position
+                                if (mode == 0 && (change.position - first.position).getDistance() > viewConfiguration.touchSlop) {
+                                    mode = 1
+                                    send("down", first.position)
+                                }
+                                if (mode == 0 && now - downAt > LONG_PRESS_MS) {
+                                    mode = 4
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    send("right", first.position)
+                                }
+                                if (mode == 1 && now - lastDragSent >= DRAG_INTERVAL_MS) {
+                                    send("drag", change.position)
+                                    lastDragSent = now
+                                }
+                                lastPos = change.position
+                                if (change.positionChange() != Offset.Zero) change.consume()
+                            }
+                            when (mode) {
+                                1 -> send("up", lastPos)
+                                0 -> {
+                                    val now = System.currentTimeMillis()
+                                    val double = now - lastTapAt < DOUBLE_TAP_MS && (first.position - lastTapPos).getDistance() < 60f
+                                    send(if (double) "double" else "click", first.position)
+                                    lastTapAt = if (double) 0L else now
+                                    lastTapPos = first.position
+                                }
                             }
                         }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                val s = state
+                val shownPicture = picture
+                if (s is ViewState.Showing && s.jpeg) {
+                    if (shownPicture != null) {
+                        androidx.compose.foundation.Image(
+                            shownPicture, contentDescription = "$macName screen",
+                            contentScale = androidx.compose.ui.layout.ContentScale.FillBounds,
+                            modifier = Modifier
+                                .aspectRatio(s.width.toFloat() / s.height, matchHeightConstraintsFirst = viewW / viewH.coerceAtLeast(1f) > s.width.toFloat() / s.height)
+                                .graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = panX; translationY = panY },
+                        )
+                    } else {
+                        CircularProgressIndicator(color = Palette.Mint)
                     }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            val s = state
-            val shownPicture = picture
-            if (s is ViewState.Showing && s.jpeg) {
-                if (shownPicture != null) {
-                    androidx.compose.foundation.Image(
-                        shownPicture, contentDescription = "$macName screen",
-                        contentScale = androidx.compose.ui.layout.ContentScale.FillBounds,
+                    DisposableEffect(Unit) {
+                        activity?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        onDispose { activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+                    }
+                } else if (s is ViewState.Showing) {
+                    AndroidView(
+                        factory = { ctx ->
+                            SurfaceView(ctx).apply {
+                                keepScreenOn = true
+                                holder.addCallback(object : SurfaceHolder.Callback {
+                                    override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface }
+                                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                                    override fun surfaceDestroyed(holder: SurfaceHolder) { surface = null }
+                                })
+                            }
+                        },
                         modifier = Modifier
                             .aspectRatio(s.width.toFloat() / s.height, matchHeightConstraintsFirst = viewW / viewH.coerceAtLeast(1f) > s.width.toFloat() / s.height)
                             .graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = panX; translationY = panY },
                     )
-                } else {
-                    CircularProgressIndicator(color = Palette.Mint)
                 }
-                DisposableEffect(Unit) {
-                    activity?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    onDispose { activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-                }
-            } else if (s is ViewState.Showing) {
-                AndroidView(
-                    factory = { ctx ->
-                        SurfaceView(ctx).apply {
-                            keepScreenOn = true
-                            holder.addCallback(object : SurfaceHolder.Callback {
-                                override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface }
-                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                                override fun surfaceDestroyed(holder: SurfaceHolder) { surface = null }
-                            })
+                when (s) {
+                    ViewState.Starting -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = Palette.Mint)
+                        Spacer(Modifier.height(12.dp))
+                        Text("Asking $macName for its screen…", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
+                    }
+                    is ViewState.Stopped -> Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(s.message, color = Color.White, fontSize = 15.sp, textAlign = TextAlign.Center, lineHeight = 21.sp)
+                        Spacer(Modifier.height(16.dp))
+                        if (connected) PrimaryButton("Try again", Modifier.width(180.dp)) {
+                            state = ViewState.Starting
+                            begin()
                         }
-                    },
-                    modifier = Modifier
-                        .aspectRatio(s.width.toFloat() / s.height, matchHeightConstraintsFirst = viewW / viewH.coerceAtLeast(1f) > s.width.toFloat() / s.height)
-                        .graphicsLayer { scaleX = zoom; scaleY = zoom; translationX = panX; translationY = panY },
+                    }
+                    else -> Unit
+                }
+            }
+
+            if (state is ViewState.Showing && inputTrusted == false) {
+                Text(
+                    if (isMac) "Taps and typing need Accessibility for DyskLink on the Mac."
+                    else "Taps and typing need \"Phones can control this PC\" in DyskLink on the PC. On Linux, also allow remote control when the PC asks, or follow the steps DyskLink shows there.",
+                    color = Palette.AmberText, fontSize = 12.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(6.dp),
                 )
             }
-            when (s) {
-                ViewState.Starting -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = Palette.Mint)
-                    Spacer(Modifier.height(12.dp))
-                    Text("Asking $macName for its screen…", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
+
+            if (typing) KeyboardCatcher(onText = { link?.input(peerId, InputEvent("text", text = it)) }, onKey = { link?.input(peerId, InputEvent("key", key = it)) }, onDone = { typing = false })
+
+            Row(
+                Modifier.fillMaxWidth().navigationBarsPadding().horizontalScroll(rememberScrollState()).padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                ToolChip(if (typing) "Hide keys" else "⌨ Type") { typing = !typing }
+                listOf("esc" to "escape", "tab" to "tab", "←" to "left", "↑" to "up", "↓" to "down", "→" to "right", "⏎" to "return", "⌫" to "delete").forEach { (label, key) ->
+                    ToolChip(label) { link?.input(peerId, InputEvent("key", key = key)) }
                 }
-                is ViewState.Stopped -> Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(s.message, color = Color.White, fontSize = 15.sp, textAlign = TextAlign.Center, lineHeight = 21.sp)
-                    Spacer(Modifier.height(16.dp))
-                    if (connected) PrimaryButton("Try again", Modifier.width(180.dp)) {
+                val hearing by id.phonelink.android.service.AudioShare.listening.collectAsState()
+                val soundProblem by id.phonelink.android.service.AudioShare.problem.collectAsState()
+                val chipContext = androidx.compose.ui.platform.LocalContext.current
+                androidx.compose.runtime.LaunchedEffect(soundProblem) {
+                    soundProblem?.let { android.widget.Toast.makeText(chipContext, it, android.widget.Toast.LENGTH_LONG).show() }
+                }
+                ToolChip(if (hearing == peerId) "🔊 Sound on" else "🔇 Sound") {
+                    if (hearing == peerId) id.phonelink.android.service.AudioShare.stopListening(peerId)
+                    else id.phonelink.android.service.AudioShare.listen(peerId, fromScreen = true)
+                }
+                // "cmd" is Ctrl on a PC.
+                ToolChip(if (isMac) "⌘C" else "Ctrl+C") { link?.input(peerId, InputEvent("shortcut", key = "cmd+c")) }
+                ToolChip(if (isMac) "⌘V" else "Ctrl+V") { link?.input(peerId, InputEvent("shortcut", key = "cmd+v")) }
+                val shown = state as? ViewState.Showing
+                if (!extend && shown != null && shown.displays.size > 1) {
+                    // Steps through the Mac's displays.
+                    ToolChip("🖥 ${shown.name}") {
+                        val index = shown.displays.indexOfFirst { it.id == shown.displayId }
+                        val next = shown.displays[(index + 1) % shown.displays.size]
+                        chosenDisplay = next.id
+                        state = ViewState.Starting
+                        link?.start(peerId, next.id)
+                    }
+                }
+                if (extend) {
+                    // A PC's monitor is the phone's size at 1x: fewer pixels means larger text, not sharper text.
+                    ToolChip(if (!large) "Larger text" else if (isMac) "Sharp text" else "Smaller text") {
+                        large = !large
+                        prefs.edit().putBoolean("large", large).apply()
+                        if (connected) {
+                            state = ViewState.Starting
+                            begin()
+                        }
+                    }
+                }
+                ToolChip(if (landscape) "Portrait" else "Landscape") {
+                    landscape = !landscape
+                    // An extra display turns with the phone: the Mac makes one in the new shape.
+                    if (extend && connected) {
                         state = ViewState.Starting
                         begin()
                     }
-                }
-                else -> Unit
-            }
-        }
-
-        if (state is ViewState.Showing && inputTrusted == false) {
-            Text(
-                if (isMac) "Taps and typing need Accessibility for DyskLink on the Mac."
-                else "Taps and typing need \"Phones can control this PC\" in DyskLink on the PC. On Linux, also allow remote control when the PC asks, or follow the steps DyskLink shows there.",
-                color = Palette.Amber, fontSize = 12.sp, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().padding(6.dp),
-            )
-        }
-
-        if (typing) KeyboardCatcher(onText = { link?.input(peerId, InputEvent("text", text = it)) }, onKey = { link?.input(peerId, InputEvent("key", key = it)) }, onDone = { typing = false })
-
-        Row(
-            Modifier.fillMaxWidth().navigationBarsPadding().horizontalScroll(rememberScrollState()).padding(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            ToolChip(if (typing) "Hide keys" else "⌨ Type") { typing = !typing }
-            listOf("esc" to "escape", "tab" to "tab", "←" to "left", "↑" to "up", "↓" to "down", "→" to "right", "⏎" to "return", "⌫" to "delete").forEach { (label, key) ->
-                ToolChip(label) { link?.input(peerId, InputEvent("key", key = key)) }
-            }
-            val hearing by id.phonelink.android.service.AudioShare.listening.collectAsState()
-            val soundProblem by id.phonelink.android.service.AudioShare.problem.collectAsState()
-            val chipContext = androidx.compose.ui.platform.LocalContext.current
-            androidx.compose.runtime.LaunchedEffect(soundProblem) {
-                soundProblem?.let { android.widget.Toast.makeText(chipContext, it, android.widget.Toast.LENGTH_LONG).show() }
-            }
-            ToolChip(if (hearing == peerId) "🔊 Sound on" else "🔇 Sound") {
-                if (hearing == peerId) id.phonelink.android.service.AudioShare.stopListening(peerId)
-                else id.phonelink.android.service.AudioShare.listen(peerId, fromScreen = true)
-            }
-            // "cmd" is Ctrl on a PC.
-            ToolChip(if (isMac) "⌘C" else "Ctrl+C") { link?.input(peerId, InputEvent("shortcut", key = "cmd+c")) }
-            ToolChip(if (isMac) "⌘V" else "Ctrl+V") { link?.input(peerId, InputEvent("shortcut", key = "cmd+v")) }
-            val shown = state as? ViewState.Showing
-            if (!extend && shown != null && shown.displays.size > 1) {
-                // Steps through the Mac's displays.
-                ToolChip("🖥 ${shown.name}") {
-                    val index = shown.displays.indexOfFirst { it.id == shown.displayId }
-                    val next = shown.displays[(index + 1) % shown.displays.size]
-                    chosenDisplay = next.id
-                    state = ViewState.Starting
-                    link?.start(peerId, next.id)
-                }
-            }
-            if (extend) {
-                // A PC's monitor is the phone's size at 1x: fewer pixels means larger text, not sharper text.
-                ToolChip(if (!large) "Larger text" else if (isMac) "Sharp text" else "Smaller text") {
-                    large = !large
-                    prefs.edit().putBoolean("large", large).apply()
-                    if (connected) {
-                        state = ViewState.Starting
-                        begin()
-                    }
-                }
-            }
-            ToolChip(if (landscape) "Portrait" else "Landscape") {
-                landscape = !landscape
-                // An extra display turns with the phone: the Mac makes one in the new shape.
-                if (extend && connected) {
-                    state = ViewState.Starting
-                    begin()
                 }
             }
         }

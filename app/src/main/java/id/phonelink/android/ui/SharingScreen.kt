@@ -91,7 +91,7 @@ fun SharingScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(
                             "Android permission not granted. Tap to grant it.",
-                            color = Palette.Amber,
+                            color = Palette.AmberText,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clickable { onGrant(feature) }.padding(vertical = 4.dp),

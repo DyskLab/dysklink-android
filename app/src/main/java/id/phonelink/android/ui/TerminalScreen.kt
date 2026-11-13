@@ -180,127 +180,129 @@ fun TerminalScreen(peerId: String, macName: String, connected: Boolean, link: Te
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Color(0xFF090D13))
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .imePadding(),
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "‹",
-                color = Palette.TextSecondary,
-                fontSize = 26.sp,
-                modifier = Modifier.clip(CircleShape).clickable(onClick = ::leave).padding(horizontal = 10.dp),
-            )
-            Column(Modifier.weight(1f)) {
-                Text("Terminal", color = Palette.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+    ForceDark {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(Color(0xFF090D13))
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding(),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    when (state) {
-                        TermState.Open -> emulator.title.ifEmpty { macName }
-                        TermState.Opening -> "Opening on $macName…"
-                        TermState.Locked -> macName
-                        is TermState.Closed -> "Closed"
-                    },
-                    color = if (state == TermState.Open) Palette.Mint else Palette.TextFaint,
-                    fontSize = 11.5.sp,
-                    maxLines = 1,
+                    "‹",
+                    color = Palette.TextSecondary,
+                    fontSize = 26.sp,
+                    modifier = Modifier.clip(CircleShape).clickable(onClick = ::leave).padding(horizontal = 10.dp),
                 )
-            }
-            if (state == TermState.Open) {
-                TopButton("A−") { view?.let { it.fontSp = it.fontSp - 1f; prefs.edit().putFloat("font", it.fontSp).apply() } }
-                TopButton("A+") { view?.let { it.fontSp = it.fontSp + 1f; prefs.edit().putFloat("font", it.fontSp).apply() } }
-                TopButton("Paste") {
-                    val text = context.getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
-                    if (!text.isNullOrEmpty()) input(TerminalKeys.paste(text, emulator.bracketedPaste))
+                Column(Modifier.weight(1f)) {
+                    Text("Terminal", color = Palette.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        when (state) {
+                            TermState.Open -> emulator.title.ifEmpty { macName }
+                            TermState.Opening -> "Opening on $macName…"
+                            TermState.Locked -> macName
+                            is TermState.Closed -> "Closed"
+                        },
+                        color = if (state == TermState.Open) Palette.MintText else Palette.TextFaint,
+                        fontSize = 11.5.sp,
+                        maxLines = 1,
+                    )
+                }
+                if (state == TermState.Open) {
+                    TopButton("A−") { view?.let { it.fontSp = it.fontSp - 1f; prefs.edit().putFloat("font", it.fontSp).apply() } }
+                    TopButton("A+") { view?.let { it.fontSp = it.fontSp + 1f; prefs.edit().putFloat("font", it.fontSp).apply() } }
+                    TopButton("Paste") {
+                        val text = context.getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                        if (!text.isNullOrEmpty()) input(TerminalKeys.paste(text, emulator.bracketedPaste))
+                    }
                 }
             }
-        }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
-                factory = { ctx ->
-                    TerminalView(ctx, emulator).apply {
-                        fontSp = prefs.getFloat("font", 12.5f)
-                        onInput = ::input
-                        onGridSize = { cols, rows ->
-                            grid = cols to rows
-                            sessionId?.let { id ->
-                                if (state == TermState.Open) send(MessageType.TERMINAL_RESIZE, TerminalMessage(id, cols = cols, rows = rows))
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp),
+                    factory = { ctx ->
+                        TerminalView(ctx, emulator).apply {
+                            fontSp = prefs.getFloat("font", 12.5f)
+                            onInput = ::input
+                            onGridSize = { cols, rows ->
+                                grid = cols to rows
+                                sessionId?.let { id ->
+                                    if (state == TermState.Open) send(MessageType.TERMINAL_RESIZE, TerminalMessage(id, cols = cols, rows = rows))
+                                }
+                            }
+                            onStickyUsed = {
+                                ctrl = false
+                                alt = false
+                            }
+                            onLongPress = {
+                                context.getSystemService(ClipboardManager::class.java)
+                                    .setPrimaryClip(ClipData.newPlainText("Terminal", emulator.screenText()))
+                                Toast.makeText(context, "Copied what's on the screen", Toast.LENGTH_SHORT).show()
+                            }
+                            emulator.onReply = ::input
+                            view = this
+                            post {
+                                grid = emulator.cols to emulator.rows
                             }
                         }
-                        onStickyUsed = {
-                            ctrl = false
-                            alt = false
-                        }
-                        onLongPress = {
-                            context.getSystemService(ClipboardManager::class.java)
-                                .setPrimaryClip(ClipData.newPlainText("Terminal", emulator.screenText()))
-                            Toast.makeText(context, "Copied what's on the screen", Toast.LENGTH_SHORT).show()
-                        }
-                        emulator.onReply = ::input
-                        view = this
-                        post {
-                            grid = emulator.cols to emulator.rows
+                    },
+                    update = { it.invalidate(); redraw },
+                )
+                when (val current = state) {
+                    TermState.Locked -> Overlay {
+                        if (needsLock) {
+                            FlatIcon(Icons.Rounded.Lock, Palette.Amber)
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "Set a screen lock first",
+                                color = Palette.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                "The terminal can do anything on $macName, so DyskLink asks for your fingerprint or screen lock each time. This phone has none.",
+                                color = Palette.TextSecondary, fontSize = 13.sp, lineHeight = 18.sp, textAlign = TextAlign.Center,
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            PrimaryButton("Open security settings") {
+                                runCatching { context.startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS)) }
+                            }
+                        } else {
+                            FlatIcon(Icons.Rounded.Lock, Palette.Mint)
+                            Spacer(Modifier.height(12.dp))
+                            Text("Confirm it's you", color = Palette.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                         }
                     }
-                },
-                update = { it.invalidate(); redraw },
-            )
-            when (val current = state) {
-                TermState.Locked -> Overlay {
-                    if (needsLock) {
-                        FlatIcon(Icons.Rounded.Lock, Palette.Amber)
+                    is TermState.Closed -> Overlay {
+                        FlatIcon(Icons.Rounded.Terminal, Palette.TextSecondary)
                         Spacer(Modifier.height(12.dp))
-                        Text(
-                            "Set a screen lock first",
-                            color = Palette.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            "The terminal can do anything on $macName, so DyskLink asks for your fingerprint or screen lock each time. This phone has none.",
-                            color = Palette.TextSecondary, fontSize = 13.sp, lineHeight = 18.sp, textAlign = TextAlign.Center,
-                        )
+                        Text(current.message, color = Palette.TextPrimary, fontSize = 15.sp, lineHeight = 20.sp, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(14.dp))
-                        PrimaryButton("Open security settings") {
-                            runCatching { context.startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS)) }
-                        }
-                    } else {
-                        FlatIcon(Icons.Rounded.Lock, Palette.Mint)
-                        Spacer(Modifier.height(12.dp))
-                        Text("Confirm it's you", color = Palette.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-                is TermState.Closed -> Overlay {
-                    FlatIcon(Icons.Rounded.Terminal, Palette.TextSecondary)
-                    Spacer(Modifier.height(12.dp))
-                    Text(current.message, color = Palette.TextPrimary, fontSize = 15.sp, lineHeight = 20.sp, textAlign = TextAlign.Center)
-                    Spacer(Modifier.height(14.dp))
-                    if (currentConnected) {
-                        PrimaryButton("New session") {
-                            emulator.feed("\u001bc")
-                            view?.refresh()
-                            state = TermState.Opening
+                        if (currentConnected) {
+                            PrimaryButton("New session") {
+                                emulator.feed("\u001bc")
+                                view?.refresh()
+                                state = TermState.Opening
+                            }
                         }
                     }
+                    else -> Unit
                 }
-                else -> Unit
             }
-        }
 
-        if (state == TermState.Open) {
-            ExtraKeys(
-                ctrl = ctrl,
-                alt = alt,
-                onCtrl = { ctrl = !ctrl; view?.stickyCtrl = ctrl },
-                onAlt = { alt = !alt; view?.stickyAlt = alt },
-                onKey = { key -> view?.sendKey(key) },
-                onText = { text -> view?.typeText(text) },
-                onRaw = ::input,
-                onKeyboard = { view?.showKeyboard() },
-            )
+            if (state == TermState.Open) {
+                ExtraKeys(
+                    ctrl = ctrl,
+                    alt = alt,
+                    onCtrl = { ctrl = !ctrl; view?.stickyCtrl = ctrl },
+                    onAlt = { alt = !alt; view?.stickyAlt = alt },
+                    onKey = { key -> view?.sendKey(key) },
+                    onText = { text -> view?.typeText(text) },
+                    onRaw = ::input,
+                    onKeyboard = { view?.showKeyboard() },
+                )
+            }
         }
     }
 }
@@ -382,7 +384,7 @@ private fun KeyChip(label: String, on: Boolean = false, onClick: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = if (on) Palette.Ink else Palette.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+        Text(label, color = if (on) Palette.OnAccent else Palette.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
     }
 }
 

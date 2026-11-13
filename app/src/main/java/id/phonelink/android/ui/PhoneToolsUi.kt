@@ -106,7 +106,7 @@ internal fun ToolSwitchRow(label: String, checked: Boolean, onChange: (Boolean) 
 internal fun ToolLink(text: String, color: Color = Palette.Mint, onClick: () -> Unit) {
     Text(
         text,
-        color = color,
+        color = Palette.text(color),
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 6.dp),
@@ -155,6 +155,9 @@ internal fun NotificationHint(access: NotificationAccess, text: String) {
 /** Something outside DyskLink is in the way: what it is and what to do, with a link to where it's fixed. */
 @Composable
 internal fun HintBox(text: String, action: String?, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
+    // Amber text on its own tint is too faint on light, so the text goes dark there and the link deep amber.
+    val textColor = if (Palette.IsDark) Palette.Amber else Palette.TextPrimary
+    val linkColor = Palette.AmberText
     Column(
         modifier
             .fillMaxWidth()
@@ -162,10 +165,10 @@ internal fun HintBox(text: String, action: String?, modifier: Modifier = Modifie
             .background(Palette.Amber.copy(alpha = 0.12f))
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
-        Text(text, color = Palette.Amber, fontSize = 13.sp, lineHeight = 18.sp)
+        Text(text, color = textColor, fontSize = 13.sp, lineHeight = 18.sp)
         if (action != null) {
             Spacer(Modifier.height(2.dp))
-            ToolLink(action, Palette.Amber, onClick)
+            ToolLink(action, linkColor, onClick)
         }
     }
 }

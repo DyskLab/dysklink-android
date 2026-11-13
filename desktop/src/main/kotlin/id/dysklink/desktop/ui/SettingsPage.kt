@@ -85,7 +85,7 @@ fun SettingsPage(model: DeskModel) {
                 Text(
                     if (model.systemName.startsWith("Windows")) "Couldn't change it: Windows didn't let DyskLink write its Run entry in the registry."
                     else "Couldn't change it. Check that ~/.config/autostart exists and belongs to you: ls -ld ~/.config/autostart",
-                    color = colors.coral, fontSize = 12.sp,
+                    color = colors.coralText, fontSize = 12.sp,
                 )
             }
             if (model.hasTray) {
@@ -178,7 +178,7 @@ fun SettingsPage(model: DeskModel) {
             SelectionContainer {
                 Column {
                     model.addresses.ifEmpty { listOf("No network found") }.forEach {
-                        Text(it, color = colors.mint, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
+                        Text(it, color = colors.mintText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -215,7 +215,7 @@ private fun TrayHintRow(hint: TrayHint, open: (String) -> Unit) {
             Text(hint.text, color = colors.textSecondary, fontSize = 12.sp, lineHeight = 16.sp)
             hint.note?.let {
                 Spacer(Modifier.height(4.dp))
-                Text(it, color = colors.amber, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                Text(it, color = colors.amberText, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             }
         }
         hint.link?.let { url -> SecondaryButton("Get the extension", icon = DyskIcons.PopOut) { open(url) } }

@@ -253,7 +253,7 @@ private fun RoundMediaButton(glyph: MediaGlyph, size: Int, primary: Boolean = fa
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        val tint = if (primary) Palette.Ink else Palette.TextPrimary
+        val tint = if (primary) Palette.OnAccent else Palette.TextPrimary
         Canvas(Modifier.size((size * 0.42f).dp)) {
             val w = this.size.width
             val h = this.size.height
@@ -334,7 +334,7 @@ fun PresentationScreen(onBack: () -> Unit, send: (InputEvent) -> Unit) {
                 .clickable { key("right") },
             contentAlignment = Alignment.Center,
         ) {
-            Text("Next slide", color = Palette.Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+            Text("Next slide", color = Palette.OnAccent, fontSize = 26.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(12.dp))
         if (sensors != null && gyroscope != null) {
@@ -349,12 +349,12 @@ fun PresentationScreen(onBack: () -> Unit, send: (InputEvent) -> Unit) {
                     val chosen = speed == value
                     Text(
                         label,
-                        color = if (chosen) Palette.Ink else Palette.TextPrimary,
+                        color = if (chosen) Palette.OnAccent else Palette.TextPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
                             .clip(RoundedCornerShape(50))
-                            .background(if (chosen) Palette.Mint else Color.White.copy(alpha = 0.08f))
+                            .background(if (chosen) Palette.Mint else Palette.Contrast.copy(alpha = 0.08f))
                             .clickable {
                                 speed = value
                                 prefs.edit().putFloat("speed", value).apply()
@@ -435,13 +435,13 @@ private fun AirPointerPad(sensors: SensorManager, gyroscope: Sensor, speed: Floa
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 if (holding) "Pointing" else "Hold to point",
-                color = if (holding) Palette.Ink else Palette.TextPrimary,
+                color = if (holding) Palette.OnAccent else Palette.TextPrimary,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
             )
             Text(
                 if (holding) "Turn the phone to move the pointer" else "Tap to click",
-                color = if (holding) Palette.Ink.copy(alpha = 0.7f) else Palette.TextSecondary,
+                color = if (holding) Palette.OnAccent.copy(alpha = 0.7f) else Palette.TextSecondary,
                 fontSize = 13.sp,
             )
         }
@@ -481,13 +481,13 @@ fun CommandsScreen(
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f),
                         )
-                        Text("Run", color = Palette.Mint, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text("Run", color = Palette.MintText, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     }
                     if (result?.id == command.id) {
                         Spacer(Modifier.height(8.dp))
                         Text(
                             if (result.exitCode == 0) "Done" else "Failed, code ${result.exitCode}",
-                            color = if (result.exitCode == 0) Palette.Mint else Palette.Coral,
+                            color = if (result.exitCode == 0) Palette.MintText else Palette.CoralText,
                             fontSize = 13.sp,
                         )
                         if (result.output.isNotBlank()) {

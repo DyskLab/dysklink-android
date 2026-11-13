@@ -141,7 +141,7 @@ private fun Chip(title: String, on: Boolean, icon: ImageVector? = null, onClick:
 private fun Tag(text: String, color: Color = Dysk.colors.textSecondary) {
     Text(
         text, Modifier.background(color.copy(alpha = 0.12f), CircleShape).padding(horizontal = 7.dp, vertical = 1.dp),
-        color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+        color = Dysk.colors.text(color), fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1,
     )
 }
 
@@ -415,7 +415,7 @@ private fun AppDetail(app: PcApp, care: PcCareModel) {
         }
         if (care.chosenGone) {
             Spacer(Modifier.height(Space.sm))
-            Text("${app.name} is no longer installed.", color = colors.mint, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+            Text("${app.name} is no longer installed.", color = colors.mintText, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
         } else {
             if (care.isRunning) {
                 Spacer(Modifier.height(Space.sm))
@@ -469,7 +469,7 @@ private fun AppDetail(app: PcApp, care: PcCareModel) {
 @Composable
 private fun StartupTab(model: DeskModel, care: PcCareModel) {
     val colors = Dysk.colors
-    care.startupError?.let { Text(it, color = colors.coral, fontSize = 12.sp) }
+    care.startupError?.let { Text(it, color = colors.coralText, fontSize = 12.sp) }
     val all = care.startup
     if (!care.startupLoaded) {
         LeadCard(DyskIcons.Power, colors.mint, "What starts with ${model.deviceName}", "Reading startup apps, tasks, and services…", busy = true) {}

@@ -164,7 +164,7 @@ fun TodoScreen(onBack: () -> Unit) {
         }
         problem?.let {
             Spacer(Modifier.height(6.dp))
-            Text(it, color = Palette.Coral, fontSize = 13.sp)
+            Text(it, color = Palette.CoralText, fontSize = 13.sp)
         }
         Spacer(Modifier.height(14.dp))
         val visible = list.visible(now, zone)
@@ -256,7 +256,7 @@ private fun TodoRow(
             Modifier.matchParentSize().clip(shape).background(Palette.Coral.copy(alpha = 0.25f * (abs(swipe.value) / width * 3).coerceAtMost(1f))),
             contentAlignment = if (swipe.value > 0) Alignment.CenterStart else Alignment.CenterEnd,
         ) {
-            Text("Delete", color = Palette.Coral, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 18.dp))
+            Text("Delete", color = Palette.CoralText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 18.dp))
         }
         Row(
             Modifier
@@ -321,7 +321,7 @@ private fun TodoRow(
                     DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; onStartRename() })
                     if (canMoveUp) DropdownMenuItem(text = { Text("Move up") }, onClick = { menu = false; onMove(-1) })
                     if (canMoveDown) DropdownMenuItem(text = { Text("Move down") }, onClick = { menu = false; onMove(1) })
-                    DropdownMenuItem(text = { Text("Delete", color = Palette.Coral) }, onClick = { menu = false; onDelete() })
+                    DropdownMenuItem(text = { Text("Delete", color = Palette.CoralText) }, onClick = { menu = false; onDelete() })
                 }
             }
         }

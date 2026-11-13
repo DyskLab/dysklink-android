@@ -181,7 +181,7 @@ fun DocScanScreen(
                     }
                     Spacer(Modifier.height(14.dp))
                     if (unavailable != null) {
-                        Text(unavailable, color = Palette.Amber, fontSize = 12.5.sp, lineHeight = 17.sp)
+                        Text(unavailable, color = Palette.AmberText, fontSize = 12.5.sp, lineHeight = 17.sp)
                     } else {
                         PrimaryButton(busy ?: "Scan a document", Modifier.fillMaxWidth()) { if (busy == null) startScan() }
                     }
@@ -269,7 +269,7 @@ private fun ToggleRow(title: String, detail: String, checked: Boolean, onChange:
         Switch(
             checked = checked,
             onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(checkedTrackColor = Palette.Mint, checkedThumbColor = Palette.Ink),
+            colors = SwitchDefaults.colors(checkedTrackColor = Palette.Mint, checkedThumbColor = Palette.OnAccent),
         )
     }
 }
@@ -440,7 +440,7 @@ private fun ScanSheet(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     if (name.trim() != scan.name && name.isNotBlank()) {
-                        Text("Save name", color = Palette.Mint, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        Text("Save name", color = Palette.MintText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clip(CircleShape).clickable { onRename(name) }.padding(vertical = 6.dp))
                     }
                 }
@@ -479,7 +479,7 @@ private fun ScanSheet(
                     if (onSendText != null) SecondaryButton("Text to computer clipboard", onClick = onSendText)
                 }
             }
-            Text("Delete this scan", color = Palette.Coral, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            Text("Delete this scan", color = Palette.CoralText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.clip(CircleShape).clickable { confirmDelete = true }.padding(vertical = 6.dp))
         }
     }
@@ -488,7 +488,7 @@ private fun ScanSheet(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete ${scan.name}?") },
             text = { Text("It's removed from DyskLink. Copies saved to Documents or sent to other devices stay there.") },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete", color = Palette.Coral) } },
+            confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Delete", color = Palette.CoralText) } },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
     }

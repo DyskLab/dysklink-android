@@ -69,7 +69,7 @@ fun NetworkHomeCard(onOpen: () -> Unit) {
             val down = speed.downMbps
             Text(
                 if (down != null) "↓ ${NetTools.formatMbps(down)} Mbps" else "Speed test",
-                color = Palette.Sky,
+                color = Palette.SkyText,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -153,7 +153,7 @@ private fun SpeedCard(info: NetworkTools.NetworkInfo) {
                 SpeedPhase.Done -> "Response time ${speed.latencyMs} ms · used about ${speed.usedMb} MB"
                 SpeedPhase.Failed -> speed.error ?: "The test failed."
             },
-            color = if (speed.phase == SpeedPhase.Failed || (speed.phase == SpeedPhase.Idle && info.isMetered)) Palette.Amber else Palette.TextSecondary,
+            color = if (speed.phase == SpeedPhase.Failed || (speed.phase == SpeedPhase.Idle && info.isMetered)) Palette.AmberText else Palette.TextSecondary,
             fontSize = 12.sp,
             lineHeight = 17.sp,
         )
@@ -182,7 +182,7 @@ private fun SpeedTile(
             .background(if (active) color.copy(alpha = 0.12f) else Palette.PanelRaised)
             .padding(12.dp),
     ) {
-        Text(label, color = if (active) color else Palette.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text(label, color = if (active) Palette.text(color) else Palette.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         Row(verticalAlignment = Alignment.Bottom) {
             Text(value?.let { NetTools.formatMbps(it) } ?: "–", color = Palette.TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
             Text(" Mbps", color = Palette.TextFaint, fontSize = 12.sp, modifier = Modifier.padding(bottom = 6.dp))
@@ -212,7 +212,7 @@ private fun DevicesCard() {
         }
         scan.note?.let {
             Spacer(Modifier.height(8.dp))
-            Text(it, color = Palette.Amber, fontSize = 12.sp)
+            Text(it, color = Palette.AmberText, fontSize = 12.sp)
         }
         scan.devices.forEach { device ->
             Spacer(Modifier.height(6.dp))
@@ -281,7 +281,7 @@ private fun PingCard(info: NetworkTools.NetworkInfo) {
             listOfNotNull(info.gateway?.let { "Router" to it }, "Google" to "google.com", "Cloudflare" to "1.1.1.1").forEach { (label, target) ->
                 Text(
                     label,
-                    color = Palette.Sky,
+                    color = Palette.SkyText,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
@@ -301,7 +301,7 @@ private fun PingCard(info: NetworkTools.NetworkInfo) {
                 Text("Ping is blocked here, so this times a web connection instead.", color = Palette.TextFaint, fontSize = 12.sp)
             }
             ping.lines.forEach { Text(it, color = Palette.TextSecondary, fontSize = 13.sp) }
-            ping.error?.let { Text(it, color = Palette.Amber, fontSize = 13.sp) }
+            ping.error?.let { Text(it, color = Palette.AmberText, fontSize = 13.sp) }
             ping.summary?.takeIf { ping.error == null }?.let { summary ->
                 Spacer(Modifier.height(6.dp))
                 Text(
@@ -310,7 +310,7 @@ private fun PingCard(info: NetworkTools.NetworkInfo) {
                     } else {
                         "Average %.0f ms (%.0f to %.0f) · %d%% lost".format(summary.avg, summary.min, summary.max, summary.lossPercent)
                     },
-                    color = if (summary.received == 0) Palette.Coral else Palette.TextPrimary,
+                    color = if (summary.received == 0) Palette.CoralText else Palette.TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
