@@ -88,7 +88,9 @@ fun main(args: Array<String>) {
         val pairing by app.hub.pairing.collectAsState()
         val closeToTray by app.closeToTray.collectAsState()
         val windowState = rememberWindowState(placement = WindowPlacement.Floating, position = savedPosition(app.settings), size = savedSize(app.settings))
-        val quit = { trayHost?.close(); app.stop(); exitApplication() }
+        // The island at the top of the screen: a window of its own, made and closed with its switch.
+        val island = remember { IslandWindow(app.island).also { it.start() } }
+        val quit = { island.stop(); trayHost?.close(); app.stop(); exitApplication() }
         var raise by remember { mutableStateOf(0) }
         LaunchedEffect(Unit) { trayClicks.collect { visible = true; raise++ } }
         LaunchedEffect(Unit) { app.showRequests.collect { visible = true; raise++ } }
@@ -394,6 +396,7 @@ private class AppModel(private val app: DesktopApp, override val hasTray: Boolea
     override fun openLink(url: String) = Platform.browse(url)
     override fun hintAction(id: String) { app.hintAction(id) }
     override val webcam = app.webcam.state.takeIf { app.webcam.available }
+    override val island: IslandService get() = app.island
     override fun setWebcamOn(on: Boolean) { app.setWebcamOn(on) }
     override fun setWebcamView(rotation: Int, mirror: Boolean) = app.webcam.setView(rotation, mirror)
     override fun autostartOn() = Autostart.isOn()

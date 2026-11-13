@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 /** A system notification to show from the tray. */
@@ -101,10 +102,13 @@ class DesktopApp(private val scope: CoroutineScope) {
     /** Clipboard History on the Tools page, with its quick picker. */
     val clipHistory = ClipHistoryService(
         scope, settings, Platform.dataDir, { portal },
-        passingThrough = { systemClipboard.passingThrough },
+        passingThrough = { systemClipboard.passingThrough ?: concealed },
         pressPaste = { input.pasteNow() },
         canPaste = { input.isAvailable },
     )
+
+    /** A one-time code the island just copied: on the clipboard, never in the history or on phones. */
+    @Volatile private var concealed: String? = null
 
     private fun copyToClipboard(text: String) {
         runCatching { java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(java.awt.datatransfer.StringSelection(text), null) }
@@ -396,6 +400,22 @@ class DesktopApp(private val scope: CoroutineScope) {
     /** Runs a change on the tools; when anything changed, phones get the new state. */
     fun tools(change: PcNotch.() -> Boolean): Boolean = notch.change().also { if (it) hub.notchChanged() }
 
+    /** The island at the top of the screen, like the Mac notch. Off until it's turned on in Settings. */
+    val island: IslandService by lazy {
+        IslandService(
+            scope, settings, Platform.dataDir, tools, ::tools, hub.phones, hub.notifications, hub.fileTransfers.transfers,
+            clipHistory = clipHistory.view,
+            clipAction = { clipHistory.act(it) },
+            clipImage = { clipHistory.store.imageFile(it) },
+            sendFile = { id, file -> hub.sendFile(id, file) },
+            dismissNotification = { id, key -> hub.dismissNotification(id, key) },
+            copyConcealed = { code -> concealed = code; systemClipboard.set(code) },
+            popup = { title, text -> _popups.tryEmit(Popup(title, text)) },
+            pcBattery = battery.view.map { v -> v?.reading?.let { it.percent to (it.pluggedIn == true) } }
+                .stateIn(scope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null),
+        )
+    }
+
     private fun startTools() {
         scope.launch {
             while (true) {
@@ -403,11 +423,13 @@ class DesktopApp(private val scope: CoroutineScope) {
                 if (tick.changed) hub.notchChanged()
                 tick.finished?.let { finished ->
                     val (title, message) = PcNotch.finishedText(finished, tick.next, notch.tools.value.pomodoro.settings)
+                    if (island.isOn) island.pomodoroFinished(finished, tick.next)
                     _popups.tryEmit(Popup(title, message))
                 }
                 if (tick.remindWater) {
                     val water = notch.tools.value.water
                     val today = water.totalToday(System.currentTimeMillis(), java.time.ZoneId.systemDefault())
+                    if (island.isOn) island.waterReminder(water.fraction(System.currentTimeMillis(), java.time.ZoneId.systemDefault()))
                     _popups.tryEmit(Popup("Time to drink water", "$today of ${water.settings.goalMl} ml today."))
                 }
                 _trayStatus.value = trayText(notch.tools.value)
@@ -533,12 +555,15 @@ class DesktopApp(private val scope: CoroutineScope) {
             }
 
             override fun notification(item: NotificationItem, from: String) {
+                // A one-time code shows in the island with Copy instead of as a popup.
+                if (island.isOn && island.onNotification(item, from)) return
                 if (!_notifyOn.value) return
                 val title = listOfNotNull(item.app, item.title).distinct().joinToString(": ")
                 _popups.tryEmit(Popup(title, item.text.orEmpty()))
             }
 
             override fun sms(items: List<SmsItem>, from: String) {
+                if (island.isOn && island.onSms(items, from)) return
                 if (!_notifyOn.value) return
                 // A phone that shares its notifications already shows its messaging app's own one here.
                 if ("notifications" in hub.phones.value.firstOrNull { it.id == from }?.features.orEmpty()) return
@@ -681,6 +706,7 @@ class DesktopApp(private val scope: CoroutineScope) {
             Runtime.getRuntime().addShutdownHook(Thread({ runCatching { source.shutdown() } }, "dysk-input-release"))
         }
         clipHistory.start()
+        if (island.isOn) island.start() else island.recheckHints()
         windowTidy.start()
         launcher.start()
         battery.start()
@@ -711,6 +737,7 @@ class DesktopApp(private val scope: CoroutineScope) {
         advertiser.stop()
         systemClipboard.stop()
         clipHistory.stop()
+        island.stop()
         windowTidy.stop()
         launcher.stop()
         battery.stop()

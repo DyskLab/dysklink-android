@@ -113,6 +113,11 @@ fun SettingsPage(model: DeskModel) {
             TrayMenuCard(model)
         }
 
+        model.island?.let { island ->
+            SectionLabel("The island")
+            IslandSettingsCard(model, island)
+        }
+
         SectionLabel("Phones")
         GlassCard {
             SettingRow("Share the clipboard", "Text and pictures copied here can be pasted on your devices, and the other way round.", clipboardOn, onChange = model::setClipboardOn)

@@ -78,6 +78,8 @@ interface DeskModel {
 
     /** "Use as webcam": the phone camera as DyskLink Camera in video apps. Null where this PC can't have one. */
     val webcam: StateFlow<WebcamState>? get() = null
+    /** The island at the top of the screen, like the Mac notch; null where there's none (snapshots). */
+    val island: id.dysklink.desktop.IslandService? get() = null
     fun setWebcamOn(on: Boolean) {}
     /** The camera window's turn and mirror, which the webcam takes too. */
     fun setWebcamView(rotation: Int, mirror: Boolean) {}

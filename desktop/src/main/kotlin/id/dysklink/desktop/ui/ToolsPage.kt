@@ -105,6 +105,7 @@ fun ToolsPage(model: DeskModel, clock: () -> Long = System::currentTimeMillis, u
             color = Dysk.colors.textSecondary, fontSize = 13.sp,
         )
         Spacer(Modifier.height(2.dp))
+        model.island?.let { IslandSwitchCard(it) }
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             if (maxWidth >= 760.dp) {
                 Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
