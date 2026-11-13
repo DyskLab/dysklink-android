@@ -146,6 +146,10 @@ interface DeskModel {
     val screenTo: StateFlow<String?>
     fun setScreenOutOn(on: Boolean)
     fun stopScreenOut()
+    /** The phone as a second display: what this PC can do and who it is now. Null where it isn't offered (snapshots set it). */
+    val secondDisplay: StateFlow<id.dysklink.desktop.SecondDisplayView>? get() = null
+    /** Windows: the switch for the experimental Virtual Display Driver path. */
+    fun setExtendExperimentOn(on: Boolean) {}
     /** False when the name or command line is empty or too long. */
     fun addCommand(name: String, command: String): Boolean
     fun removeCommand(id: String)
@@ -154,6 +158,15 @@ interface DeskModel {
     fun endTerminals(deviceId: String)
     fun setRemoteOn(on: Boolean)
     fun setCommandAsCtrl(on: Boolean)
+
+    /** This PC's own mouse and keyboard on a Mac: the settings and whether it's there now. Null where it isn't offered. */
+    val sourceInput: StateFlow<id.dysklink.desktop.SourceView>? get() = null
+    fun setSourceOn(on: Boolean) {}
+    fun setSourceMac(deviceId: String) {}
+    fun setSourceEdge(edge: id.dysklink.desktop.ScreenEdge) {}
+    fun setCtrlAsCommand(on: Boolean) {}
+    /** Brings this PC's pointer back from the Mac at once. */
+    fun stopSource() {}
     fun stopRemote()
 
     // The phone's contacts and files.

@@ -92,7 +92,7 @@ data class Peer(
     val canOpenTerminal: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_TERMINAL)
     /** A Mac, or a PC that shows its own screen here as JPEG frames (`pc-screen-out`). */
     val canSeeComputerScreen: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_SCREEN_OUT)
-    /** A Mac, or a PC that uses this phone as an extra display (`pc-display`, which no PC build lists yet). */
+    /** A Mac, or a PC that uses this phone as an extra display (`pc-display`, listed only where the PC can add a monitor). */
     val canExtend: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_DISPLAY)
     /** A Mac, or a PC that runs the Stream Deck's shortcuts as its own (`pc-deck`). */
     val canDeck: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_DECK)

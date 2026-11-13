@@ -97,6 +97,8 @@ object PortalBits {
     const val KEYBOARD = 1
     const val POINTER = 2
     const val MONITOR = 1
+    /** A monitor the compositor adds for the stream, sized by what the stream's reader asks for (GNOME, KDE Plasma 6). */
+    const val VIRTUAL = 4
     const val CURSOR_HIDDEN = 1
     const val CURSOR_EMBEDDED = 2
     /** Kept until the user takes it back, so the dialog shows once. */
@@ -126,9 +128,9 @@ object PortalBits {
      * SelectSources: one monitor, with the pointer drawn in when the portal can. In a remote desktop session the
      * permission is kept through SelectDevices, so [persist] is false there; a plain screen cast keeps it from version 4.
      */
-    fun selectSources(token: String, version: Int, cursorModes: Int, restoreToken: String?, persist: Boolean): Map<String, Variant<*>> = buildMap {
+    fun selectSources(token: String, version: Int, cursorModes: Int, restoreToken: String?, persist: Boolean, types: Int = MONITOR): Map<String, Variant<*>> = buildMap {
         put("handle_token", Variant(token))
-        put("types", Variant(UInt32(MONITOR.toLong())))
+        put("types", Variant(UInt32(types.toLong())))
         put("multiple", Variant(false))
         if (cursorModes and CURSOR_EMBEDDED != 0) put("cursor_mode", Variant(UInt32(CURSOR_EMBEDDED.toLong())))
         if (persist && version >= 4) {
@@ -207,6 +209,9 @@ class PortalTokens(private val file: File) {
         const val INPUT = "remoteDesktop"
         const val SCREEN_WITH_INPUT = "remoteDesktopScreen"
         const val SCREEN = "screenCast"
+        /** A virtual monitor for the phone as a second display, alone and with the pointer. */
+        const val VIRTUAL = "virtualScreen"
+        const val VIRTUAL_WITH_INPUT = "virtualScreenInput"
     }
 }
 
@@ -332,15 +337,19 @@ class PortalClient(
      * The pointer and keyboard, and with [screen] one monitor too, in one session and one dialog. Kept by a restore
      * token, so the dialog only shows the first time.
      */
-    fun startRemoteDesktop(screen: PortalOffer?, onClosed: (PortalSession) -> Unit = {}): PortalSession {
+    fun startRemoteDesktop(screen: PortalOffer?, onClosed: (PortalSession) -> Unit = {}, sources: Int = PortalBits.MONITOR): PortalSession {
         val offer = offer(PortalBits.REMOTE_DESKTOP)
         val version = offer.version ?: throw PortalRefused(false, "This desktop has no remote desktop portal.")
-        val kind = if (screen != null) PortalTokens.SCREEN_WITH_INPUT else PortalTokens.INPUT
+        val kind = when {
+            screen == null -> PortalTokens.INPUT
+            sources == PortalBits.VIRTUAL -> PortalTokens.VIRTUAL_WITH_INPUT
+            else -> PortalTokens.SCREEN_WITH_INPUT
+        }
         val handle = createSession { remoteDesktop.CreateSession(it) }
         try {
             request(15_000) { remoteDesktop.SelectDevices(handle, PortalBits.selectDevices(it, version, tokens.get(kind))) }
             if (screen != null) {
-                request(15_000) { screenCast.SelectSources(handle, PortalBits.selectSources(it, screen.version ?: 1, screen.cursorModes, null, persist = false)) }
+                request(15_000) { screenCast.SelectSources(handle, PortalBits.selectSources(it, screen.version ?: 1, screen.cursorModes, null, persist = false, types = sources)) }
             }
             val results = request(answerTimeoutMs) { remoteDesktop.Start(handle, "", mapOf("handle_token" to Variant(it))) }
             tokens.set(kind, PortalBits.string(results["restore_token"]) ?: tokens.get(kind))
@@ -355,21 +364,22 @@ class PortalClient(
     }
 
     /** One monitor through ScreenCast alone, for when the pointer isn't wanted or there's no RemoteDesktop. */
-    fun startScreenCast(offer: PortalOffer, onClosed: (PortalSession) -> Unit = {}): PortalSession {
+    fun startScreenCast(offer: PortalOffer, onClosed: (PortalSession) -> Unit = {}, sources: Int = PortalBits.MONITOR): PortalSession {
         val version = offer.version ?: throw PortalRefused(false, "This desktop has no screen sharing portal.")
+        val kind = if (sources == PortalBits.VIRTUAL) PortalTokens.VIRTUAL else PortalTokens.SCREEN
         val handle = createSession { screenCast.CreateSession(it) }
         try {
             request(15_000) {
-                screenCast.SelectSources(handle, PortalBits.selectSources(it, version, offer.cursorModes, tokens.get(PortalTokens.SCREEN), persist = true))
+                screenCast.SelectSources(handle, PortalBits.selectSources(it, version, offer.cursorModes, tokens.get(kind), persist = true, types = sources))
             }
             val results = request(answerTimeoutMs) { screenCast.Start(handle, "", mapOf("handle_token" to Variant(it))) }
-            tokens.set(PortalTokens.SCREEN, PortalBits.string(results["restore_token"]) ?: tokens.get(PortalTokens.SCREEN))
+            tokens.set(kind, PortalBits.string(results["restore_token"]) ?: tokens.get(kind))
             val streams = PortalBits.streams(results["streams"])
             if (streams.isEmpty()) throw PortalRefused(false, "No screen was shared.")
             return track(PortalSession(this, handle, 0, streams), onClosed)
         } catch (e: Exception) {
             closeHandle(handle)
-            if (e is PortalRefused && !e.cancelled) tokens.set(PortalTokens.SCREEN, null)
+            if (e is PortalRefused && !e.cancelled) tokens.set(kind, null)
             throw e
         }
     }

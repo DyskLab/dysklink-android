@@ -458,7 +458,8 @@ fun MacScreenScreen(
                 }
             }
             if (extend) {
-                ToolChip(if (large) "Sharp text" else "Larger text") {
+                // A PC's monitor is the phone's size at 1x: fewer pixels means larger text, not sharper text.
+                ToolChip(if (!large) "Larger text" else if (isMac) "Sharp text" else "Smaller text") {
                     large = !large
                     prefs.edit().putBoolean("large", large).apply()
                     if (connected) {

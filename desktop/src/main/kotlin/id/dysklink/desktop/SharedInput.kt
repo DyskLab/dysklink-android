@@ -23,7 +23,7 @@ import kotlin.math.roundToInt
 
 // A Mac's mouse and keyboard on this PC: the Mac pushes its pointer past the edge it chose for this PC, and sends
 // `remote.input` until the pointer comes back past the same edge here (see PROTOCOL.md, One mouse and keyboard).
-// This PC is only ever the target; it doesn't push its own pointer into a Mac.
+// This file is this PC as the target; SharedInputSource.kt is this PC's own mouse and keyboard going to a Mac.
 
 /** Mac virtual key codes (US key positions) to AWT key codes, as Robot presses them. */
 object MacKeys {
@@ -98,6 +98,13 @@ enum class ScreenEdge {
     LEFT, RIGHT, TOP, BOTTOM;
 
     val wire: String get() = name.lowercase()
+
+    val opposite: ScreenEdge get() = when (this) {
+        LEFT -> RIGHT
+        RIGHT -> LEFT
+        TOP -> BOTTOM
+        BOTTOM -> TOP
+    }
 
     /** Whether a movement pushes toward this edge. */
     fun pushes(dx: Double, dy: Double): Boolean = when (this) {

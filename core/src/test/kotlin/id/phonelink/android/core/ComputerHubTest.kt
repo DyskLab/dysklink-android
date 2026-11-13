@@ -48,6 +48,10 @@ class ComputerHubTest {
         val clipboard = CopyOnWriteArrayList<String>()
         val rings = CopyOnWriteArrayList<Boolean>()
         val popups = CopyOnWriteArrayList<String>()
+        /** `remote.*` from Macs, as "type kind edge-or-key". */
+        val remote = CopyOnWriteArrayList<String>()
+        /** Computers heard from (any message, pongs included), for the source's heartbeat. */
+        val heard = CopyOnWriteArrayList<String>()
         val received = File(dir, "received").apply { mkdirs() }
         val hub = ComputerHub(
             dir, scope(),
@@ -63,6 +67,10 @@ class ComputerHubTest {
                 override fun phoneSoundChunk(from: String, pcm: ByteArray) { sound += "chunk ${pcm.size}" }
                 override fun phoneSoundEnded(from: String) { sound += "end" }
                 override fun clipboardImage(png: ByteArray, from: String) { images += png }
+                override fun remote(type: String, event: RemoteEvent?, from: String) {
+                    remote += "$type ${event?.kind ?: ""} ${event?.edge ?: event?.keyCode ?: ""}".trim()
+                }
+                override fun heard(from: String) { heard += from }
             },
             fileSinks = sink(received),
             port = 0,
@@ -559,6 +567,72 @@ class ComputerHubTest {
         pc.hub.ring(mac.id, true)
         Thread.sleep(3000)
         println("PC_SYNC_DONE ${file.name}")
+    }
+
+    /** Pairs [pc] with the debug Mac app on [port] and returns the Mac's ID. */
+    private fun pairWithMac(pc: Pc, port: Int): String {
+        pc.hub.setComputersEnabled(true)
+        pc.hub.dialComputer("127.0.0.1", port)
+        waitUntil("The Mac didn't connect", 20) { pc.hub.phones.value.any { it.isConnected && it.platform == "macos" } }
+        val mac = pc.hub.phones.value.first { it.platform == "macos" }
+        pc.hub.requestPairing(mac.id)
+        waitUntil("The PC isn't typing a code") { pc.hub.pairing.value?.typing == true }
+        pc.hub.submitCode("123456")
+        waitUntil("Pairing with the Mac didn't finish", 15) { pc.hub.phones.value.any { it.id == mac.id && it.isPaired } }
+        return mac.id
+    }
+
+    /**
+     * Against the debug Mac app (pc-sync-test.sh, with PHONELINK_TEST_REMOTE_ACCEPT): this PC's mouse and keyboard on
+     * the Mac, as the desktop app's SharedInputSource sends them. Enter, a move, a key, pushes back past the edge until
+     * the Mac sends `remote.leave`, and a pong for the heartbeat. Then a PC without `pc-shared-input-source` is refused.
+     */
+    @Test
+    fun aPcSourceDrivesTheMacApp() {
+        val port = System.getenv("DYSKLINK_IT_MAC_PORT")?.toIntOrNull() ?: return
+        val pc = Pc(caps = PhoneLinkProtocol.PC_CAPS + PhoneLinkProtocol.CAP_PC_SHARED_INPUT_SOURCE)
+        val mac = pairWithMac(pc, port)
+        waitUntil("The Mac doesn't allow it", 10) { pc.hub.phones.value.first { it.id == mac }.info?.remoteControl == true }
+        fun input(event: RemoteEvent) = pc.hub.sendRemote(mac, Envelope(MessageType.REMOTE_INPUT, remote = event))
+        assertTrue(pc.hub.sendRemote(mac, Envelope(MessageType.REMOTE_ENTER, remote = RemoteEvent("enter", edge = "left", at = 0.5))))
+        assertTrue(pc.hub.sendRemote(mac, Envelope(MessageType.PING)))
+        input(RemoteEvent("move", dx = 5.0, dy = 0.0))
+        input(RemoteEvent("key", keyCode = 0, keyDown = true, flags = 0))
+        input(RemoteEvent("key", keyCode = 0, keyDown = false, flags = 0))
+        waitUntil("No pong from the Mac", 10) { mac in pc.heard }
+        // Back past the left edge, where this PC sits: the Mac hands the pointer back.
+        repeat(6) { input(RemoteEvent("move", dx = -8.0, dy = 0.0)); Thread.sleep(50) }
+        waitUntil("The Mac didn't send remote.leave: ${pc.remote}", 10) { pc.remote.any { it.startsWith(MessageType.REMOTE_LEAVE) } }
+        assertEquals("${MessageType.REMOTE_LEAVE} leave left", pc.remote.first { it.startsWith(MessageType.REMOTE_LEAVE) })
+        assertFalse(pc.remote.any { it.startsWith(MessageType.REMOTE_EXIT) }, "accepted, not refused: ${pc.remote}")
+
+        // A PC that doesn't say it's a source is refused with remote.exit.
+        val plain = Pc(caps = PhoneLinkProtocol.PC_CAPS)
+        val sameMac = pairWithMac(plain, port)
+        assertTrue(plain.hub.sendRemote(sameMac, Envelope(MessageType.REMOTE_ENTER, remote = RemoteEvent("enter", edge = "left", at = 0.5))))
+        waitUntil("The Mac didn't refuse: ${plain.remote}", 10) { plain.remote.any { it.startsWith(MessageType.REMOTE_EXIT) } }
+        println("PC_SOURCE_DONE")
+    }
+
+    @Test
+    fun aMacsRemoteLeaveAndPongsReachThePcButNotFromAPc() {
+        // Two PCs: one plays a Mac only by its hello, which isn't enough for remote.leave (the record says windows).
+        val a = Pc(caps = PhoneLinkProtocol.CAPS)
+        val b = Pc(caps = PhoneLinkProtocol.CAPS)
+        a.hub.setComputersEnabled(true)
+        b.hub.setComputersEnabled(true)
+        a.hub.dialComputer("127.0.0.1", b.hub.boundPort)
+        waitUntil("The PCs didn't connect") { a.hub.phones.value.any { it.id == b.hub.deviceId && it.isConnected } }
+        a.hub.requestPairing(b.hub.deviceId)
+        waitUntil("No code") { b.hub.pairing.value?.code?.length == 6 }
+        a.hub.submitCode(b.hub.pairing.value!!.code)
+        waitUntil("Pairing didn't finish") { a.hub.phones.value.any { it.id == b.hub.deviceId && it.isPaired } }
+        b.hub.sendRemote(a.hub.deviceId, Envelope(MessageType.REMOTE_LEAVE, remote = RemoteEvent("leave", edge = "left", at = 0.5)))
+        b.hub.sendRemote(a.hub.deviceId, Envelope(MessageType.PING))
+        waitUntil("No pong heard") { b.hub.deviceId in a.heard && a.hub.deviceId in b.heard }
+        b.hub.sendRemote(a.hub.deviceId, Envelope(MessageType.REMOTE_EXIT))
+        waitUntil("remote.exit is taken from any computer") { a.remote.any { it.startsWith(MessageType.REMOTE_EXIT) } }
+        assertFalse(a.remote.any { it.startsWith(MessageType.REMOTE_LEAVE) }, "remote.leave only from a Mac: ${a.remote}")
     }
 
     @Test

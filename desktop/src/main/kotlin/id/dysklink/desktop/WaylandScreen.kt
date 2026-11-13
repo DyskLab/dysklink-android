@@ -73,6 +73,32 @@ object GstPipeline {
 }
 
 /**
+ * gst-launch-1.0 for a virtual monitor's PipeWire [node]. The caps right after pipewiresrc ask the stream for [width] ×
+ * [height]: the compositor sizes the monitor from what its reader prefers, so that's the size the monitor gets. With
+ * [fixed] false (a compositor that keeps its own size) the stream is taken as it comes and scaled to fit [maxLong].
+ */
+object GstVirtualPipeline {
+    fun command(node: Long, width: Int, height: Int, fixed: Boolean, maxLong: Int, keepalive: Boolean = false): List<String> = buildList {
+        add("gst-launch-1.0"); add("-q")
+        add("pipewiresrc"); add("path=$node"); add("do-timestamp=true")
+        if (keepalive) add("keepalive-time=1000")
+        if (fixed) { add("!"); add("video/x-raw,width=$width,height=$height") }
+        add("!"); add("videorate"); add("max-rate=${GstPipeline.FPS}"); add("drop-only=true")
+        val (w, h) = JpegFrames.fit(width, height, maxLong)
+        if (!fixed || w != width || h != height) {
+            add("!"); add("videoscale"); add("add-borders=true"); add("!"); add("video/x-raw,width=$w,height=$h")
+        }
+        add("!"); add("videoconvert")
+        add("!"); add("jpegenc"); add("quality=${GstPipeline.QUALITY}")
+        add("!"); add("multipartmux"); add("boundary=${GstPipeline.BOUNDARY}")
+        add("!"); add("fdsink"); add("fd=1")
+    }
+
+    /** gst-launch's words when the compositor didn't take the size asked for. */
+    fun refusedSize(errors: String): Boolean = "not-negotiated" in errors || "not negotiated" in errors.lowercase()
+}
+
+/**
  * Reads the parts of a multipart stream as multipartmux writes them: "--boundary", headers, a blank line, then
  * Content-Length bytes. Without Content-Length a part ends where the next boundary starts. Blocks; null at the end.
  */
@@ -160,6 +186,15 @@ object JpegSize {
             i += 2 + length
         }
         return null
+    }
+
+    /** The picture as GStreamer made it, or smaller when the network wants much lower quality. */
+    fun reencode(jpeg: ByteArray, quality: Int): ByteArray? {
+        if (quality >= GstPipeline.QUALITY - 15) return jpeg
+        val image = runCatching { ImageIO.read(ByteArrayInputStream(jpeg)) }.getOrNull() ?: return jpeg
+        val rgb = java.awt.image.BufferedImage(image.width, image.height, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        rgb.createGraphics().apply { drawImage(image, 0, 0, null); dispose() }
+        return ScreenPictures.jpeg(rgb, quality) ?: jpeg
     }
 
     /** A few numbers that change with any byte, for [PcScreen.hash] to tell a new picture from the same one. */
@@ -286,14 +321,7 @@ class PortalScreenSource(
         return ScreenGrab(width, height, JpegSize.fingerprint(jpeg)) { quality -> reencode(jpeg, quality) }
     }
 
-    /** The picture as GStreamer made it, or smaller when the network wants much lower quality. */
-    private fun reencode(jpeg: ByteArray, quality: Int): ByteArray? {
-        if (quality >= GstPipeline.QUALITY - 15) return jpeg
-        val image = runCatching { ImageIO.read(ByteArrayInputStream(jpeg)) }.getOrNull() ?: return jpeg
-        val rgb = java.awt.image.BufferedImage(image.width, image.height, java.awt.image.BufferedImage.TYPE_INT_RGB)
-        rgb.createGraphics().apply { drawImage(image, 0, 0, null); dispose() }
-        return ScreenPictures.jpeg(rgb, quality) ?: jpeg
-    }
+    private fun reencode(jpeg: ByteArray, quality: Int): ByteArray? = JpegSize.reencode(jpeg, quality)
 
     /** The session, started here if there's none; waits while the user is asked. Null when it was refused. */
     private fun session(): PortalSession? {

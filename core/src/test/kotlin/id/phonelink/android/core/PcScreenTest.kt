@@ -88,7 +88,7 @@ class PcScreenTest {
     fun theScreenCapIsTheDesktopAppsAndGatesWhatThePhoneTakes() {
         assertTrue(PhoneLinkProtocol.CAP_PC_SCREEN_OUT in PhoneLinkProtocol.PC_CAPS)
         assertFalse(PhoneLinkProtocol.CAP_PC_SCREEN_OUT in PhoneLinkProtocol.PHONE_CAPS)
-        assertFalse(PhoneLinkProtocol.CAP_PC_DISPLAY in PhoneLinkProtocol.PC_CAPS, "No PC makes an extra display yet")
+        assertFalse(PhoneLinkProtocol.CAP_PC_DISPLAY in PhoneLinkProtocol.PC_CAPS, "Only added where the PC can add a monitor")
         assertFalse(PhoneLinkProtocol.CAP_PC_DISPLAY in PhoneLinkProtocol.PHONE_CAPS)
         fun peer(platform: String, caps: List<String>) = Peer("x", "X", platform, "", true, true, null, caps = caps)
         assertTrue(peer("macos", emptyList()).canSeeComputerScreen, "A Mac always shows its screen")

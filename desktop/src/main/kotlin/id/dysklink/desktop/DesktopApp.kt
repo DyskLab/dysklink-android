@@ -28,6 +28,7 @@ import id.phonelink.android.core.PomodoroPhase
 import id.phonelink.android.core.PomodoroState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.awt.GraphicsEnvironment
 import java.io.File
 import java.time.LocalDateTime
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +38,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 
 /** A system notification to show from the tray. */
 data class Popup(val title: String, val message: String)
@@ -219,6 +221,46 @@ class DesktopApp(private val scope: CoroutineScope) {
     /** GStreamer as found, checked again only while it's missing. */
     private fun gstCheck(): GstCheck = gst?.takeIf { it.ready } ?: GstCheck.probe({ Typing.onPath(it) }, GstCheck::run).also { gst = it }
 
+    // The phone as a second display: a monitor added for it, shown through "Let phones see this screen".
+
+    private val _extendExperiment = MutableStateFlow(settings.bool("extendExperiment", false))
+    /** Windows: the experimental Virtual Display Driver path is offered. */
+    val extendExperiment: StateFlow<Boolean> = _extendExperiment.asStateFlow()
+    /** GNOME's own session bus connection for Mutter's API, apart from the portal's. */
+    private val mutterBus: org.freedesktop.dbus.connections.impl.DBusConnection? by lazy {
+        val address = LinuxTray.sessionAddress() ?: return@lazy null
+        runCatching { org.freedesktop.dbus.connections.impl.DBusConnectionBuilder.forAddress(address).withShared(false).build() }
+            .onFailure { CoreLog.w("DyskLink", "No session bus for Mutter", it) }.getOrNull()
+    }
+    private val gnomeVersion: Int? by lazy {
+        if (HostChecks.loginDesktop(System.getenv("XDG_CURRENT_DESKTOP")) != LoginDesktop.Gnome) null
+        else MutterBits.shellVersion(GstCheck.run(listOf("gnome-shell", "--version"))?.second)
+    }
+    private val windowsVdd: WindowsVddBackend? =
+        if (Platform.isWindows) WindowsVddBackend({ _extendExperiment.value }, { Vdd.bundled() }, marker = File(Platform.dataDir, "vdd-attached")) else null
+    private val extendBackends: List<ExtendBackend> = when {
+        Platform.isWindows -> listOfNotNull(windowsVdd)
+        Platform.isLinux && input.isWayland -> listOf(
+            PortalVirtualBackend({ portal }, { gstCheck() }, { _controlOn.value }),
+            MutterVirtualBackend({ mutterBus }, { gstCheck() }, { _controlOn.value }, { gnomeVersion }),
+        )
+        Platform.isLinux -> listOf(X11OutputBackend({ Typing.onPath(it) }, GstCheck::run) { input.hasRobot })
+        else -> emptyList()
+    }
+    val secondDisplay = SecondDisplayService { extendBackends }
+    /** What the Second display card shows. */
+    val secondDisplayView: StateFlow<SecondDisplayView> by lazy {
+        kotlinx.coroutines.flow.combine(secondDisplay.probes, secondDisplay.checking, hub.extend, _screenOutOn, _extendExperiment) { probes, checking, extend, screenOn, experiment ->
+            SecondDisplayView.of(probes, checking, extend, { id -> hub.phones.value.firstOrNull { it.id == id }?.name }, screenOn, Platform.isWindows, experiment)
+        }.stateIn(scope, kotlinx.coroutines.flow.SharingStarted.Eagerly, SecondDisplayView(experimentShown = Platform.isWindows))
+    }
+
+    fun setExtendExperimentOn(on: Boolean) {
+        _extendExperiment.value = on
+        settings.set("extendExperiment", on)
+        recheckHost()
+    }
+
     private fun waylandHost(): WaylandHost? {
         val w = wayland ?: return null
         w.recheck()
@@ -268,6 +310,77 @@ class DesktopApp(private val scope: CoroutineScope) {
 
     /** Whether a Mac's mouse and keyboard can work here at all. */
     val remoteAvailable: Boolean get() = input.isAvailable
+
+    // This PC's own mouse and keyboard on a Mac.
+
+    /** Low-level hooks on Windows, XInput2 and grabs on X11. None on Wayland, which doesn't allow it. */
+    private val captureBackend: CaptureBackend? = when {
+        Platform.isWindows -> WindowsCapture()
+        Platform.isLinux && Typing.desktop() != Desktop.WAYLAND && !GraphicsEnvironment.isHeadless() -> X11Capture()
+        else -> null
+    }
+    private val xinput2: Boolean? by lazy { (captureBackend as? X11Capture)?.available() }
+    private val _source = MutableStateFlow(
+        SourceView(
+            supported = captureBackend != null,
+            on = settings.bool("remoteSource", false),
+            mac = settings.string("remoteSourceMac"),
+            edge = ScreenEdge.of(settings.string("remoteSourceEdge")) ?: ScreenEdge.RIGHT,
+            ctrlAsCommand = settings.bool("remoteCtrlAsCommand", true),
+        ),
+    )
+    /** "Use this PC's mouse and keyboard on a Mac", and the Mac it's on now. */
+    val source: StateFlow<SourceView> = _source.asStateFlow()
+
+    private val inputSource: SharedInputSource? = captureBackend?.let { backend ->
+        SharedInputSource(
+            backend,
+            send = { id, envelope -> hub.sendRemote(id, envelope) },
+            target = ::sourceTarget,
+            ctrlAsCommand = { _source.value.ctrlAsCommand },
+            onChange = { id -> _source.value = _source.value.copy(usingMac = id) },
+        )
+    }
+
+    /** The Mac to go to now, or null: off, no Mac chosen, it isn't connected or doesn't allow it, or a Mac is using this PC. */
+    private fun sourceTarget(): SourceTarget? {
+        val view = _source.value
+        if (!view.on || !_computersOn.value || _usedBy.value != null) return null
+        val id = view.mac ?: return null
+        val mac = hub.phones.value.firstOrNull { it.id == id } ?: return null
+        if (mac.platform != "macos" || !mac.isPaired || !mac.isConnected || mac.info?.remoteControl != true) return null
+        return SourceTarget(id, view.edge)
+    }
+
+    fun setSourceOn(on: Boolean) {
+        _source.value = _source.value.copy(on = on)
+        settings.set("remoteSource", on)
+        // Picks the only Mac when there's one, so turning it on is enough.
+        if (on && _source.value.mac == null) {
+            hub.phones.value.filter { it.isPaired && it.platform == "macos" }.singleOrNull()?.let { setSourceMac(it.id) }
+        }
+        if (!on) inputSource?.end(EndReason.TURNED_OFF)
+        if (on) recheckHost()
+    }
+
+    fun setSourceMac(id: String) {
+        if (_source.value.mac != id) inputSource?.end(EndReason.TURNED_OFF)
+        _source.value = _source.value.copy(mac = id)
+        settings.set("remoteSourceMac", id)
+    }
+
+    fun setSourceEdge(edge: ScreenEdge) {
+        _source.value = _source.value.copy(edge = edge)
+        settings.set("remoteSourceEdge", edge.wire)
+    }
+
+    fun setCtrlAsCommand(on: Boolean) {
+        _source.value = _source.value.copy(ctrlAsCommand = on)
+        settings.set("remoteCtrlAsCommand", on)
+    }
+
+    /** Brings the pointer back from the Mac at once. */
+    fun stopSource() { inputSource?.end(EndReason.STOPPED) }
 
     // The notch tools on this PC: Todo, water, Pomodoro, and the note, also on the phone as a remote (`pc-notch`).
 
@@ -325,7 +438,13 @@ class DesktopApp(private val scope: CoroutineScope) {
                 networkCheckedAt = now
                 publicNetwork = windowsPublicNetwork()
             }
-            _host.value = HostChecks.hints(HostChecks.current(notifier?.hasService(), publicNetwork, input.hasRobot, input.canRemap, waylandHost()))
+            val extend = secondDisplay.recheck()
+            _host.value = HostChecks.hints(
+                HostChecks.current(
+                    notifier?.hasService(), publicNetwork, input.hasRobot, input.canRemap, waylandHost(), extend, windowsVdd?.installed == true,
+                    xinput2 = if (_source.value.on) xinput2 else null,
+                ),
+            )
             webcam.recheck()
         }
     }
@@ -345,6 +464,22 @@ class DesktopApp(private val scope: CoroutineScope) {
         if (id == HostChecks.ACTION_CLIPBOARD_HOTKEY) clipHistory.act(ClipAction.RetryHotkey)
         if (id == HostChecks.ACTION_LAUNCHER_HOTKEY) launcher.retryHotkey()
         if (id == HostChecks.ACTION_TIDY_HOTKEY) windowTidy.act(TidyAction.RetryHotkey)
+        if (id == HostChecks.ACTION_VDD_INSTALL || id == HostChecks.ACTION_VDD_REMOVE) vddAction(remove = id == HostChecks.ACTION_VDD_REMOVE)
+    }
+
+    /** Installs or removes the Virtual Display Driver, as administrator. */
+    private fun vddAction(remove: Boolean) {
+        val vdd = windowsVdd ?: return
+        val dir = Vdd.bundled()
+        if (dir == null) {
+            _popups.tryEmit(Popup("The virtual display driver isn't in this copy", "Install DyskLink from the downloads page, then try again."))
+            return
+        }
+        if (remove) hub.stopScreenOut(PcScreen.STOPPED_HERE)
+        val ok = VddInstall.run(dir, remove)
+        if (ok && !remove) vdd.detachAfterInstall()
+        if (!ok) _popups.tryEmit(Popup(if (remove) "The driver wasn't removed" else "The driver wasn't installed", "Windows said no, or it failed. See dysklink.log in DyskLink's data folder."))
+        recheckHost()
     }
 
     /** A desktop notification over D-Bus, for when the tray can't show it. False when there's no way here. */
@@ -373,7 +508,13 @@ class DesktopApp(private val scope: CoroutineScope) {
 
     val hub: ComputerHub = ComputerHub(
         Platform.dataDir, scope,
-        localHello = { paired -> Hello(Platform.deviceName, Platform.protocolName, Platform.model, PhoneLinkProtocol.VERSION, paired, Platform.version, PhoneLinkProtocol.PC_CAPS) },
+        // pc-display only where a monitor can be added, or set up from here: else the phone doesn't offer Second display.
+        localHello = { paired ->
+            var caps = if (secondDisplay.listed) PhoneLinkProtocol.PC_CAPS + PhoneLinkProtocol.CAP_PC_DISPLAY else PhoneLinkProtocol.PC_CAPS
+            // A Mac takes this PC's mouse and keyboard only from a PC that lists it; only where they can be captured.
+            if (captureBackend != null) caps = caps + PhoneLinkProtocol.CAP_PC_SHARED_INPUT_SOURCE
+            Hello(Platform.deviceName, Platform.protocolName, Platform.model, PhoneLinkProtocol.VERSION, paired, Platform.version, caps)
+        },
         events = object : HubEvents {
             override fun clipboard(text: String, from: String): Boolean =
                 (_clipboardOn.value && systemClipboard.set(text)).also { if (it) clipHistory.received(ClipCapture.Text(text), phoneName(from)) }
@@ -439,6 +580,13 @@ class DesktopApp(private val scope: CoroutineScope) {
             override fun screenPointer(kind: String, x: Int, y: Int, from: String) {
                 if (_controlOn.value) input.pointerAt(kind, x, y)
             }
+            override fun extendRefusal(from: String): String? = if (!_screenOutOn.value) PcScreen.EXTEND_TURNED_OFF else null
+            override fun extraDisplays(): id.phonelink.android.core.PcExtraDisplays = secondDisplay
+            override val controlSwitch: Boolean get() = _controlOn.value
+            override fun extendStarted(from: String, width: Int, height: Int) {
+                val where = if (Platform.isWindows) "Settings, System, Display" else "the display settings"
+                _popups.tryEmit(Popup("${phoneName(from)} is now a second display", "${width}×$height. Drag windows onto it; arrange it in $where."))
+            }
             override fun screenViewed(from: String) {
                 // Always shown, whatever the notification setting, so the screen is never watched unnoticed.
                 _popups.tryEmit(Popup("${phoneName(from)} is viewing this screen", "Stop it in DyskLink, or turn off \"Let phones see this screen\"."))
@@ -453,8 +601,13 @@ class DesktopApp(private val scope: CoroutineScope) {
                 _popups.tryEmit(Popup("Terminal opened from ${phoneName(from)}", "It runs as you. Turn off \"Let ${phoneName(from)} open a terminal\" in DyskLink to stop it."))
             }
 
-            override fun remoteAllowed(from: String): Boolean = _remoteOn.value && _computersOn.value && remoteTarget != null
+            // Not while this PC's own pointer is on a Mac, which would pass input round in a loop.
+            override fun remoteAllowed(from: String): Boolean =
+                _remoteOn.value && _computersOn.value && remoteTarget != null && inputSource?.crossedTo == null
+            override fun heard(from: String) { inputSource?.heard(from) }
             override fun remote(type: String, event: RemoteEvent?, from: String) {
+                // This PC's own pointer coming back from the Mac, or the Mac ending it.
+                if (type == MessageType.REMOTE_LEAVE || type == MessageType.REMOTE_EXIT) inputSource?.remote(type, event, from)
                 val target = remoteTarget ?: return
                 when (type) {
                     MessageType.REMOTE_ENTER -> {
@@ -465,7 +618,10 @@ class DesktopApp(private val scope: CoroutineScope) {
                     MessageType.REMOTE_EXIT -> target.gone(from)
                 }
             }
-            override fun remoteGone(from: String) { remoteTarget?.gone(from) }
+            override fun remoteGone(from: String) {
+                remoteTarget?.gone(from)
+                inputSource?.gone(from)
+            }
 
             override fun notchState(): NotchState = notch.notchState()
             override fun notchAction(action: NotchAction, from: String) {
@@ -516,6 +672,11 @@ class DesktopApp(private val scope: CoroutineScope) {
         systemClipboard.enabled = _clipboardOn.value
         systemClipboard.start()
         startTools()
+        inputSource?.let { source ->
+            source.start()
+            // However the app ends, the hooks and grabs go and the pointer is let go first.
+            Runtime.getRuntime().addShutdownHook(Thread({ runCatching { source.shutdown() } }, "dysk-input-release"))
+        }
         clipHistory.start()
         windowTidy.start()
         launcher.start()
@@ -531,6 +692,7 @@ class DesktopApp(private val scope: CoroutineScope) {
         updater.start()
         recheckHost()
         if (webcam.state.value.on) setWebcamOn(true)
+        windowsVdd?.let { vdd -> scope.launch { runCatching { vdd.tidyUp() } } }
         wayland?.let { w ->
             scope.launch(kotlinx.coroutines.Dispatchers.IO) { w.probe() }
             // The hints follow the portal's dialogs as they're answered.
@@ -540,6 +702,7 @@ class DesktopApp(private val scope: CoroutineScope) {
 
     fun stop() {
         remoteTarget?.release(notify = true)
+        inputSource?.shutdown()
         advertiser.stop()
         systemClipboard.stop()
         clipHistory.stop()

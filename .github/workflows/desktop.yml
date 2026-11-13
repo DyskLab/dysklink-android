@@ -81,6 +81,39 @@ jobs:
           Copy-Item (Join-Path $src "dist\bin\x64\softcam.dll") $out
           Copy-Item (Join-Path $src "LICENSE") (Join-Path $out "softcam-LICENSE.txt")
           Get-Item (Join-Path $out "softcam.dll")
+      # Second display on Windows: the Virtual Display Driver (github.com/VirtualDrivers/Virtual-Display-Driver, MIT),
+      # an IddCx monitor driver, release 25.7.23 (its "x86" driver-only zip holds the x64 build), installed by the app
+      # with nefcon (github.com/nefarius/nefcon, MIT) v1.14.0's nefconw.exe. Both pinned by SHA-256; the app looks for
+      # resources/vdd/nefconw.exe and resources/vdd/VirtualDisplayDriver/MttVDD.inf (Vdd.bundled).
+      - name: Virtual Display Driver
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP "vdd"
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          function Fetch($url, $sha, $name) {
+            $file = Join-Path $tmp $name
+            Invoke-WebRequest -Uri $url -OutFile $file
+            $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $sha) { throw "$name has SHA-256 $got, expected $sha" }
+            $file
+          }
+          $driver = Fetch "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip" `
+            "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a" "driver.zip"
+          $nefcon = Fetch "https://github.com/nefarius/nefcon/releases/download/v1.14.0/nefcon_v1.14.0.zip" `
+            "a15557da24a9efca203158de3b43b0eaf982db231f0194031f1ed428bc13e669" "nefcon.zip"
+          Expand-Archive $driver (Join-Path $tmp "driver")
+          Expand-Archive $nefcon (Join-Path $tmp "nefcon")
+          $out = Join-Path $env:GITHUB_WORKSPACE "desktop\resources\windows-x64\vdd"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item -Recurse (Join-Path $tmp "driver\VirtualDisplayDriver") $out
+          Copy-Item (Join-Path $tmp "nefcon\x64\nefconw.exe") $out
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/VirtualDrivers/Virtual-Display-Driver/25.7.23/LICENSE" -OutFile (Join-Path $out "VirtualDisplayDriver-LICENSE.txt")
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nefarius/nefcon/v1.14.0/LICENSE" -OutFile (Join-Path $out "nefcon-LICENSE.txt")
+          foreach ($f in "nefconw.exe", "VirtualDisplayDriver\MttVDD.inf", "VirtualDisplayDriver\MttVDD.dll", "VirtualDisplayDriver\mttvdd.cat") {
+            if (-not (Test-Path (Join-Path $out $f))) { throw "vdd\$f is missing" }
+          }
+          Get-ChildItem -Recurse $out
       - name: Package
         shell: bash
         run: ./gradlew $(for t in ${{ matrix.tasks }}; do printf ":desktop:%s " "$t"; done) --console=plain

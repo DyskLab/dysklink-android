@@ -24,6 +24,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import id.phonelink.android.core.HubPhone
+import id.dysklink.desktop.ScreenEdge
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 
 // What this PC serves phones (its sound, commands, a terminal) and a Mac's mouse and keyboard here.
 
@@ -216,4 +219,78 @@ fun RemoteSettings(model: DeskModel, computersOn: Boolean) {
         )
         HintList(model.host.collectAsState().value.remote, model)
     }
+    SourceSettings(model, computersOn)
+}
+
+/** The side of this PC a Mac sits on, as the picker says it. */
+fun edgeLabel(edge: ScreenEdge): String = when (edge) {
+    ScreenEdge.LEFT -> "Left of this PC"
+    ScreenEdge.RIGHT -> "Right of this PC"
+    ScreenEdge.TOP -> "Above this PC"
+    ScreenEdge.BOTTOM -> "Below this PC"
+}
+
+/** What the settings say about going to [mac] now: null when it's ready. */
+fun sourceStatus(mac: HubPhone?, macs: List<HubPhone>): String? = when {
+    macs.isEmpty() -> "Pair a Mac first: turn on Other computers in DyskLink on the Mac, then pair it here."
+    mac == null -> "Choose the Mac."
+    !mac.isConnected -> "${mac.name} isn't connected."
+    mac.info?.remoteControl != true ->
+        "On ${mac.name}, turn on \"Let paired computers use their mouse and keyboard here\" in DyskLink, Advanced, Other computers (it needs Accessibility there). Update DyskLink on the Mac if it isn't there."
+    else -> null
+}
+
+/** In Settings, under Computers: this PC's own mouse and keyboard going to a Mac. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun SourceSettings(model: DeskModel, computersOn: Boolean) {
+    val flow = model.sourceInput ?: return
+    val colors = Dysk.colors
+    val view by flow.collectAsState()
+    val phones by model.phones.collectAsState()
+    val hints = model.host.collectAsState().value.source
+    val macs = phones.filter { it.isPaired && it.platform == "macos" }
+    val win = model.systemName.startsWith("Windows")
+    Divider()
+    SettingRow(
+        "Use this PC's mouse and keyboard on a Mac",
+        "Push the pointer twice past the edge you choose and it moves onto the Mac, with the keyboard, as if they were plugged in there. Off by default.",
+        view.on && computersOn && view.supported, enabled = computersOn && view.supported, onChange = model::setSourceOn,
+    )
+    if (!view.supported || !(view.on && computersOn)) {
+        if (hints.isNotEmpty()) HintList(hints, model)
+        return
+    }
+    Spacer(Modifier.height(Space.sm))
+    Text("Mac", color = colors.textPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(6.dp))
+    if (macs.isNotEmpty()) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            macs.forEach { mac -> TabPill(mac.name, view.mac == mac.id, DyskIcons.Mouse) { model.setSourceMac(mac.id) } }
+        }
+        Spacer(Modifier.height(Space.sm))
+    }
+    Text("Where the Mac sits", color = colors.textPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(6.dp))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        ScreenEdge.entries.forEach { edge -> TabPill(edgeLabel(edge), view.edge == edge) { model.setSourceEdge(edge) } }
+    }
+    val mac = macs.firstOrNull { it.id == view.mac }
+    Spacer(Modifier.height(Space.sm))
+    val status = sourceStatus(mac, macs)
+    if (status != null) {
+        Text(status, color = colors.amber, fontSize = 12.sp)
+    } else {
+        Body(
+            "Push the pointer twice past the ${view.edge.wire} edge to move onto ${mac?.name}. To come home, push it back past the same edge on the Mac, " +
+                "or press ${if (win) "Ctrl+Alt+Windows" else "Ctrl+Alt+Super"} (or Ctrl+Alt+Shift+Escape). If the Mac stops answering for 2 seconds, this PC takes its mouse and keyboard back.",
+        )
+    }
+    Divider()
+    SettingRow(
+        "Use Ctrl as Command",
+        "Ctrl-C, Ctrl-V and the like work as Command on the Mac, and the ${if (win) "Windows" else "Super"} key is Control. Off: Ctrl is Control and the ${if (win) "Windows" else "Super"} key is Command.",
+        view.ctrlAsCommand, onChange = model::setCtrlAsCommand,
+    )
+    if (hints.isNotEmpty()) HintList(hints, model)
 }

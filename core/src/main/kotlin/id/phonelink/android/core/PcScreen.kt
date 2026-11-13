@@ -42,6 +42,66 @@ interface PcScreenSource {
     fun release() {}
 }
 
+/**
+ * The phone as an extra display of this PC (`pc-display`): a real monitor added to the desktop (a virtual monitor of
+ * the compositor, a virtual output of the X server, or an indirect display driver on Windows), shown on the phone with
+ * the same `macscreen.*` messages and JPEG pictures as this PC's own screen.
+ */
+interface PcExtraDisplays {
+    /** Null when a display can be added now, or why not, for the phone. */
+    fun refusal(): String?
+    /**
+     * Adds a monitor of [width] × [height] pixels for [phoneName] and returns what shows it. Blocks while the system
+     * does it (a dialog, a driver restart); throws [PcExtendFailed] with what to tell the phone. Releasing the result
+     * removes the monitor.
+     */
+    fun open(width: Int, height: Int, phoneName: String): PcExtraDisplay
+}
+
+/** Why an extra display couldn't be added, in words for the phone. */
+open class PcExtendFailed(message: String) : Exception(message)
+
+/** One extra display: its only display is the added monitor; [release] removes it. */
+interface PcExtraDisplay : PcScreenSource {
+    /**
+     * A tap from the phone at [x], [y] (0 to 1 across the picture). True when it was placed here, such as through the
+     * compositor's own session for that monitor; false to place it in desktop pixels as for this PC's own screen.
+     */
+    fun pointer(kind: String, x: Float, y: Float): Boolean = false
+}
+
+object PcSecondDisplay {
+    /** The picture's long side, as the Mac's for an extra display. */
+    const val MAX_LONG_SIDE = 1920
+    const val ODD_SIZE = "The phone asked for a display size this PC can't make."
+    const val FAILED = "This PC couldn't add the extra display."
+
+    /**
+     * The monitor's size in pixels from what the phone asked for (its shape at 600 points on the short side, or 450 for
+     * larger text, landscape or portrait). A PC makes it at that many pixels, so things on it are as big as on a Mac's
+     * extra display; its own scaling setting can change that. The width is a multiple of 8, as display modes want, and
+     * the height even. Null for shapes no monitor has.
+     */
+    fun size(requested: ScreenInfo?, large: Boolean = false): Pair<Int, Int>? {
+        if (requested == null || requested.width <= 0 || requested.height <= 0) return null
+        val portrait = requested.height > requested.width
+        val long = maxOf(requested.width, requested.height).toDouble()
+        val short = minOf(requested.width, requested.height).toDouble()
+        val aspect = long / short
+        if (aspect > 4) return null
+        val newShort = short.toInt().coerceIn(if (large) MIN_LARGE_SHORT else MIN_SHORT, MAX_SHORT)
+        val newLong = (newShort * aspect).roundToInt()
+        if (newLong > MAX_LONG) return null
+        val (w, h) = if (portrait) newShort to newLong else newLong to newShort
+        return (w / 8 * 8) to (h and 1.inv())
+    }
+
+    private const val MIN_SHORT = 450
+    private const val MIN_LARGE_SHORT = 360
+    private const val MAX_SHORT = 1440
+    private const val MAX_LONG = 3840
+}
+
 object PcScreen {
     /** The picture's long side, as the Mac's H.264 for this screen. */
     const val MAX_LONG_SIDE = 1600
@@ -56,6 +116,8 @@ object PcScreen {
     const val WAYLAND_NO_ANSWER = "Nobody allowed sharing the screen on the PC in time. Allow it there, then try again."
     const val TURNED_OFF = "Turn on \"Let phones see this screen\" in DyskLink on the PC first."
     const val NO_EXTEND = "This PC can't use the phone as an extra display. Windows and Linux need a display driver for that."
+    /** "Let phones see this screen" is off: the extra display is a picture of this PC too. */
+    const val EXTEND_TURNED_OFF = "Turn on \"Let phones see this screen\" in DyskLink on the PC first. The extra display is shown through it."
     const val ANOTHER_PHONE = "Another phone is viewing this PC now."
     const val STOPPED_HERE = "Viewing was stopped on the PC."
     const val SWITCHED_OFF = "Screen viewing was turned off on the PC."
@@ -105,6 +167,8 @@ class PcScreenSender(
     val pacer: JpegPacer = JpegPacer(),
     private val clock: () -> Long = System::currentTimeMillis,
     private val maxLong: Int = PcScreen.MAX_LONG_SIDE,
+    /** False for an extra display: the phone has no other display to pick, as from a Mac. */
+    private val listDisplays: Boolean = true,
 ) {
     private val running = AtomicBoolean(false)
     private val ended = AtomicBoolean(false)
@@ -164,8 +228,8 @@ class PcScreenSender(
                     MessageType.MACSCREEN_STARTED,
                     screen = ScreenInfo(grab.width, grab.height),
                     text = target.name,
-                    displays = PcScreen.choices(runCatching { source.displays() }.getOrDefault(listOf(target))),
-                    displayId = target.id,
+                    displays = if (listDisplays) PcScreen.choices(runCatching { source.displays() }.getOrDefault(listOf(target))) else null,
+                    displayId = if (listDisplays) target.id else null,
                     format = JpegFrames.FORMAT,
                 )
                 if (!send(started)) return end("The phone isn't connected.")

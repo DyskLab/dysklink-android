@@ -84,11 +84,18 @@ object PhoneLinkProtocol {
     const val CAP_PC_TERMINAL = "pc-terminal"
     /** A Windows or Linux computer that a Mac's mouse and keyboard can move into (`remote.*`). */
     const val CAP_PC_SHARED_INPUT = "pc-shared-input"
+    /**
+     * A Windows or Linux computer whose own mouse and keyboard can move into a Mac (it sends `remote.enter` and
+     * `remote.input`, as a Mac does). Not in [PC_CAPS]: the desktop app lists it only where it can capture its input
+     * (Windows, and Linux on X11), and a Mac takes `remote.enter` from a PC only with it.
+     */
+    const val CAP_PC_SHARED_INPUT_SOURCE = "pc-shared-input-source"
     /** A Windows or Linux computer that shows its own screen on a phone (`macscreen.*`, as JPEG frames). */
     const val CAP_PC_SCREEN_OUT = "pc-screen-out"
     /**
-     * A Windows or Linux computer that uses the phone as an extra display (`macscreen.start` with `extend`). Not listed
-     * by any build yet: Windows needs an indirect display driver and Linux a virtual output for that.
+     * A Windows or Linux computer that uses the phone as an extra display (`macscreen.start` with `extend`). Not in
+     * [PC_CAPS]: the desktop app adds it to its hello only where it can add a monitor or install what does (a virtual
+     * monitor on Wayland, a virtual output on X11, the virtual display driver on Windows).
      */
     const val CAP_PC_DISPLAY = "pc-display"
     /** A Windows or Linux computer that runs the phone's Stream Deck: Mac shortcuts made PC ones, media, and typing. */

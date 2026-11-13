@@ -19,6 +19,9 @@ import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 
 /** A phone, or another computer, as a Windows or Linux computer sees it. */
+/** A phone that is an extra display of this PC: [width] × [height] once [active], the size asked for until then. */
+data class HubExtend(val phoneId: String, val width: Int, val height: Int, val active: Boolean)
+
 data class HubPhone(
     val id: String,
     val name: String,
@@ -171,12 +174,31 @@ interface HubEvents {
     /** [from] started viewing this screen; the PC always shows it. */
     fun screenViewed(from: String) {}
 
+    // The phone as an extra display (`pc-display`, `macscreen.start` with `text: "extend"`).
+
+    /** Null when [from] may use itself as an extra display of this PC now, or why not. */
+    fun extendRefusal(from: String): String? = PcScreen.NO_EXTEND
+    /** What adds a monitor for the phone, or null when this PC has no way to. */
+    fun extraDisplays(): PcExtraDisplays? = null
+    /** [from] is an extra display of [width] × [height] now; the PC always shows it. */
+    fun extendStarted(from: String, width: Int, height: Int) {}
+    /**
+     * Whether phones may control this PC (the switch), even where only an extra display's own session can move the
+     * pointer, such as on Wayland without the remote desktop portal.
+     */
+    val controlSwitch: Boolean get() = canControl
+
     // Another computer's mouse and keyboard (a Mac's, through `remote.*`).
 
     /** Whether the Mac [from] may move its pointer into this PC now. */
     fun remoteAllowed(from: String): Boolean = false
-    /** `remote.enter`, `remote.input`, or `remote.exit` from a Mac; [event] as it came. */
+    /**
+     * `remote.enter`, `remote.input`, or `remote.exit` from a Mac; [event] as it came. Also `remote.leave` from a Mac
+     * this PC's own mouse and keyboard are on (this PC as the source): the pointer came back.
+     */
     fun remote(type: String, event: RemoteEvent?, from: String) {}
+    /** Anything at all arrived from the computer [from] (a `pong` included): it's still there. Called often; keep it cheap. */
+    fun heard(from: String) {}
     /** [from] disconnected or was unpaired: anything it held goes. */
     fun remoteGone(from: String) {}
 
@@ -299,6 +321,13 @@ class ComputerHub(
     private var screenSource: PcScreenSource? = null
     private val _screenTo = MutableStateFlow<String?>(null)
     val screenTo: StateFlow<String?> = _screenTo.asStateFlow()
+    /** Counts every start and stop of the above, so an extra display that took long to add can tell it's not wanted. */
+    private val screenGen = java.util.concurrent.atomic.AtomicInteger()
+    /** The size of the extra display [screenOut] shows; null while it shows this PC's own screen. */
+    private var extendSize: Pair<Int, Int>? = null
+    private val _extend = MutableStateFlow<HubExtend?>(null)
+    /** The phone that is (or is becoming) an extra display of this PC. */
+    val extend: StateFlow<HubExtend?> = _extend.asStateFlow()
 
     /** Terminals opened from phones. */
     val terminals = PcTerminals(
@@ -423,7 +452,10 @@ class ComputerHub(
                 connection.post(Envelope(MessageType.PONG))
                 return
             }
-            MessageType.PONG -> return
+            MessageType.PONG -> {
+                if (paired && isComputer(connection)) runCatching { events.heard(id) }
+                return
+            }
             MessageType.PAIR_REQUEST, MessageType.PAIR_PAKE, MessageType.PAIR_ACCEPT, MessageType.PAIR_REJECT -> return pairingMessage(connection, envelope)
             MessageType.UNPAIR -> {
                 synchronized(lock) { removeRecord(id); publish() }
@@ -437,7 +469,10 @@ class ComputerHub(
         }
         // Everything else needs a paired phone on its current connection.
         if (!paired) return
-        if (isComputer(connection)) return computerMessage(connection, envelope)
+        if (isComputer(connection)) {
+            runCatching { events.heard(id) }
+            return computerMessage(connection, envelope)
+        }
         if (envelope.type.startsWith("file.")) {
             fileTransfers.handle(id, envelope.type, envelope.file, envelope.raw)
             return
@@ -660,7 +695,7 @@ class ComputerHub(
     private fun screenStart(connection: PeerConnection, envelope: Envelope) {
         val id = connection.peerId
         fun refuse(why: String) { connection.post(Envelope(MessageType.MACSCREEN_STOPPED, error = why)) }
-        if (envelope.text?.startsWith("extend") == true) return refuse(PcScreen.NO_EXTEND)
+        if (envelope.text?.startsWith("extend") == true) return extendStart(connection, envelope)
         val refusal = runCatching { events.screenRefusal(id) }.getOrElse { it.message ?: "Can't show the screen" }
         if (refusal != null) return refuse(refusal)
         val source = runCatching { events.screenSource() }.getOrNull() ?: return refuse("This PC can't capture its screen.")
@@ -669,12 +704,14 @@ class ComputerHub(
             ?: return refuse("No display was found on this PC.")
         synchronized(lock) {
             val current = screenOut
-            if (current != null && current.isRunning && _screenTo.value == id) {
+            if (current != null && current.isRunning && _screenTo.value == id && extendSize == null) {
                 current.show(display)
                 return
             }
         }
-        val previous = synchronized(lock) { screenOut.also { screenOut = null } }
+        screenGen.incrementAndGet()
+        val previous = synchronized(lock) { screenOut.also { screenOut = null; extendSize = null } }
+        _extend.value = null
         val before = _screenTo.value
         previous?.stop()
         if (before != null && before != id) post(before, Envelope(MessageType.MACSCREEN_STOPPED, error = PcScreen.ANOTHER_PHONE))
@@ -699,12 +736,98 @@ class ComputerHub(
         runCatching { events.screenViewed(id) }
     }
 
+    /**
+     * `macscreen.start` with `text: "extend"` (or "extend-large") and the phone's wanted `screen`: this PC adds a monitor
+     * of that shape and streams it as it streams its own screen. Asked again with the same size, the picture starts
+     * over; with another size (the phone turned), the monitor is made again. One phone at a time, as for viewing.
+     */
+    private fun extendStart(connection: PeerConnection, envelope: Envelope) {
+        val id = connection.peerId
+        fun refuse(why: String) { connection.post(Envelope(MessageType.MACSCREEN_STOPPED, error = why)) }
+        val refusal = runCatching { events.extendRefusal(id) }.getOrElse { it.message ?: PcScreen.NO_EXTEND }
+        if (refusal != null) return refuse(refusal)
+        val displays = runCatching { events.extraDisplays() }.getOrNull() ?: return refuse(PcScreen.NO_EXTEND)
+        runCatching { displays.refusal() }.getOrNull()?.let { return refuse(it) }
+        val size = PcSecondDisplay.size(envelope.screen, large = envelope.text == "extend-large") ?: return refuse(PcSecondDisplay.ODD_SIZE)
+        synchronized(lock) {
+            val current = screenOut
+            if (current != null && current.isRunning && _screenTo.value == id && extendSize == size) {
+                current.show(current.display)
+                return
+            }
+            // Still being added at this size: the answer comes when it's there.
+            val pending = _extend.value
+            if (current == null && pending != null && !pending.active && pending.phoneId == id && pending.width == size.first && pending.height == size.second) return
+        }
+        val gen = screenGen.incrementAndGet()
+        val previous = synchronized(lock) { screenOut.also { screenOut = null; screenSource = null; extendSize = null } }
+        val before = _screenTo.value
+        previous?.stop()
+        if (before != null && before != id) post(before, Envelope(MessageType.MACSCREEN_STOPPED, error = PcScreen.ANOTHER_PHONE))
+        _screenTo.value = id
+        _extend.value = HubExtend(id, size.first, size.second, active = false)
+        val name = synchronized(lock) { records[id]?.name } ?: "Phone"
+        CoreLog.i(TAG, "EXTEND_REQUESTED $id ${size.first}x${size.second}")
+        scope.launch(Dispatchers.IO) {
+            fun ended(why: String?) {
+                if (screenGen.get() != gen) return
+                _screenTo.value = null
+                _extend.value = null
+                connection.post(Envelope(MessageType.MACSCREEN_STOPPED, error = why))
+            }
+            val extra = try {
+                displays.open(size.first, size.second, name)
+            } catch (e: PcExtendFailed) {
+                return@launch ended(e.message ?: PcSecondDisplay.FAILED)
+            } catch (e: Exception) {
+                CoreLog.w(TAG, "Extra display failed", e)
+                return@launch ended(PcSecondDisplay.FAILED)
+            }
+            val display = runCatching { extra.displays() }.getOrNull()?.firstOrNull()
+            if (display == null || screenGen.get() != gen) {
+                runCatching { extra.release() }
+                if (display == null) ended(PcSecondDisplay.FAILED)
+                return@launch
+            }
+            lateinit var sender: PcScreenSender
+            sender = PcScreenSender(
+                extra, display, scope,
+                send = { message -> connection.send(message) },
+                onEnded = { why ->
+                    if (synchronized(lock) { (screenOut === sender).also { if (it) { screenOut = null; screenSource = null; extendSize = null } } }) {
+                        _screenTo.value = null
+                        _extend.value = null
+                        connection.post(Envelope(MessageType.MACSCREEN_STOPPED, error = why))
+                    }
+                },
+                maxLong = PcSecondDisplay.MAX_LONG_SIDE,
+                listDisplays = false,
+            )
+            val taken = synchronized(lock) {
+                (screenGen.get() == gen).also { if (it) { screenOut = sender; screenSource = extra; extendSize = size } }
+            }
+            if (!taken) {
+                runCatching { extra.release() }
+                return@launch
+            }
+            _extend.value = HubExtend(id, display.width, display.height, active = true)
+            sender.start()
+            CoreLog.i(TAG, "EXTEND_STARTED $id ${display.width}x${display.height}")
+            runCatching { events.extendStarted(id, display.width, display.height) }
+        }
+    }
+
     /** A tap or drag on this PC's screen, only from the phone viewing it and while phones may control this PC. */
     private fun screenPointer(id: String, control: ControlEvent?) {
         if (_screenTo.value != id || control == null || control.kind !in PcScreen.POINTER_KINDS) return
-        if (!events.canControl) return
         val (sender, source) = synchronized(lock) { screenOut to screenSource }
         if (sender == null || source == null) return
+        // An extra display on Wayland places taps through its own session, against its own picture.
+        val extra = source as? PcExtraDisplay
+        if (extra != null && control.x?.isFinite() == true && control.y?.isFinite() == true && runCatching { events.controlSwitch }.getOrDefault(false)) {
+            if (runCatching { extra.pointer(control.kind, control.x.coerceIn(0f, 1f), control.y.coerceIn(0f, 1f)) }.getOrDefault(false)) return
+        }
+        if (!events.canControl) return
         // Read each time, since the resolution or the arrangement of displays can change while viewing.
         val display = runCatching { source.displays() }.getOrNull()?.firstOrNull { it.id == sender.display.id } ?: sender.display
         val (x, y) = PcScreen.toDesktop(display, control.x, control.y) ?: return
@@ -713,9 +836,18 @@ class ComputerHub(
 
     /** Stops showing this PC's screen, and tells the phone, with [error] when it was stopped here. */
     fun stopScreenOut(error: String? = PcScreen.STOPPED_HERE) {
-        val sender = synchronized(lock) { screenOut.also { screenOut = null; screenSource = null } } ?: return
+        screenGen.incrementAndGet()
+        val pending = _extend.value
+        val sender = synchronized(lock) { screenOut.also { screenOut = null; screenSource = null; extendSize = null } }
+        _extend.value = null
+        if (sender == null && pending == null) return
         val id = _screenTo.value
         _screenTo.value = null
+        if (sender == null) {
+            // An extra display still being added: it's released when it's there.
+            if (id != null) post(id, Envelope(MessageType.MACSCREEN_STOPPED, error = error))
+            return
+        }
         sender.stop()
         CoreLog.i(TAG, "SCREEN_OUT_STOPPED sent=${sender.sent} unchanged=${sender.unchanged}")
         if (id != null) post(id, Envelope(MessageType.MACSCREEN_STOPPED, error = error))
@@ -762,8 +894,10 @@ class ComputerHub(
             sender?.stop()
         }
         if (_screenTo.value == id) {
-            val sender = screenOut.also { screenOut = null; screenSource = null }
+            screenGen.incrementAndGet()
+            val sender = synchronized(lock) { screenOut.also { screenOut = null; screenSource = null; extendSize = null } }
             _screenTo.value = null
+            _extend.value = null
             sender?.stop()
         }
         terminals.end(id, if (connected) PcTerminals.ENDED_HERE else null)
@@ -772,7 +906,10 @@ class ComputerHub(
 
     // A Mac's mouse and keyboard
 
-    /** Sends `remote.leave` or `remote.exit` to the Mac in control. */
+    /**
+     * Sends `remote.leave` or `remote.exit` to the Mac in control, or, with this PC as the source, `remote.enter`,
+     * `remote.input`, `remote.exit`, and `ping` (its `pong` is the heartbeat) to the Mac its pointer is on.
+     */
     fun sendRemote(id: String, envelope: Envelope): Boolean = post(id, envelope)
 
     /** Sends this PC's info again to every paired device, after something in it changed (such as remoteControl). */
@@ -1082,6 +1219,11 @@ class ComputerHub(
                     connection.post(Envelope(MessageType.REMOTE_EXIT))
                     return
                 }
+                runCatching { events.remote(envelope.type, envelope.remote, id) }
+            }
+            // The Mac this PC's own mouse and keyboard are on hands the pointer back. Only from a Mac.
+            MessageType.REMOTE_LEAVE -> {
+                if (synchronized(lock) { records[id]?.platform } != "macos") return
                 runCatching { events.remote(envelope.type, envelope.remote, id) }
             }
         }

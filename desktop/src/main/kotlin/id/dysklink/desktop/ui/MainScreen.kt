@@ -72,10 +72,24 @@ fun MainScreen(model: DeskModel, ui: UiState, pickFiles: () -> List<File>, radar
                     Box(Modifier.padding(start = 28.dp, end = 28.dp, top = Space.lg)) { Banner(it, colors.coral, DyskIcons.Warning) }
                 }
                 // On every page, so this screen is never watched unnoticed.
+                val extending = model.secondDisplay?.collectAsState()?.value?.phoneId
                 screenTo?.let { id ->
                     val name = phones.firstOrNull { it.id == id }?.name ?: "A phone"
                     Box(Modifier.padding(start = 28.dp, end = 28.dp, top = Space.lg)) {
-                        Banner("$name is viewing this screen.", colors.violet, DyskIcons.Monitor, "Stop" to model::stopScreenOut)
+                        Banner(
+                            if (extending == id) "$name is a second display of this PC." else "$name is viewing this screen.",
+                            colors.violet, DyskIcons.Monitor, "Stop" to model::stopScreenOut,
+                        )
+                    }
+                }
+                // While this PC's mouse and keyboard are on a Mac, on every page.
+                model.sourceInput?.collectAsState()?.value?.usingMac?.let { id ->
+                    val name = phones.firstOrNull { it.id == id }?.name ?: "the Mac"
+                    Box(Modifier.padding(start = 28.dp, end = 28.dp, top = Space.lg)) {
+                        Banner(
+                            "This PC's mouse and keyboard are on $name. Push the pointer back past the edge there, or press Ctrl+Alt+${if (model.systemName.startsWith("Windows")) "Windows" else "Super"}.",
+                            colors.sky, DyskIcons.Mouse, "Bring back" to model::stopSource,
+                        )
                     }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {

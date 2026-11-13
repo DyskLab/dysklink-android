@@ -240,7 +240,10 @@ fun main(args: Array<String>) {
         val batteryView by app.battery.view.collectAsState()
         val clipView by app.clipHistory.view.collectAsState()
         val tools by app.tools.collectAsState()
-        val trayTooltip = (trayStatus?.let { "DyskLink: $it" }
+        val source by app.source.collectAsState()
+        // While this PC's mouse and keyboard are on a Mac, the tray says so first.
+        val onMac = source.usingMac?.let { id -> "DyskLink: mouse and keyboard on ${phones.firstOrNull { it.id == id }?.name ?: "a Mac"} (Ctrl+Alt+${if (Platform.isWindows) "Windows" else "Super"} brings them back)" }
+        val trayTooltip = (onMac ?: trayStatus?.let { "DyskLink: $it" }
             ?: phones.firstOrNull { it.isPaired && it.isConnected }?.let { "DyskLink: ${it.name} connected" } ?: "DyskLink") +
             (batteryView?.let { "\nBattery ${it.reading.trayText}" } ?: "")
         val trayConfig by app.trayMenu.collectAsState()
@@ -446,6 +449,8 @@ private class AppModel(private val app: DesktopApp, override val hasTray: Boolea
     override val screenTo = app.hub.screenTo
     override fun setScreenOutOn(on: Boolean) = app.setScreenOutOn(on)
     override fun stopScreenOut() = app.stopScreenOut()
+    override val secondDisplay = app.secondDisplayView
+    override fun setExtendExperimentOn(on: Boolean) = app.setExtendExperimentOn(on)
     override fun addCommand(name: String, command: String) = app.addCommand(name, command)
     override fun removeCommand(id: String) = app.removeCommand(id)
     override fun setCommandsAllowed(deviceId: String, on: Boolean) = app.setCommandsAllowed(deviceId, on)
@@ -454,6 +459,12 @@ private class AppModel(private val app: DesktopApp, override val hasTray: Boolea
     override fun setRemoteOn(on: Boolean) = app.setRemoteOn(on)
     override fun setCommandAsCtrl(on: Boolean) = app.setCommandAsCtrl(on)
     override fun stopRemote() = app.stopRemote()
+    override val sourceInput = app.source
+    override fun setSourceOn(on: Boolean) = app.setSourceOn(on)
+    override fun setSourceMac(deviceId: String) = app.setSourceMac(deviceId)
+    override fun setSourceEdge(edge: ScreenEdge) = app.setSourceEdge(edge)
+    override fun setCtrlAsCommand(on: Boolean) = app.setCtrlAsCommand(on)
+    override fun stopSource() = app.stopSource()
 
     override val contacts = app.hub.contacts
     override val folders = app.hub.folders

@@ -278,14 +278,14 @@ private fun ColumnScope.OverviewTab(context: TabContext) {
             SettingRow("Show phone notifications", "Notifications from the phone pop up on this PC.", notifyOn, onChange = context.model::setNotifyOn)
             HintList(host.popups, context.model)
         }
-        // A Mac's mouse and keyboard can come over to this PC; a PC's never go to a Mac.
+        // A Mac's mouse and keyboard can come over to this PC; this PC's own go to a Mac from Settings, Computers.
         if (device.platform == "macos") {
             val remoteOn by context.model.remoteOn.collectAsState()
             val computersOn by context.model.computersOn.collectAsState()
             Divider()
             SettingRow(
                 "Let paired computers use their mouse and keyboard here",
-                "On ${device.name}, choose this PC's side in Advanced, Other computers, Mouse and keyboard. This PC's own mouse doesn't go to the Mac.",
+                "On ${device.name}, choose this PC's side in Advanced, Other computers, Mouse and keyboard. To use this PC's own mouse and keyboard on the Mac, see Settings, Computers.",
                 remoteOn && computersOn, enabled = computersOn, onChange = context.model::setRemoteOn,
             )
             if (remoteOn && computersOn) HintList(host.remote, context.model)

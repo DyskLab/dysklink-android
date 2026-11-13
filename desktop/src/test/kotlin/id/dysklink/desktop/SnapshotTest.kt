@@ -124,7 +124,12 @@ class SnapshotTest {
         override val launcher: LauncherModel? = null,
         tidy: WindowTidyView? = null,
         tray: TrayMenuConfig? = null,
+        extend: SecondDisplayView? = null,
+        source: SourceView? = null,
+        override val systemName: String = "Windows 11",
     ) : DeskModel {
+        override val sourceInput = source?.let { MutableStateFlow(it) }
+        override val secondDisplay = extend?.let { MutableStateFlow(it) }
         override val pcCare = care
         override val windowTidy = tidy?.let { MutableStateFlow(it) }
         override val trayMenu = tray?.let { MutableStateFlow(it) }
@@ -212,7 +217,6 @@ class SnapshotTest {
         override val closeToTray = MutableStateFlow(true)
         override val themeMode = MutableStateFlow(ThemeMode.System)
         override val deviceName = "DESKTOP-FANNY"
-        override val systemName = "Windows 11"
         override val version = "1.0.0"
         override val downloadsPath = "C:\\Users\\fanny\\Downloads\\DyskLink"
         override val addresses = listOf("192.168.1.20:47821")
@@ -445,6 +449,27 @@ class SnapshotTest {
         assertTrue(File(dir, "22b-commands-on-terminal-open.png").length() > 0)
     }
 
+    /** Settings, Computers: this PC's mouse and keyboard on a Mac, on Windows, X11 and Wayland, and the banner while it's there. */
+    @Test
+    fun sourceInputSnapshots() {
+        val path = System.getenv("DYSKLINK_SNAPSHOTS") ?: return
+        val dir = File(path).apply { mkdirs() }
+        val ready = mac.copy(info = DeviceInfo(remoteControl = true))
+        val settings = UiState(page = Page.Settings)
+        val on = SourceView(supported = true, on = true, mac = "m1", edge = ScreenEdge.RIGHT)
+        shoot(dir, "src1-off", Fake(listOf(phone, ready), computers = true, source = SourceView(supported = true)), settings, height = 2300)
+        shoot(dir, "src2-windows-ready", Fake(listOf(phone, ready), computers = true, source = on), settings, height = 2500)
+        shoot(dir, "src3-mac-not-allowing", Fake(listOf(phone, mac), computers = true, source = on.copy(edge = ScreenEdge.LEFT)), settings, height = 2500)
+        shoot(dir, "src4-no-mac-chosen", Fake(listOf(phone, ready, mac.copy(id = "m2", name = "Studio iMac", isConnected = false)), computers = true, source = on.copy(mac = null)), settings, height = 2500)
+        val wayland = HostChecks.hints(HostEnv(windows = false, linux = true, env = mapOf("XDG_SESSION_TYPE" to "wayland", "WAYLAND_DISPLAY" to "wayland-0", "XDG_CURRENT_DESKTOP" to "ubuntu:GNOME")::get, osRelease = "ID=ubuntu"))
+        shoot(dir, "src5-wayland-unsupported", Fake(listOf(phone, ready), computers = true, host = wayland, source = SourceView(supported = false), systemName = "Ubuntu 24.04"), settings, height = 2500)
+        val x11 = HostChecks.hints(HostEnv(windows = false, linux = true, env = mapOf("XDG_SESSION_TYPE" to "x11", "XDG_CURRENT_DESKTOP" to "KDE")::get, osRelease = "ID=fedora", xinput2 = false))
+        shoot(dir, "src6-x11-no-xinput2", Fake(listOf(phone, ready), computers = true, host = x11, source = on.copy(edge = ScreenEdge.TOP), systemName = "Fedora 41"), settings, height = 2500)
+        shoot(dir, "src7-on-the-mac-banner", Fake(listOf(phone, ready), computers = true, source = on.copy(usingMac = "m1")), UiState(selectedId = "m1"))
+        shoot(dir, "src8-light-windows-ready", Fake(listOf(phone, ready), computers = true, source = on.copy(edge = ScreenEdge.BOTTOM, ctrlAsCommand = false)), settings, dark = false, height = 2500)
+        assertTrue(File(dir, "src2-windows-ready.png").length() > 0)
+    }
+
     /** Linux without a tray: GNOME is pointed at the AppIndicator extension, other desktops are told closing quits. */
     @Test
     fun trayHintSnapshots() {
@@ -471,6 +496,40 @@ class SnapshotTest {
         shoot(dir, "26b-screen-viewed-settings", Fake(all, screenOut = true, screenTo = "p1"), UiState(page = Page.Settings))
         shoot(dir, "26c-light-screen-viewed", Fake(all, screenOut = true, screenTo = "p2"), dark = false)
         assertTrue(File(dir, "26-screen-viewed-overview.png").length() > 0)
+    }
+
+    /** The phone as a second display: the card in Settings in each state, with its hints, and the banner while it's one. */
+    @Test
+    fun secondDisplaySnapshots() {
+        val path = System.getenv("DYSKLINK_SNAPSHOTS") ?: return
+        val dir = File(path).apply { mkdirs() }
+        val all = listOf(phone, tablet, mac)
+        val settings = UiState(page = Page.Settings)
+        fun p(way: ExtendWay, r: ExtendReadiness, problem: ExtendProblem? = null) = ExtendProbe(way, r, problem)
+        fun linux(desktop: String, probes: List<ExtendProbe>, session: String = "wayland") =
+            HostChecks.hints(HostEnv(windows = false, linux = true, env = mapOf("XDG_SESSION_TYPE" to session, "XDG_CURRENT_DESKTOP" to desktop)::get, onPath = { true }, osRelease = "ID=ubuntu\nID_LIKE=debian", extend = probes,
+                wayland = WaylandHost(route = InputRoute.PORTAL, inputRemembered = true, screenCast = true, gst = if (probes.any { it.problem == ExtendProblem.NoGstreamer }) GstCheck() else GstCheck(true, true), screenRemembered = true)))
+        val gnome = listOf(p(ExtendWay.PortalVirtual, ExtendReadiness.Ready), p(ExtendWay.MutterVirtual, ExtendReadiness.Ready))
+        shoot(dir, "s1-second-display-available-gnome", Fake(all, screenOut = true, host = linux("ubuntu:GNOME", gnome), extend = SecondDisplayView(gnome, screenOn = true, checking = false)), settings, height = 1500)
+        val gst = listOf(p(ExtendWay.PortalVirtual, ExtendReadiness.NeedsSetup, ExtendProblem.NoGstreamer), p(ExtendWay.MutterVirtual, ExtendReadiness.NeedsSetup, ExtendProblem.NoGstreamer))
+        shoot(dir, "s2-second-display-needs-gstreamer", Fake(all, screenOut = true, host = linux("KDE", gst), extend = SecondDisplayView(gst, screenOn = true, checking = false)), settings, height = 1500)
+        val old = listOf(p(ExtendWay.PortalVirtual, ExtendReadiness.Unavailable, ExtendProblem.PortalNoVirtual), p(ExtendWay.MutterVirtual, ExtendReadiness.Unavailable, ExtendProblem.GnomeTooOld))
+        shoot(dir, "s3-second-display-gnome-too-old", Fake(all, host = linux("GNOME", old), extend = SecondDisplayView(old, checking = false)), settings, height = 1500)
+        val x11 = listOf(p(ExtendWay.X11Output, ExtendReadiness.Unavailable, ExtendProblem.X11NoVirtualOutput))
+        shoot(dir, "s4-second-display-x11-no-output", Fake(all, screenOut = true, host = linux("ubuntu:GNOME", x11, "x11"), extend = SecondDisplayView(x11, screenOn = true, checking = false)), settings, height = 1500)
+        val driver = listOf(p(ExtendWay.WindowsDriver, ExtendReadiness.NeedsSetup, ExtendProblem.DriverMissing))
+        val win = HostChecks.hints(HostEnv(windows = true, linux = false, extend = driver))
+        shoot(dir, "s5-second-display-windows-install", Fake(all, screenOut = true, host = win, extend = SecondDisplayView(driver, screenOn = true, experimentShown = true, experimentOn = true, checking = false)), settings, height = 1500)
+        val off = listOf(p(ExtendWay.WindowsDriver, ExtendReadiness.Unavailable, ExtendProblem.ExperimentOff))
+        shoot(dir, "s6-second-display-windows-experiment-off", Fake(all, screenOut = true, host = HostChecks.hints(HostEnv(windows = true, linux = false, extend = off)), extend = SecondDisplayView(off, screenOn = true, experimentShown = true, checking = false)), settings, height = 1500)
+        val installed = listOf(p(ExtendWay.WindowsDriver, ExtendReadiness.Ready))
+        val active = SecondDisplayView(installed, phoneId = "p1", phoneName = "Pixel 8", width = 1328, height = 600, active = true, screenOn = true, experimentShown = true, experimentOn = true, checking = false)
+        val winOk = HostChecks.hints(HostEnv(windows = true, linux = false, extend = installed, vddInstalled = true))
+        shoot(dir, "s7-second-display-active-settings", Fake(all, screenOut = true, screenTo = "p1", host = winOk, extend = active), settings, height = 1500)
+        shoot(dir, "s8-second-display-active-overview", Fake(all, screenOut = true, screenTo = "p1", extend = active))
+        shoot(dir, "s9-light-second-display-adding", Fake(all, screenOut = true, screenTo = "p1", host = linux("GNOME", gnome), extend = active.copy(probes = gnome, active = false, experimentShown = false)), settings, dark = false, height = 1500)
+        shoot(dir, "s10-second-display-windows-installed", Fake(all, screenOut = true, host = winOk, extend = SecondDisplayView(installed, screenOn = true, experimentShown = true, experimentOn = true, checking = false)), settings, height = 1500)
+        assertTrue(File(dir, "s1-second-display-available-gnome.png").length() > 0)
     }
 
     /** Game keys on the phone's screen: play and edit, in the tab and the pop-out window, and the Wayland fallback. */

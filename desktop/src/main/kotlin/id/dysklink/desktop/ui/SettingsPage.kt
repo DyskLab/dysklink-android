@@ -132,6 +132,10 @@ fun SettingsPage(model: DeskModel) {
                 screenOutOn, onChange = model::setScreenOutOn,
             )
             if (screenOutOn) HintList(host.screenOut, model)
+            model.secondDisplay?.collectAsState()?.value?.let { view ->
+                Divider()
+                SecondDisplaySection(view, host.secondDisplay, model)
+            }
             // Windows: DyskLink Camera stays registered after an uninstall, so it's removed from here.
             model.webcam?.collectAsState()?.value?.settings?.takeIf { it.isNotEmpty() }?.let { hints ->
                 Divider()

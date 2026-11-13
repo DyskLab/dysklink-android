@@ -35,8 +35,12 @@ data class HostHints(
     val control: List<HostHint> = emptyList(),
     /** Under "Let phones see this screen". */
     val screenOut: List<HostHint> = emptyList(),
+    /** On the Second display card, under "Let phones see this screen". */
+    val secondDisplay: List<HostHint> = emptyList(),
     /** Under "Let paired computers use their mouse and keyboard here". */
     val remote: List<HostHint> = emptyList(),
+    /** Under "Use this PC's mouse and keyboard on a Mac": what stops this PC capturing its own input. */
+    val source: List<HostHint> = emptyList(),
     /** Under "Let phones hear this PC", in Settings and on the Sound tab. */
     val soundOut: List<HostHint> = emptyList(),
     /** Under "Show phone notifications": popups can't show. */
@@ -84,6 +88,12 @@ data class HostEnv(
     val x11Remap: Boolean = true,
     /** How the Wayland ways in stand; null on X11 and Windows. */
     val wayland: WaylandHost? = null,
+    /** How each way of adding a monitor for the phone stands; null while unknown. */
+    val extend: List<ExtendProbe>? = null,
+    /** Windows: the Virtual Display Driver is installed. */
+    val vddInstalled: Boolean = false,
+    /** X11: whether the XInput2 extension (libXi) answered, which watching the pointer at the edge needs; null when unknown. */
+    val xinput2: Boolean? = null,
     val port: Int = id.phonelink.android.core.PhoneLinkProtocol.PORT,
 )
 
@@ -252,6 +262,125 @@ object HostChecks {
                 ),
             )
             PortalPhase.Allowed -> emptyList()
+        }
+    }
+
+    const val ACTION_VDD_INSTALL = "vdd-install"
+    const val ACTION_VDD_REMOVE = "vdd-remove"
+
+    /** The package with xrandr, and the one with cvt (the X server's). */
+    fun xrandrPackage(distro: Distro): String? = when (distro) {
+        Distro.Debian -> "x11-xserver-utils"
+        Distro.Fedora -> "xrandr"
+        Distro.Arch -> "xorg-xrandr"
+        Distro.Suse -> "xrandr"
+        Distro.Other -> null
+    }
+
+    fun cvtPackage(distro: Distro): String? = when (distro) {
+        Distro.Debian -> "xserver-xorg-core"
+        Distro.Fedora -> "xorg-x11-server-Xorg"
+        Distro.Arch -> "xorg-server"
+        Distro.Suse -> "xorg-x11-server"
+        Distro.Other -> null
+    }
+
+    /**
+     * What the Second display card says about this PC: nothing while a way works (on Windows, how to remove the driver),
+     * else what to set up for the best way that can be set up, else why it can't be done here and what would work.
+     */
+    fun secondDisplayHints(probes: List<ExtendProbe>?, distro: Distro, currentDesktop: String?, vddInstalled: Boolean = false): List<HostHint> {
+        if (probes == null) return emptyList()
+        val remove = HostHint(
+            "Virtual Display Driver is installed",
+            "Uninstalling DyskLink doesn't remove it from Windows. To take it away, click Remove before you uninstall; Windows asks for administrator permission.",
+            action = HintAction("Remove driver", ACTION_VDD_REMOVE), tone = HintTone.Info,
+        )
+        if (ExtendChoice.pick(probes) != null) return if (vddInstalled) listOf(remove) else emptyList()
+        val setup = probes.firstOrNull { it.readiness == ExtendReadiness.NeedsSetup }
+        val problem = setup?.problem
+            ?: probes.firstOrNull { it.problem == ExtendProblem.GnomeTooOld }?.problem
+            ?: probes.firstOrNull { it.problem == ExtendProblem.MutterRefused }?.problem
+            ?: probes.firstOrNull()?.problem
+        val gnome = loginDesktop(currentDesktop) == LoginDesktop.Gnome
+        return when (problem) {
+            ExtendProblem.NoGstreamer, ExtendProblem.NoPipewiresrc -> {
+                val packages = gstPackages(distro)
+                val missing = if (problem == ExtendProblem.NoGstreamer) "GStreamer's gst-launch-1.0" else "GStreamer's PipeWire plugin (pipewiresrc)"
+                listOf(
+                    HostHint(
+                        "The second display needs GStreamer",
+                        "This PC can add a monitor for the phone, and turns it into pictures with $missing, which isn't installed." +
+                            if (packages.isEmpty()) " Install gst-launch-1.0, the GStreamer PipeWire plugin, and gst-plugins-good." else "",
+                        installCommand(distro, packages),
+                    ),
+                )
+            }
+            ExtendProblem.DriverMissing -> listOf(
+                HostHint(
+                    "Install the virtual display driver",
+                    "Windows adds a monitor only through a display driver. DyskLink uses the open-source Virtual Display Driver " +
+                        "(VirtualDrivers, MIT, release ${Vdd.RELEASE}). Windows asks for administrator permission once. The monitor is only " +
+                        "on the desktop while the phone is a second display. If the screen goes black after a graphics driver update, press Win+P.",
+                    action = HintAction("Install driver", ACTION_VDD_INSTALL),
+                ),
+            )
+            ExtendProblem.DriverNotInCopy -> listOf(
+                HostHint(
+                    "The virtual display driver isn't in this copy",
+                    "It comes with the DyskLink installer for Windows. Install DyskLink from the downloads page, then try again.",
+                    link = HintLink("Open downloads", DesktopUpdates.PAGE_URL),
+                ),
+            )
+            ExtendProblem.ExperimentOff -> emptyList()
+            ExtendProblem.GnomeTooOld -> listOf(
+                HostHint(
+                    "This GNOME can't add a virtual monitor",
+                    "Using the phone as a second display needs a newer GNOME. Update the system, or view this screen on the phone instead.",
+                ),
+            )
+            ExtendProblem.MutterRefused -> listOf(
+                HostHint(
+                    "GNOME didn't let DyskLink add a monitor",
+                    "This GNOME keeps its virtual monitors to its own apps, and its screen sharing portal has no virtual monitor either. " +
+                        "Updating xdg-desktop-portal-gnome may add it.",
+                    installCommand(distro, listOf("xdg-desktop-portal-gnome")),
+                ),
+            )
+            ExtendProblem.NoPortal, ExtendProblem.PortalNoVirtual, ExtendProblem.NoMutter -> listOf(
+                HostHint(
+                    "This desktop can't add a virtual monitor",
+                    if (gnome) "The screen sharing portal here has no virtual monitor. Newer GNOME has one: update the system, then log in again."
+                    else "The phone as a second display needs a desktop whose screen sharing portal makes virtual monitors: KDE Plasma 6 " +
+                        "or a newer GNOME. Sway, Hyprland and KDE Plasma 5 don't yet.",
+                ),
+            )
+            ExtendProblem.X11NoVirtualOutput -> listOf(
+                HostHint(
+                    "This X11 session has no spare output",
+                    "On X11 a monitor can only be added through the graphics driver's virtual output (Intel's xf86-video-intel has VIRTUAL1), " +
+                        "and this driver has none. Log in with a Wayland session (GNOME or KDE Plasma 6) to use the phone as a second display, " +
+                        "or set up a dummy or evdi display yourself.",
+                ),
+            )
+            ExtendProblem.NoXrandr -> listOf(
+                HostHint(
+                    "The second display needs xrandr",
+                    "DyskLink turns on the driver's virtual output with xrandr, which isn't installed.",
+                    installCommand(distro, listOfNotNull(xrandrPackage(distro))),
+                ),
+            )
+            ExtendProblem.NoCvt -> listOf(
+                HostHint(
+                    "The second display needs cvt",
+                    "DyskLink makes the phone's display mode with cvt, which comes with the X server.",
+                    installCommand(distro, listOfNotNull(cvtPackage(distro))),
+                ),
+            )
+            ExtendProblem.NoCapture -> listOf(
+                HostHint("DyskLink can't capture the screen here", "Log in to a regular desktop session on this PC."),
+            )
+            null -> emptyList()
         }
     }
 
@@ -533,6 +662,7 @@ object HostChecks {
 
         val control = mutableListOf<HostHint>()
         val remote = mutableListOf<HostHint>()
+        val source = mutableListOf<HostHint>()
         val screenOut = mutableListOf<HostHint>()
         val overview = mutableListOf<HostHint>()
         if (wayland) {
@@ -540,6 +670,12 @@ object HostChecks {
             val input = waylandInput(w, how)
             control += input
             remote += input
+            source += HostHint(
+                "Not on Wayland yet",
+                "On Wayland this needs the InputCapture portal and libei, not supported yet: Wayland doesn't let an app " +
+                    "watch or hold the mouse and keyboard otherwise. Log in to an X11 session to use this PC's mouse and keyboard on a Mac." +
+                    (x11Where(desktop)?.let { " $it" } ?: ""),
+            )
             screenOut += waylandScreen(w, distro, host.env("XDG_CURRENT_DESKTOP"), how)
             val missing = listOfNotNull(
                 "the touchpad, keyboard and remotes (a virtual keyboard and mouse)".takeIf { w.route == InputRoute.NONE },
@@ -561,6 +697,22 @@ object HostChecks {
             )
             control += display
             remote += display
+            source += display
+        } else if (host.xinput2 == false) {
+            val command = install(
+                when (distro) {
+                    Distro.Fedora -> "libXi"
+                    Distro.Arch -> "libxi"
+                    Distro.Suse -> "libXi6"
+                    else -> "libxi6"
+                },
+            )
+            source += HostHint(
+                "The pointer can't be followed to the edge",
+                "Using this PC's mouse and keyboard on a Mac needs the X11 XInput2 extension (libXi), which didn't answer. " +
+                    (if (command != null) "Install it, then restart DyskLink:" else "Install libXi, then restart DyskLink."),
+                command,
+            )
         }
 
         // The media remote: playerctl for play, pause and skipping; pactl for the volume; xdotool presses media keys instead.
@@ -622,7 +774,8 @@ object HostChecks {
         }
 
         return HostHints(
-            control = control, screenOut = screenOut, remote = remote, soundOut = soundOut, popups = popups, overview = overview,
+            control = control, screenOut = screenOut, remote = remote, source = source, soundOut = soundOut, popups = popups, overview = overview,
+            secondDisplay = secondDisplayHints(host.extend, distro, host.env("XDG_CURRENT_DESKTOP")),
             connectLater = listOfNotNull(firewall), obs = if (wayland) ObsCapture.PipeWire else ObsCapture.Xcomposite,
         )
     }
@@ -642,7 +795,10 @@ object HostChecks {
                 "firewall: tick Private for DyskLink. Then try again on the phone.",
             link = HintLink("Open firewall settings", "windowsdefender://network"),
         )
-        return HostHints(connectNow = public, connectLater = listOf(firewall), obs = ObsCapture.Windows)
+        return HostHints(
+            connectNow = public, connectLater = listOf(firewall), obs = ObsCapture.Windows,
+            secondDisplay = secondDisplayHints(host.extend, Distro.Other, null, host.vddInstalled),
+        )
     }
 
     /** The OBS source's name, for the line in the camera window. */
@@ -805,7 +961,10 @@ object HostChecks {
     }
 
     /** This PC as the checks see it. Reads the PATH, /etc/os-release and the environment; cheap enough for every focus. */
-    fun current(notificationService: Boolean?, publicNetwork: Boolean?, robot: Boolean, x11Remap: Boolean, wayland: WaylandHost? = null): HostEnv {
+    fun current(
+        notificationService: Boolean?, publicNetwork: Boolean?, robot: Boolean, x11Remap: Boolean, wayland: WaylandHost? = null,
+        extend: List<ExtendProbe>? = null, vddInstalled: Boolean = false, xinput2: Boolean? = null,
+    ): HostEnv {
         val path = System.getenv("PATH").orEmpty()
         // Firewall tools live in sbin, which isn't on every user's PATH.
         val withSbin = "$path${File.pathSeparator}/usr/sbin${File.pathSeparator}/sbin"
@@ -820,6 +979,9 @@ object HostChecks {
             robot = robot,
             x11Remap = x11Remap,
             wayland = wayland,
+            extend = extend,
+            vddInstalled = vddInstalled,
+            xinput2 = xinput2,
             port = Platform.port,
         )
     }
