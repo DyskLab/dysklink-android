@@ -390,6 +390,15 @@ private fun ResultCard(record: ScanRecord, typeOn: String?, onType: () -> Unit, 
                 Text("Opens a page on $it", color = Palette.TextFaint, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
+        if (content is BarcodeContent.Wifi && !canSuggestWifi(content)) {
+            Text(
+                wifiConnectLimit(content),
+                color = Palette.TextFaint,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
         Spacer(Modifier.height(12.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when (content) {
@@ -400,6 +409,7 @@ private fun ResultCard(record: ScanRecord, typeOn: String?, onType: () -> Unit, 
                 is BarcodeContent.Wifi -> {
                     content.password?.let { password -> ScanAction("Copy password", Palette.Mint) { copyText(context, password, "Wi-Fi password") } }
                     if (canSuggestWifi(content)) ScanAction("Connect") { connectWifi(context, content) }
+                    else ScanAction("Wi-Fi settings") { startSafely(context, Intent(Settings.ACTION_WIFI_SETTINGS)) }
                 }
                 is BarcodeContent.Contact -> ScanAction("Add to contacts", Palette.Mint) { addContact(context, content) }
                 is BarcodeContent.Phone -> {
@@ -452,6 +462,15 @@ private fun canSuggestWifi(wifi: BarcodeContent.Wifi): Boolean {
     if (wifi.isOpen) return true
     val security = wifi.security.uppercase()
     return security != "WEP" && (wifi.password?.length ?: 0) in 8..63
+}
+
+/** Why there's no Connect button, so the person knows to copy the password and join in Settings. */
+private fun wifiConnectLimit(wifi: BarcodeContent.Wifi): String = when {
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.R ->
+        "Joining from DyskLink needs Android 11 or newer. Copy the password and join the network in Wi-Fi settings."
+    wifi.security.uppercase() == "WEP" ->
+        "Android doesn't let apps add WEP networks. Copy the password and join the network in Wi-Fi settings."
+    else -> "This password can't be saved from an app. Copy it and join the network in Wi-Fi settings."
 }
 
 private fun connectWifi(context: Context, wifi: BarcodeContent.Wifi) {

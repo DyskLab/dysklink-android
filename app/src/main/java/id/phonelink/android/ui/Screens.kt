@@ -580,6 +580,16 @@ private fun HomeScreen(
         if (state.batteryRestricted) {
             BackgroundCard(onAllowBackground, onOpenSettings)
             Spacer(Modifier.height(20.dp))
+        } else {
+            MakerBackgroundHint(Modifier.padding(bottom = 20.dp))
+        }
+        val notifications = rememberNotificationAccess()
+        if (!notifications.allowed) {
+            NotificationHint(
+                notifications,
+                "Notifications are off for DyskLink. Pairing requests, received files, and requests from other phones can't show while DyskLink is in the background.",
+            )
+            Spacer(Modifier.height(20.dp))
         }
 
         if (state.peers.isEmpty()) {
@@ -598,12 +608,14 @@ private fun HomeScreen(
                     textAlign = TextAlign.Center,
                     lineHeight = 21.sp,
                 )
+                NetworkHint(Modifier.padding(top = 16.dp))
             }
         } else {
             SectionLabel("DEVICES")
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 state.peers.forEach { peer -> PeerCard(peer) { onOpen(peer) } }
             }
+            if (state.peers.none(Peer::isConnected)) NetworkHint(Modifier.padding(top = 12.dp))
             Spacer(Modifier.height(24.dp))
         }
 
@@ -748,6 +760,11 @@ private fun ChargeCard(settings: ChargeReminder.Settings, sessions: List<ChargeS
             )
         }
         if (settings.on) {
+            val notifications = rememberNotificationAccess()
+            if (!notifications.allowed) {
+                Spacer(Modifier.height(10.dp))
+                NotificationHint(notifications, "Notifications are off for DyskLink, so the reminder can't show.")
+            }
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ChargeReminder.limitChoices.forEach { limit ->
@@ -1160,7 +1177,7 @@ private fun DetailScreen(
                 }
                 if (peer.info?.inputTrusted == false) {
                     Text(
-                        "The touchpad and keyboard are off on this PC. Turn on \"Phones can control this PC\" in DyskLink there. On Linux they need an X11 session.",
+                        "The touchpad and keyboard are off on this PC. Turn on \"Phones can control this PC\" in DyskLink there. On Linux, also allow remote control when the PC asks, or follow the steps DyskLink shows there.",
                         color = Palette.Amber, fontSize = 12.sp, lineHeight = 17.sp,
                     )
                 }

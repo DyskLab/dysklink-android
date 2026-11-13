@@ -47,6 +47,40 @@ jobs:
       - name: rpmbuild
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y rpm
+      # DyskLink Camera, the webcam on Windows: softcam (github.com/tshino/softcam, MIT), a DirectShow camera filter,
+      # pinned to v1.8.1 and built with its own name, class id and shared memory, so video apps list "DyskLink Camera"
+      # and it lives beside any other softcam ("DirectShow Softcam"). The class id must match Softcam.CLSID in the app.
+      # The C runtime is linked in, so the DLL needs no Visual C++ redistributable. It ships in the MSI/EXE resources.
+      - uses: microsoft/setup-msbuild@v2
+        if: runner.os == 'Windows'
+      - name: DyskLink Camera (softcam)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SOFTCAM_COMMIT: afb424c2415b04da627fa1a7b4706575c2ba3010
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP "softcam"
+          git clone --quiet https://github.com/tshino/softcam.git $src
+          git -C $src checkout --quiet $env:SOFTCAM_COMMIT
+          function Patch($file, $from, $to) {
+            $path = Join-Path $src $file
+            $text = Get-Content $path -Raw
+            if (-not $text.Contains($from)) { throw "softcam changed: '$from' is not in $file" }
+            Set-Content $path $text.Replace($from, $to) -NoNewline
+          }
+          Patch "src\softcam\softcam.cpp" 'L"DirectShow Softcam"' 'L"DyskLink Camera"'
+          Patch "src\softcam\softcam.cpp" '0xaef3b972, 0x5fa5, 0x4647, 0x95, 0x71, 0x35, 0x8e, 0xb4, 0x72, 0xbc, 0x9e' '0xab6332aa, 0x0874, 0x412f, 0x80, 0x0f, 0xc0, 0xa4, 0x72, 0xf4, 0xb5, 0x54'
+          Patch "src\softcamcore\FrameBuffer.cpp" '"DirectShow Softcam/NamedMutex"' '"DyskLink Camera/NamedMutex"'
+          Patch "src\softcamcore\FrameBuffer.cpp" '"DirectShow Softcam/SharedMemory"' '"DyskLink Camera/SharedMemory"'
+          $props = Join-Path $env:RUNNER_TEMP "static-crt.props"
+          Set-Content $props '<Project><ItemDefinitionGroup><ClCompile><RuntimeLibrary>MultiThreaded</RuntimeLibrary></ClCompile></ItemDefinitionGroup></Project>'
+          msbuild (Join-Path $src "softcam.sln") /m /t:softcam /p:Configuration=Release /p:Platform=x64 "/p:ForceImportBeforeCppTargets=$props"
+          if ($LASTEXITCODE -ne 0) { throw "softcam build failed" }
+          $out = Join-Path $env:GITHUB_WORKSPACE "desktop\resources\windows-x64"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item (Join-Path $src "dist\bin\x64\softcam.dll") $out
+          Copy-Item (Join-Path $src "LICENSE") (Join-Path $out "softcam-LICENSE.txt")
+          Get-Item (Join-Path $out "softcam.dll")
       - name: Package
         shell: bash
         run: ./gradlew $(for t in ${{ matrix.tasks }}; do printf ":desktop:%s " "$t"; done) --console=plain

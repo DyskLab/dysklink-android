@@ -52,7 +52,7 @@ fun ColumnScope.ContactsTab(context: TabContext) {
     val colors = Dysk.colors
     val device = context.device
     val model = context.model
-    if (!ready(device, "Contacts", device.servesContacts, "contacts")) return
+    if (!ready(device, "Contacts", device.servesContacts, "contacts", model)) return
     val all by model.contacts.collectAsState()
     val book = all[device.id]
     LaunchedEffect(device.id) { if (book?.loaded != true && book?.loading != true) model.loadContacts(device.id) }
@@ -134,7 +134,7 @@ fun ColumnScope.PhoneFilesTab(context: TabContext) {
     val colors = Dysk.colors
     val device = context.device
     val model = context.model
-    if (!ready(device, "Phone files", device.servesFiles, "files")) return
+    if (!ready(device, "Phone files", device.servesFiles, "files", model)) return
     val all by model.folders.collectAsState()
     val folder = all[device.id]
     LaunchedEffect(device.id) { if (folder == null) model.openPhoneFolder(device.id, "") }
@@ -181,7 +181,7 @@ fun ColumnScope.PhoneFilesTab(context: TabContext) {
             selected = emptySet()
         }
     }
-    folder?.error?.let { Banner(it, colors.coral, DyskIcons.Warning) }
+    folder?.error?.let { PhoneRefusal(it, device) }
     val transfers by model.transfers.collectAsState()
     transfers.filter { it.peerId == device.id && !it.outgoing && it.status == TransferStatus.Active }.take(5).forEach { TransferRow(it, null, model) }
     when {

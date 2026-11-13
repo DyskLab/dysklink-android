@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -30,6 +31,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -84,6 +86,42 @@ object VideoMath {
             270 -> 1 - v to u
             else -> u to v
         }
+    }
+
+    /** Where a point 0–1 on the phone's own picture shows in the view: [toPicture] the other way. */
+    fun toView(px: Float, py: Float, viewW: Float, viewH: Float, picW: Float, picH: Float, rotation: Int, mirror: Boolean = false): Offset {
+        val (left, top, w, h) = fit(viewW, viewH, picW, picH, rotation).toList()
+        var (u, v) = when (Math.floorMod(rotation, 360)) {
+            90 -> 1 - py to px
+            180 -> 1 - px to 1 - py
+            270 -> py to 1 - px
+            else -> px to py
+        }
+        if (mirror) u = 1 - u
+        return Offset(left + u * w, top + v * h)
+    }
+
+    /** How wide the phone's own picture is in the view, turned or not: sizes that are shares of its width. */
+    fun phoneWidth(viewW: Float, viewH: Float, picW: Float, picH: Float, rotation: Int): Float {
+        val box = fit(viewW, viewH, picW, picH, rotation)
+        return if (Math.floorMod(rotation, 180) == 90) box[3] else box[2]
+    }
+
+    /** What a key typed on the picture does on the phone: Back, Enter, arrows, or the text; null for anything else. */
+    fun phoneKey(event: KeyEvent): ControlEvent? {
+        if (event.type != KeyEventType.KeyDown) return null
+        val key = when (event.key) {
+            Key.Backspace -> "backspace"
+            Key.Enter, Key.NumPadEnter -> "enter"
+            Key.DirectionLeft -> "left"
+            Key.DirectionRight -> "right"
+            Key.Escape -> "back"
+            else -> null
+        }
+        if (key != null) return ControlEvent("key", key = key)
+        val code = event.utf16CodePoint
+        if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed || code < 32 || code == 127) return null
+        return ControlEvent("text", text = String(Character.toChars(code)))
     }
 
     fun decode(jpeg: ByteArray?): ImageBitmap? =
@@ -157,19 +195,8 @@ fun VideoSurface(
             .focusRequester(focus)
             .focusable()
             .onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                val key = when (event.key) {
-                    Key.Backspace -> "backspace"
-                    Key.Enter, Key.NumPadEnter -> "enter"
-                    Key.DirectionLeft -> "left"
-                    Key.DirectionRight -> "right"
-                    Key.Escape -> "back"
-                    else -> null
-                }
-                if (key != null) { onControl(ControlEvent("key", key = key)); return@onPreviewKeyEvent true }
-                val code = event.utf16CodePoint
-                if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed || code < 32 || code == 127) return@onPreviewKeyEvent false
-                onControl(ControlEvent("text", text = String(Character.toChars(code))))
+                val control = VideoMath.phoneKey(event) ?: return@onPreviewKeyEvent false
+                onControl(control)
                 true
             }
     }
@@ -200,25 +227,40 @@ fun VideoSurface(
 
 private const val SCROLL_STEP = 0.12f
 
-/** The phone's screen in its own window: the picture with the phone keys under it. */
+/** The phone's screen in its own window: the picture with the phone keys under it, and the game keys panel beside it. */
 @Composable
 fun ScreenWindowContent(model: DeskModel, ui: UiState, deviceId: String) {
     val colors = Dysk.colors
     val screens by model.screens.collectAsState()
+    val phones by model.phones.collectAsState()
     val video = screens[deviceId]
     val picture = rememberFrame(video)
-    Column(Modifier.fillMaxSize().background(colors.background)) {
-        VideoSurface(
-            picture, ui.screenRotation, Modifier.weight(1f).fillMaxWidth(),
-            onControl = { model.control(deviceId, it) },
-        )
-        if (picture == null) {
-            Text(
-                video?.error ?: if (video == null) "The screen isn't shared now." else "Waiting for the phone...",
-                Modifier.padding(Space.sm), color = colors.textSecondary, fontSize = 12.5.sp,
+    val game = ui.gameKeys(deviceId, model)
+    val unsupported = gameKeysUnsupported(phones.firstOrNull { it.id == deviceId })
+    Row(Modifier.fillMaxSize().background(colors.background)) {
+        Column(Modifier.weight(1f).fillMaxHeight()) {
+            if (game.enabled && unsupported == null) {
+                GameScreen(picture, ui.screenRotation, game, model.gamePointerLock, Modifier.weight(1f).fillMaxWidth().background(Color.Black)) { model.control(deviceId, it) }
+            } else {
+                VideoSurface(
+                    picture, ui.screenRotation, Modifier.weight(1f).fillMaxWidth(),
+                    onControl = { model.control(deviceId, it) },
+                )
+            }
+            if (picture == null) {
+                Text(
+                    video?.error ?: if (video == null) "The screen isn't shared now." else "Waiting for the phone...",
+                    Modifier.padding(Space.sm), color = colors.textSecondary, fontSize = 12.5.sp,
+                )
+            }
+            PhoneKeys(model, ui, deviceId, Modifier.padding(Space.xs)) { GameKeysButton(game) }
+        }
+        if (game.enabled) {
+            GameKeysPanel(
+                game, model.gamePointerLock, Modifier.padding(Space.xs), unsupported = unsupported,
+                onImport = { GameKeyFiles.import(game) }, onExport = { GameKeyFiles.export(game) },
             )
         }
-        PhoneKeys(model, ui, deviceId, Modifier.padding(Space.xs))
     }
 }
 
@@ -292,12 +334,15 @@ fun CameraControls(model: DeskModel, ui: UiState, deviceId: String, video: Phone
         if (inWindow) {
             SecondaryButton("On top", if (view.onTop) colors.mint else colors.textPrimary, icon = DyskIcons.Pin) { view.onTop = !view.onTop }
             SecondaryButton("Clean view", icon = DyskIcons.Eye) { view.clean = true }
+            WebcamButton(model)
         }
         extra()
     }
     if (inWindow) {
         Text(
-            "Clean view leaves only the picture, for window capture in OBS. Double-click it to bring the buttons back.",
+            "In OBS, add this window with ${id.dysklink.desktop.HostChecks.obsSource(model.host.collectAsState().value.obs)}. " +
+                "Clean view leaves only the picture; double-click it to bring the buttons back." +
+                if (model.webcam != null) " Or use it as a webcam: OBS and call apps then pick '${id.dysklink.desktop.Loopback.LABEL}' as a Video Capture Device." else "",
             Modifier.padding(start = Space.sm, bottom = Space.xs), color = colors.textFaint, fontSize = 11.sp, fontWeight = FontWeight.Medium,
         )
     }

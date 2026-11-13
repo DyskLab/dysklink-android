@@ -24,7 +24,7 @@ import javax.imageio.ImageWriteParam
 /**
  * This PC's screen for a phone, through java.awt.Robot: GDI on Windows, XGetImage on X11. Portable and needs nothing
  * installed, at about 10 to 20 pictures a second for a 1080p display, which the pacer stays under. Wayland doesn't let
- * apps capture the screen this way, so it's refused there with [PcScreen.WAYLAND_REFUSAL].
+ * apps capture the screen this way; [PortalScreenSource] does it there through the ScreenCast portal.
  */
 class RobotScreenSource(private val wayland: Boolean) : PcScreenSource {
     private val robot: Robot? by lazy {

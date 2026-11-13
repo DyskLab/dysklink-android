@@ -31,10 +31,10 @@ fun CameraScreen(peerId: String, macName: String, connected: Boolean, start: (St
             Spacer(Modifier.height(6.dp))
             Text(
                 when {
-                    mine -> "The picture shows in a window on the Mac. Keep this phone on a stand; the screen can turn off."
+                    mine -> "The picture shows in a window on the Mac. Keep this phone on a stand; the screen can turn off. For OBS, Zoom, or Meet, the steps are on the Mac's camera tab."
                     status != null -> "The camera is streaming to another Mac. Stop it there first."
                     !connected -> "$macName isn't connected."
-                    else -> "The picture opens in a window on the Mac. For Zoom or Meet, capture that window in OBS and start OBS Virtual Camera."
+                    else -> "The picture opens in a window on the Mac. To use it in OBS, Zoom, Meet, or Teams, open \"Use it in OBS, Zoom, Meet, or Teams\" on the Mac's camera tab for the steps."
                 },
                 color = Palette.TextSecondary, fontSize = 13.sp, lineHeight = 18.sp,
             )

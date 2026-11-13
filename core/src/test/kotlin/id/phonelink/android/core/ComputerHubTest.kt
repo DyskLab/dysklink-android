@@ -102,7 +102,8 @@ class ComputerHubTest {
         ).also { closers += it::shutdown }
     }
 
-    private fun waitUntil(message: String, seconds: Int = 10, check: () -> Boolean) {
+    // Generous: the suite also runs while other Gradle builds load this machine.
+    private fun waitUntil(message: String, seconds: Int = 25, check: () -> Boolean) {
         val until = System.currentTimeMillis() + seconds * 1000L
         while (!check()) {
             if (System.currentTimeMillis() > until) throw AssertionError(message)
@@ -111,8 +112,8 @@ class ComputerHubTest {
     }
 
     /** Connects and pairs by typing the code the PC shows. */
-    private fun paired(pc: Pc, phone: Phone) {
-        phone.manager.addManual("127.0.0.1", pc.hub.boundPort)
+    private fun paired(pc: Pc, phone: Phone, host: String = "127.0.0.1") {
+        phone.manager.addManual(host, pc.hub.boundPort)
         waitUntil("The phone didn't connect") { pc.hub.phones.value.any { it.isConnected } }
         val peer = phone.manager.peers.value.first { it.id == pc.hub.deviceId }
         assertTrue(peer.isComputer, "A Windows PC must count as a computer")
@@ -583,5 +584,93 @@ class ComputerHubTest {
         windows.hub.sendFile(linux.hub.deviceId, file)
         waitUntil("The file didn't arrive") { File(linux.received, file.name).let { it.exists() && it.length() == file.length() } }
         assertTrue(File(linux.received, file.name).readBytes().contentEquals(file.readBytes()))
+    }
+
+    /**
+     * What `adb reverse` does: a port on 127.0.0.1 that leads to the PC. The PC sees those connections come from
+     * its own loopback address. [unplug] closes the port and every connection through it, like pulling the cable.
+     */
+    private class FakeAdbReverse(private val targetPort: Int, port: Int = 0) {
+        private val server = java.net.ServerSocket().apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), port))
+        }
+        private val sockets = CopyOnWriteArrayList<java.net.Socket>()
+        val port: Int get() = server.localPort
+
+        init {
+            kotlin.concurrent.thread(isDaemon = true, name = "fake-adb") {
+                while (!server.isClosed) {
+                    val phoneSide = runCatching { server.accept() }.getOrNull() ?: break
+                    val pcSide = runCatching { java.net.Socket(java.net.InetAddress.getLoopbackAddress(), targetPort) }.getOrNull()
+                    if (pcSide == null) { phoneSide.close(); continue }
+                    sockets += phoneSide
+                    sockets += pcSide
+                    pipe(phoneSide, pcSide)
+                    pipe(pcSide, phoneSide)
+                }
+            }
+        }
+
+        private fun pipe(from: java.net.Socket, to: java.net.Socket) = kotlin.concurrent.thread(isDaemon = true) {
+            runCatching { from.getInputStream().copyTo(to.getOutputStream(), 8 * 1024) }
+            runCatching { from.close() }
+            runCatching { to.close() }
+        }
+
+        fun unplug() {
+            runCatching { server.close() }
+            sockets.forEach { runCatching { it.close() } }
+        }
+    }
+
+    /** This computer's address on a network, so the phone's "Wi-Fi" connection doesn't come from loopback. */
+    private fun lanAddress(): String? = java.net.NetworkInterface.getNetworkInterfaces().toList()
+        .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
+        .flatMap { it.inetAddresses.toList() }
+        .firstOrNull { it is java.net.Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress }?.hostAddress
+
+    /** The phone's USB port reaches a Windows or Linux PC as it does a Mac: the cable takes over, and unplugging goes back to Wi-Fi. */
+    @Test
+    fun usbTakesOverFromWifiOnAPcAndUnpluggingGoesBack() {
+        val lan = lanAddress()
+        if (lan == null) { println("SKIPPED: no network address for the Wi-Fi side"); return }
+        val pc = Pc()
+        val phone = Phone()
+        paired(pc, phone, host = lan)
+        val phoneId = phone.manager.localDeviceId
+        val onPc = { pc.hub.phones.value.first { it.id == phoneId } }
+        val onPhone = { phone.manager.peers.value.first { it.id == pc.hub.deviceId } }
+        assertFalse(onPc().viaUsb, "Wi-Fi isn't USB")
+        assertFalse(onPhone().viaUsb)
+
+        // The cable goes in: the PC runs adb reverse, and the phone's next USB try reaches the PC.
+        val reverse = FakeAdbReverse(pc.hub.boundPort)
+        closers += reverse::unplug
+        phone.manager.startUsb(reverse.port)
+        waitUntil("The USB connection didn't take over on the PC") { onPc().let { it.isConnected && it.viaUsb } }
+        waitUntil("The phone doesn't say USB") { onPhone().let { it.isConnected && it.viaUsb } }
+        // Everything goes over the cable: the clipboard and a file, and the phone's Wi-Fi dialing waits.
+        phone.manager.shareClipboard("lewat-usb")
+        waitUntil("The clipboard didn't arrive over USB") { "lewat-usb" in pc.clipboard }
+        pc.hub.sendClipboard("ke-hp-usb")
+        waitUntil("The clipboard didn't reach the phone over USB") { "ke-hp-usb" in phone.clipboard }
+        Thread.sleep(1_000)
+        assertTrue(onPc().viaUsb, "Wi-Fi took the connection back while the cable was in")
+
+        // Unplugged: back to Wi-Fi by itself.
+        reverse.unplug()
+        waitUntil("The phone didn't go back to Wi-Fi", 20) { onPc().let { it.isConnected && !it.viaUsb } && onPhone().let { it.isConnected && !it.viaUsb } }
+        phone.manager.shareClipboard("lewat-wifi")
+        waitUntil("The clipboard didn't arrive over Wi-Fi again") { "lewat-wifi" in pc.clipboard }
+
+        // Plugged in again, then USB turned off on the PC: the reverse port is gone and the phone is hung up on.
+        // The phone keeps trying the same port, as it does 47823.
+        val again = FakeAdbReverse(pc.hub.boundPort, reverse.port)
+        closers += again::unplug
+        waitUntil("USB didn't take over again") { onPc().viaUsb }
+        again.unplug()
+        pc.hub.closeUsbConnections()
+        waitUntil("Turning USB off didn't send the phone back to Wi-Fi", 20) { onPc().let { it.isConnected && !it.viaUsb } }
     }
 }

@@ -67,7 +67,18 @@ class DesktopApp(private val scope: CoroutineScope) {
     val soundFrom: StateFlow<String?> = _soundFrom.asStateFlow()
     private val speaker = PhoneSpeaker()
     private val media = MediaKeys()
-    val input: PcInput = PcInput(::paste)
+    /** What the desktop portal allowed, kept so the user is asked once (Wayland). */
+    private val portalTokens = PortalTokens(File(Platform.dataDir, "portal.properties"))
+    private val portal: PortalClient? by lazy { if (Platform.isLinux) PortalClient.connect(LinuxTray.sessionAddress(), portalTokens) else null }
+    /** The pointer and keyboard on Wayland: the RemoteDesktop portal, or /dev/uinput. Null elsewhere. */
+    private val wayland: WaylandInput? =
+        if (Platform.isLinux && Typing.desktop() == Desktop.WAYLAND) WaylandInput({ portal }, onChange = { waylandChanged() }) else null
+    val input: PcInput = PcInput(::paste, wayland)
+
+    private fun waylandChanged() {
+        hub.infoChanged()
+        recheckHost()
+    }
 
     /** For text that can't be typed: pasted, with the clipboard put back after and nothing synced. */
     private fun paste(text: String): Boolean = systemClipboard.pasteThrough(text) { input.pasteNow() }
@@ -85,6 +96,112 @@ class DesktopApp(private val scope: CoroutineScope) {
 
     private fun phoneName(id: String) = hub.phones.value.firstOrNull { it.id == id }?.name ?: "Your phone"
 
+    /** Clipboard History on the Tools page, with its quick picker. */
+    val clipHistory = ClipHistoryService(
+        scope, settings, Platform.dataDir, { portal },
+        passingThrough = { systemClipboard.passingThrough },
+        pressPaste = { input.pasteNow() },
+        canPaste = { input.isAvailable },
+    )
+
+    private fun copyToClipboard(text: String) {
+        runCatching { java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(java.awt.datatransfer.StringSelection(text), null) }
+    }
+
+    private val _uiRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    /** The window should show a page or ask for files: "open", "settings", "tools", "pccare", "send:<phone>". */
+    val uiRequests: SharedFlow<String> = _uiRequests.asSharedFlow()
+
+    /** Window tidy on the Tools page. No backend on Wayland, where it can't work. */
+    val windowTidy: WindowTidyService = run {
+        val desktop = Typing.desktop()
+        val backend: WindowBackend? = when (desktop) {
+            Desktop.WINDOWS -> runCatching { WindowsWindowBackend() }.getOrNull()
+            Desktop.X11 -> runCatching { X11WindowBackend() }.getOrNull()
+            else -> null
+        }
+        WindowTidyService(scope, settings, Platform.dataDir, desktop, backend) { v ->
+            if (!v.enabled && desktop != Desktop.WAYLAND) emptyList()
+            else HostChecks.windowTidyHints(Platform.isWindows, desktop == Desktop.WAYLAND, System.getenv("XDG_CURRENT_DESKTOP"), backend?.problem, v.hotkey, v.mods)
+        }
+    }
+
+    /** The Launcher on the Tools page, with its own shortcut. */
+    val launcher = LauncherService(
+        scope, settings, Platform.dataDir, { portal },
+        actions = ::launcherActions, runAction = ::runLauncherAction,
+        clipSearch = { query ->
+            if (!clipHistory.store.settings.value.enabled) emptyList()
+            else ClipHistoryStore.search(clipHistory.store.entries.value, query).filter { it.kind == ClipKind.Text }.take(3).map { e ->
+                LauncherItem("clip:${e.id}", LauncherKind.Clip, e.preview.lineSequence().firstOrNull().orEmpty().take(80), "From the clipboard history", LauncherTarget.Clip(e.id))
+            }
+        },
+        copyClip = { id -> clipHistory.store.entries.value.any { it.id == id }.also { if (it) clipHistory.act(ClipAction.Copy(id)) } },
+        canType = { input.isAvailable },
+        typeText = { text -> input.handle(InputEvent("text", text = text)) },
+        pressPaste = { input.pasteNow() },
+        copy = ::copyToClipboard,
+    )
+
+    private val _trayMenu = MutableStateFlow(TrayMenuConfig.load(settings))
+    /** Which parts the tray menu shows, and in what order. */
+    val trayMenu: StateFlow<TrayMenuConfig> = _trayMenu.asStateFlow()
+
+    fun setTrayMenu(config: TrayMenuConfig) {
+        _trayMenu.value = config
+        config.save(settings)
+    }
+
+    /** DyskLink's own rows in the Launcher, for what's on now. */
+    private fun launcherActions(): List<LauncherItem> = buildList {
+        fun action(id: String, title: String, subtitle: String, keywords: String = "") = add(LauncherItem("action:$id", LauncherKind.Action, title, subtitle, LauncherTarget.Action(id), keywords))
+        action("open", "Open DyskLink", "Main window", "dysklink window")
+        val pomodoro = tools.value.pomodoro.state
+        action("pomodoro", if (pomodoro.isRunning) "Pause focus" else if (pomodoro.isStarted) "Resume focus" else "Start focus", "Pomodoro", "pomodoro timer fokus")
+        if (clipHistory.store.settings.value.enabled) action("clipboard", "Clipboard history", "Everything you copied", "clipboard riwayat salin paste")
+        hub.phones.value.filter { it.isPaired && it.isConnected }.forEach { phone ->
+            action("send:${phone.id}", "Send files to ${phone.name}", "Phone", "kirim file send")
+            action("ring:${phone.id}", "Ring ${phone.name}", "Find phone", "cari hp bunyi find")
+        }
+        val tidy = windowTidy.view.value
+        if (tidy.enabled && tidy.supported) {
+            Layouts.forMonitors(tidy.layouts, tidy.monitorKey).forEach { layout ->
+                action("layout:${layout.id}", "Restore ${layout.name}", "Window layout", "layout jendela window")
+            }
+            action("grid", "Arrange windows in a grid", "Window tidy", "grid tidy rapikan jendela")
+        }
+        action("water", "Drink a glass of water", "Water", "minum air water")
+        action("pccare", "PC care", "Clean up, duplicates, startup apps", "cleaner bersih uninstall startup care")
+        action("tools", "DyskLink Tools", "Focus, water, tasks", "tools todo")
+        action("settings", "DyskLink Settings", "DyskLink", "settings pengaturan preferences")
+        action("lock", "Lock screen", "This PC", "kunci lock layar")
+    }
+
+    private fun runLauncherAction(id: String) {
+        when {
+            id == "pomodoro" -> tools { togglePomodoro() }
+            id == "water" -> tools { drink() }
+            id == "clipboard" -> clipHistory.requestPicker()
+            id == "grid" -> windowTidy.run(WindowTidy.GRID)
+            id == "lock" -> runCatching {
+                if (Platform.isWindows) ProcessBuilder("rundll32.exe", "user32.dll,LockWorkStation").start()
+                else ProcessBuilder("loginctl", "lock-session").start()
+            }
+            id.startsWith("ring:") -> hub.ring(id.removePrefix("ring:"), true)
+            id.startsWith("layout:") -> windowTidy.restore(id.removePrefix("layout:"))
+            else -> _uiRequests.tryEmit(id)
+        }
+    }
+
+    /** The laptop's battery; its view stays null on a PC without one. */
+    val battery = BatteryMonitor(scope, Platform.dataDir)
+
+    /** `dysklink --clipboard` from a desktop shortcut, and a second start, reach this one through it. */
+    private val instance = SingleInstance(Platform.dataDir)
+    private val _showRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    /** Another start of DyskLink asked for the window. */
+    val showRequests: SharedFlow<Unit> = _showRequests.asSharedFlow()
+
     // What this PC serves phones, and a Mac's mouse and keyboard. Everything here is off until it's turned on.
 
     private val _soundOutOn = MutableStateFlow(settings.bool("soundOut", false))
@@ -95,6 +212,26 @@ class DesktopApp(private val scope: CoroutineScope) {
     /** "Let phones see this screen": a paired phone can view this PC's screen, and tap on it while control is on. */
     val screenOutOn: StateFlow<Boolean> = _screenOutOn.asStateFlow()
     private val robotScreen by lazy { RobotScreenSource(wayland = input.isWayland) }
+    /** This screen on Wayland: the ScreenCast portal and GStreamer. */
+    private val waylandScreen by lazy { PortalScreenSource({ portal }, { gstCheck() }, { wayland }, { _controlOn.value }) }
+    @Volatile private var gst: GstCheck? = null
+
+    /** GStreamer as found, checked again only while it's missing. */
+    private fun gstCheck(): GstCheck = gst?.takeIf { it.ready } ?: GstCheck.probe({ Typing.onPath(it) }, GstCheck::run).also { gst = it }
+
+    private fun waylandHost(): WaylandHost? {
+        val w = wayland ?: return null
+        w.recheck()
+        return WaylandHost(
+            route = w.route.value,
+            input = w.status.value,
+            inputRemembered = portalTokens.get(PortalTokens.INPUT) != null,
+            screenCast = if (portal == null) false else waylandScreen.screenCast().version != null,
+            gst = gstCheck(),
+            screen = waylandScreen.status.value,
+            screenRemembered = portalTokens.get(PortalTokens.SCREEN) != null || portalTokens.get(PortalTokens.SCREEN_WITH_INPUT) != null,
+        )
+    }
 
     val commandStore = CommandStore(File(Platform.dataDir, "commands.json"))
     private fun idSet(key: String) = settings.string(key).orEmpty().split(',').filter { it.isNotBlank() }.toSet()
@@ -115,12 +252,11 @@ class DesktopApp(private val scope: CoroutineScope) {
     /** The Mac whose mouse and keyboard are on this PC now. */
     val usedBy: StateFlow<String?> = _usedBy.asStateFlow()
 
-    /** Null where Robot doesn't reach other apps (Wayland, or no display). */
+    /** Null where nothing reaches other apps (no display, or Wayland with neither the portal nor /dev/uinput). */
     private val remoteTarget: SharedInputTarget? by lazy {
-        if (!input.isAvailable) return@lazy null
-        val robot = runCatching { java.awt.Robot().apply { autoDelay = 0 } }.getOrNull() ?: return@lazy null
+        val injector = input.injector ?: return@lazy null
         SharedInputTarget(
-            RobotInjector(robot),
+            injector,
             send = { id, envelope -> hub.sendRemote(id, envelope) },
             commandAsCtrl = { _commandAsCtrl.value },
             onChange = { id ->
@@ -171,6 +307,60 @@ class DesktopApp(private val scope: CoroutineScope) {
         return "${state.title(tools.pomodoro.settings)}: $left" + if (state.isRunning) "" else " (paused)"
     }
 
+    // What this PC needs from outside DyskLink, as hints where each feature is set up.
+
+    /** Popups where there's no tray to show them, and whether a notification service runs at all. Linux only. */
+    private val notifier: LinuxNotifier? by lazy { if (Platform.isLinux) LinuxNotifier.start(LinuxTray.sessionAddress()) else null }
+    private val _host = MutableStateFlow(HostHints())
+    val host: StateFlow<HostHints> = _host.asStateFlow()
+    @Volatile private var publicNetwork: Boolean? = null
+    @Volatile private var networkCheckedAt = 0L
+
+    /** Checks again what's installed and running; on window focus, and when a feature is turned on or tried. */
+    fun recheckHost() {
+        scope.launch {
+            val now = System.currentTimeMillis()
+            // PowerShell takes a moment, so the network type is read at most once a minute.
+            if (Platform.isWindows && now - networkCheckedAt > 60_000) {
+                networkCheckedAt = now
+                publicNetwork = windowsPublicNetwork()
+            }
+            _host.value = HostChecks.hints(HostChecks.current(notifier?.hasService(), publicNetwork, input.hasRobot, input.canRemap, waylandHost()))
+            webcam.recheck()
+        }
+    }
+
+    /** The phone camera as this PC's webcam, "DyskLink Camera" in video apps: the "Use as webcam" switch. */
+    val webcam: VirtualCamera by lazy {
+        VirtualCamera.forThisPc(hub.cameras, settings.bool("webcam", false)) { on -> settings.set("webcam", on) }
+    }
+
+    fun setWebcamOn(on: Boolean) = scope.launch(kotlinx.coroutines.Dispatchers.IO) { webcam.setOn(on) }
+
+    /** A hint's button: installing or removing the Windows camera driver. */
+    fun hintAction(id: String) = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        if (id == HostChecks.ACTION_WEBCAM_INSTALL || id == HostChecks.ACTION_WEBCAM_REMOVE) webcam.action(id)
+        if (id == HostChecks.ACTION_PORTAL_INPUT) wayland?.retry()
+        if (id == HostChecks.ACTION_PORTAL_SCREEN) { waylandScreen.retry(); recheckHost() }
+        if (id == HostChecks.ACTION_CLIPBOARD_HOTKEY) clipHistory.act(ClipAction.RetryHotkey)
+        if (id == HostChecks.ACTION_LAUNCHER_HOTKEY) launcher.retryHotkey()
+        if (id == HostChecks.ACTION_TIDY_HOTKEY) windowTidy.act(TidyAction.RetryHotkey)
+    }
+
+    /** A desktop notification over D-Bus, for when the tray can't show it. False when there's no way here. */
+    fun notifyDesktop(title: String, message: String): Boolean {
+        val notifier = notifier ?: return false
+        notifier.notify(title, message)
+        return true
+    }
+
+    private fun windowsPublicNetwork(): Boolean? = runCatching {
+        val process = ProcessBuilder("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "(Get-NetConnectionProfile).NetworkCategory")
+            .redirectErrorStream(true).start()
+        val out = process.inputStream.bufferedReader().readText()
+        if (process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS) && process.exitValue() == 0) HostChecks.anyPublic(out) else null
+    }.getOrNull()
+
     // Updates of this app, from GitHub releases. Nothing installs by itself.
 
     val updater = Updater(settings, scope)
@@ -185,7 +375,8 @@ class DesktopApp(private val scope: CoroutineScope) {
         Platform.dataDir, scope,
         localHello = { paired -> Hello(Platform.deviceName, Platform.protocolName, Platform.model, PhoneLinkProtocol.VERSION, paired, Platform.version, PhoneLinkProtocol.PC_CAPS) },
         events = object : HubEvents {
-            override fun clipboard(text: String, from: String): Boolean = _clipboardOn.value && systemClipboard.set(text)
+            override fun clipboard(text: String, from: String): Boolean =
+                (_clipboardOn.value && systemClipboard.set(text)).also { if (it) clipHistory.received(ClipCapture.Text(text), phoneName(from)) }
 
             override fun ring(on: Boolean, from: String) {
                 if (on) {
@@ -223,7 +414,9 @@ class DesktopApp(private val scope: CoroutineScope) {
                 speaker.start(rate, channels)
                 _soundFrom.value = from
             }
-            override fun clipboardImage(png: ByteArray, from: String) { if (_clipboardOn.value) systemClipboard.setImage(png) }
+            override fun clipboardImage(png: ByteArray, from: String) {
+                if (_clipboardOn.value && systemClipboard.setImage(png)) clipHistory.received(ClipCapture.Image(png), phoneName(from))
+            }
             override fun phoneSoundChunk(from: String, pcm: ByteArray) = speaker.play(pcm)
             override fun phoneSoundEnded(from: String) {
                 speaker.stop()
@@ -234,15 +427,15 @@ class DesktopApp(private val scope: CoroutineScope) {
                 !_soundOutOn.value -> "Turn on \"Let phones hear this PC\" in DyskLink on the PC first."
                 else -> null
             }
-            override fun soundCapture(): PcSoundCapture? = PcSound.capture()
+            override fun soundCapture(): PcSoundCapture? = PcSound.capture().also { recheckHost() }
 
             override fun screenRefusal(from: String): String? = when {
-                // Said first: turning the switch on wouldn't help.
-                input.isWayland -> PcScreen.WAYLAND_REFUSAL
+                // Said first: turning the switch on wouldn't help. On Wayland, only when a piece is missing.
+                input.isWayland -> waylandScreen.refusal().also { if (it != null) recheckHost() } ?: if (!_screenOutOn.value) PcScreen.TURNED_OFF else null
                 !_screenOutOn.value -> PcScreen.TURNED_OFF
                 else -> null
             }
-            override fun screenSource(): PcScreenSource = robotScreen
+            override fun screenSource(): PcScreenSource = if (input.isWayland) waylandScreen else robotScreen
             override fun screenPointer(kind: String, x: Int, y: Int, from: String) {
                 if (_controlOn.value) input.pointerAt(kind, x, y)
             }
@@ -288,6 +481,13 @@ class DesktopApp(private val scope: CoroutineScope) {
             )
         },
     )
+    /** Phones over a USB cable, through adb, as on the Mac. On unless turned off. */
+    val usb = UsbBridge(
+        scope, Platform.port, Platform.dataDir, settings.bool("usb", true),
+        onEnabledChange = { on -> settings.set("usb", on) },
+        onTurnedOff = { hub.closeUsbConnections() },
+    )
+
     private val advertiser = Advertiser(
         Platform.deviceName, Platform.port, hub.deviceId, Platform.protocolName,
         onComputer = { id, host, port -> hub.computerFound(id, host, port) },
@@ -308,6 +508,7 @@ class DesktopApp(private val scope: CoroutineScope) {
             hub.start()
             hub.setComputersEnabled(_computersOn.value)
             advertiser.start()
+            usb.start()
         } catch (error: java.net.BindException) {
             _problem.value = "Port ${Platform.port} is in use. Is DyskLink already running? Close it and start again."
             CoreLog.w("DyskLink", "Port in use", error)
@@ -315,17 +516,45 @@ class DesktopApp(private val scope: CoroutineScope) {
         systemClipboard.enabled = _clipboardOn.value
         systemClipboard.start()
         startTools()
+        clipHistory.start()
+        windowTidy.start()
+        launcher.start()
+        battery.start()
+        instance.listen { command ->
+            when {
+                command == SingleInstance.CLIPBOARD -> clipHistory.requestPicker()
+                command == SingleInstance.SHOW -> _showRequests.tryEmit(Unit)
+                command == SingleInstance.LAUNCHER -> launcher.open()
+                command.startsWith(SingleInstance.WINDOW) -> windowTidy.run(command.removePrefix(SingleInstance.WINDOW))
+            }
+        }
         updater.start()
+        recheckHost()
+        if (webcam.state.value.on) setWebcamOn(true)
+        wayland?.let { w ->
+            scope.launch(kotlinx.coroutines.Dispatchers.IO) { w.probe() }
+            // The hints follow the portal's dialogs as they're answered.
+            scope.launch { waylandScreen.status.collect { recheckHost() } }
+        }
     }
 
     fun stop() {
         remoteTarget?.release(notify = true)
         advertiser.stop()
         systemClipboard.stop()
+        clipHistory.stop()
+        windowTidy.stop()
+        launcher.stop()
+        battery.stop()
+        instance.close()
         ringer.stop()
         speaker.stop()
         media.stop()
+        webcam.close()
         hub.shutdown()
+        notifier?.close()
+        wayland?.close()
+        if (wayland != null) runCatching { portal?.close() }
     }
 
     fun setClipboardOn(on: Boolean) {
@@ -344,6 +573,7 @@ class DesktopApp(private val scope: CoroutineScope) {
     fun setSoundOutOn(on: Boolean) {
         _soundOutOn.value = on
         settings.set("soundOut", on)
+        if (on) recheckHost()
         if (!on) hub.stopSoundOut()
     }
 
@@ -352,6 +582,7 @@ class DesktopApp(private val scope: CoroutineScope) {
     fun setScreenOutOn(on: Boolean) {
         _screenOutOn.value = on
         settings.set("screenOut", on)
+        if (on) recheckHost()
         if (!on) hub.stopScreenOut(PcScreen.SWITCHED_OFF)
     }
 
@@ -388,6 +619,7 @@ class DesktopApp(private val scope: CoroutineScope) {
     fun setRemoteOn(on: Boolean) {
         _remoteOn.value = on
         settings.set("remoteInput", on)
+        if (on) recheckHost()
         if (!on) remoteTarget?.release(notify = true)
         hub.infoChanged()
     }
@@ -403,11 +635,13 @@ class DesktopApp(private val scope: CoroutineScope) {
     fun setNotifyOn(on: Boolean) {
         _notifyOn.value = on
         settings.set("notifications", on)
+        if (on) recheckHost()
     }
 
     fun setControlOn(on: Boolean) {
         _controlOn.value = on
         settings.set("control", on)
+        if (on) recheckHost()
     }
 
     private val _closeToTray = MutableStateFlow(settings.bool("closeToTray", true))

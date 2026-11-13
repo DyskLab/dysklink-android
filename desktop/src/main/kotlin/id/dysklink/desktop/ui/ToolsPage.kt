@@ -56,7 +56,33 @@ import kotlinx.coroutines.delay
  * this PC show the same and can change them from DyskLink. [clock] is for snapshots.
  */
 @Composable
-fun ToolsPage(model: DeskModel, clock: () -> Long = System::currentTimeMillis) {
+fun ToolsPage(model: DeskModel, clock: () -> Long = System::currentTimeMillis, ui: UiState? = null) {
+    val care = model.pcCare
+    val desk = model.launcher != null || model.windowTidy != null
+    if (desk && ui?.toolsView == ToolsView.Desk) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(Space.sm),
+        ) {
+            Title("Tools", 26.sp)
+            ToolsSwitcher(ui, care != null, desk)
+            Text("Find anything with one shortcut, and put windows where they belong, as on a Mac.", color = Dysk.colors.textSecondary, fontSize = 13.sp)
+            Spacer(Modifier.height(2.dp))
+            LauncherCard(model)
+            WindowTidyCard(model)
+        }
+        return
+    }
+    if (care != null && ui?.toolsView == ToolsView.Care) {
+        Column(Modifier.fillMaxSize()) {
+            Column(Modifier.padding(start = 28.dp, end = 28.dp, top = 24.dp, bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(Space.sm)) {
+                Title("Tools", 26.sp)
+                ToolsSwitcher(ui, true, desk)
+            }
+            Box(Modifier.weight(1f)) { PcCarePage(model, care) }
+        }
+        return
+    }
     val tools by model.tools.collectAsState()
     var now by remember { mutableLongStateOf(clock()) }
     val running = tools.pomodoro.state.isRunning
@@ -72,8 +98,10 @@ fun ToolsPage(model: DeskModel, clock: () -> Long = System::currentTimeMillis) {
         verticalArrangement = Arrangement.spacedBy(Space.sm),
     ) {
         Title("Tools", 26.sp)
+        if ((care != null || desk) && ui != null) ToolsSwitcher(ui, care != null, desk)
         Text(
-            "Focus, water, and tasks on ${model.deviceName}, like the notch on a Mac. Your phones see them and can change them from DyskLink.",
+            "Focus, water, and tasks on ${model.deviceName}, like the notch on a Mac. Your phones see them and can change them from DyskLink." +
+                if (model.clipHistory != null) " Below: your clipboard history" + (if (model.battery?.value != null) " and the battery." else ".") else "",
             color = Dysk.colors.textSecondary, fontSize = 13.sp,
         )
         Spacer(Modifier.height(2.dp))
@@ -91,11 +119,29 @@ fun ToolsPage(model: DeskModel, clock: () -> Long = System::currentTimeMillis) {
             }
         }
         TodoCard(model, tools, now)
+        if (model.clipHistory != null) {
+            SectionLabel("Clipboard")
+            ClipboardHistoryCard(model, clock)
+        }
+        if (model.battery?.collectAsState()?.value != null) {
+            SectionLabel("Battery")
+            BatteryCard(model)
+        }
+    }
+}
+
+/** Focus and tasks, the Launcher and windows, or PC care. */
+@Composable
+private fun ToolsSwitcher(ui: UiState, care: Boolean, desk: Boolean) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        TabPill("Focus and tasks", ui.toolsView == ToolsView.Tools, DyskIcons.Checklist) { ui.toolsView = ToolsView.Tools }
+        if (desk) TabPill("Launcher and windows", ui.toolsView == ToolsView.Desk, DyskIcons.Search) { ui.toolsView = ToolsView.Desk }
+        if (care) TabPill("PC care", ui.toolsView == ToolsView.Care, DyskIcons.Sparkles) { ui.toolsView = ToolsView.Care }
     }
 }
 
 @Composable
-private fun CardTitle(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, tint: Color, trailing: @Composable () -> Unit = {}) {
+internal fun CardTitle(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, tint: Color, trailing: @Composable () -> Unit = {}) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         IconWell(icon, tint, 32.dp)
         Spacer(Modifier.width(10.dp))
@@ -106,7 +152,7 @@ private fun CardTitle(icon: androidx.compose.ui.graphics.vector.ImageVector, tit
 
 /** A round button with an icon, for Undo, Skip and the like. */
 @Composable
-private fun RoundAction(icon: androidx.compose.ui.graphics.vector.ImageVector, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun RoundAction(icon: androidx.compose.ui.graphics.vector.ImageVector, enabled: Boolean = true, onClick: () -> Unit) {
     val colors = Dysk.colors
     Box(
         Modifier.size(40.dp).clip(CircleShape).background(colors.panelRaised).border(1.dp, colors.stroke, CircleShape)
@@ -117,7 +163,7 @@ private fun RoundAction(icon: androidx.compose.ui.graphics.vector.ImageVector, e
 
 /** "Goal  –  2 L  +": one of a fixed list of values, as the Mac's steppers. */
 @Composable
-private fun <T> Stepper(title: String, value: T, choices: List<T>, label: (T) -> String, onChange: (T) -> Unit) {
+internal fun <T> Stepper(title: String, value: T, choices: List<T>, label: (T) -> String, onChange: (T) -> Unit) {
     val colors = Dysk.colors
     val index = choices.indexOf(value).coerceAtLeast(0)
     Row(

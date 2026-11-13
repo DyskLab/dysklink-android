@@ -205,7 +205,9 @@ class DesktopTest {
         // Robot's US keys only as the very last way, and only for what they can type.
         val robotOnly = TypingTools(Desktop.X11, robot = true)
         assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.US_KEYS, "ab")), Typing.plan("aéb", robotOnly))
-        assertEquals(emptyList(), Typing.plan("é", TypingTools(Desktop.WAYLAND, clipboard = true, robot = true)))
+        // Wayland: pasted when the portal or /dev/uinput can press Ctrl+V; nothing without a way in.
+        assertEquals(listOf<TypeStep>(TypeStep.Text(TypeMethod.PASTE, "é")), Typing.plan("é", TypingTools(Desktop.WAYLAND, clipboard = true, robot = true)))
+        assertEquals(emptyList(), Typing.plan("é", TypingTools(Desktop.WAYLAND, clipboard = true)))
     }
 
     @Test

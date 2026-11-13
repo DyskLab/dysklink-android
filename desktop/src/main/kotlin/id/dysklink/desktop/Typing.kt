@@ -11,7 +11,9 @@ import java.nio.ByteOrder
  * - Windows: SendInput with KEYEVENTF_UNICODE sends the characters themselves, for any layout and any script.
  * - X11: xdotool, which maps each character to a spare key code; without it the same is done here through
  *   Xlib and XTest; without either, the text is pasted.
- * - Wayland: apps can't type into other apps, so nothing is typed.
+ * - Wayland: plain characters by keysym through the desktop's RemoteDesktop portal, the rest pasted (GNOME only
+ *   types keysyms the layout has); with /dev/uinput (no keysyms there) the text is pasted, or typed by US key
+ *   positions when the clipboard fails.
  * Enter and Tab are pressed as keys, so they submit forms and move between fields as on a real keyboard.
  */
 enum class Desktop { WINDOWS, X11, WAYLAND, OTHER }
@@ -23,6 +25,8 @@ enum class TypeMethod {
     XDOTOOL,
     /** A spare X key code mapped to the character for a moment, then pressed through XTest. */
     X11_REMAP,
+    /** Keysyms through the Wayland RemoteDesktop portal, which maps them to keys itself. */
+    KEYSYM,
     /** Put on the clipboard, Ctrl+V, and the clipboard put back. */
     PASTE,
     /** java.awt.Robot with the US layout: only right on a US layout, so only when nothing else works. */
@@ -35,6 +39,8 @@ data class TypingTools(
     val unicodeInput: Boolean = false,
     val xdotool: Boolean = false,
     val x11Remap: Boolean = false,
+    /** The Wayland portal can type keysyms. */
+    val keysyms: Boolean = false,
     val clipboard: Boolean = false,
     val robot: Boolean = false,
 ) {
@@ -42,6 +48,7 @@ data class TypingTools(
         TypeMethod.UNICODE_INPUT -> copy(unicodeInput = false)
         TypeMethod.XDOTOOL -> copy(xdotool = false)
         TypeMethod.X11_REMAP -> copy(x11Remap = false)
+        TypeMethod.KEYSYM -> copy(keysyms = false)
         TypeMethod.PASTE -> copy(clipboard = false)
         TypeMethod.US_KEYS -> copy(robot = false)
     }
@@ -123,7 +130,15 @@ object Typing {
                 usKey -> TypeMethod.US_KEYS
                 else -> null
             }
-            Desktop.WAYLAND -> null
+            // [TypingTools.robot] is the Wayland way in here: the portal or /dev/uinput press keys and Ctrl+V. GNOME
+            // types a keysym only when the layout has it, so beyond ASCII the text is pasted when the clipboard works.
+            Desktop.WAYLAND -> when {
+                tools.keysyms && codePoint < 0x80 -> TypeMethod.KEYSYM
+                paste -> TypeMethod.PASTE
+                tools.keysyms -> TypeMethod.KEYSYM
+                usKey -> TypeMethod.US_KEYS
+                else -> null
+            }
             // A Mac, only while developing: as before, plain characters are typed and the rest pasted.
             Desktop.OTHER -> when {
                 usKey -> TypeMethod.US_KEYS

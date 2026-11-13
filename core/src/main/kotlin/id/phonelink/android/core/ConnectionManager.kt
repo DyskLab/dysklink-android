@@ -419,14 +419,15 @@ class ConnectionManager(
 
     /**
      * Keeps trying the USB port. Nothing listens there until a Mac runs `adb reverse`, so a failed try costs almost
-     * nothing; once the cable is in, the phone moves to it within a few seconds.
+     * nothing; once the cable is in, the phone moves to it within a few seconds. The computer may be a Mac or a
+     * Windows or Linux PC: whichever ran `adb reverse` last gets the port. [port] is only changed by tests.
      */
-    fun startUsb() {
+    fun startUsb(port: Int = PhoneLinkProtocol.USB_PORT) {
         if (targets.containsKey(USB_KEY)) return
         targets[USB_KEY] = scope.launch(Dispatchers.IO) {
             while (isActive) {
                 val connection = runCatching {
-                    PeerConnection.connect(sslContext, PhoneLinkProtocol.USB_HOST, PhoneLinkProtocol.USB_PORT)
+                    PeerConnection.connect(sslContext, PhoneLinkProtocol.USB_HOST, port)
                 }.getOrNull()
                 if (connection != null) {
                     CoreLog.i(TAG, "USB connection")
@@ -499,10 +500,13 @@ class ConnectionManager(
     }
 
     /** Macs get everything they always did; a PC needs the `pc-*` cap for the messages [PcRules] lists. */
-    private fun computerAllows(connection: PeerConnection, type: String): Boolean {
+    private fun computerAllows(connection: PeerConnection, envelope: Envelope): Boolean {
+        val type = envelope.type
         if (PcRules.capFor(type) == null) return true
         val platform = synchronized(lock) { records[connection.peerId]?.platform ?: connection.hello?.platform }
-        return PcRules.allows(platform, connection.hello?.caps, type)
+        if (!PcRules.allows(platform, connection.hello?.caps, type)) return false
+        // Several fingers at once (game keys) also need `pc-gamekeys` from a PC.
+        return type != MessageType.CONTROL || PcRules.allowsControl(platform, connection.hello?.caps, envelope.control?.kind)
     }
 
     private fun isPhone(id: String): Boolean = synchronized(lock) {
@@ -587,7 +591,7 @@ class ConnectionManager(
         if (fromPhone && envelope.type in PhoneRules.ALL) return handlePhoneShare(connection, envelope)
         // A Windows or Linux PC only gets the screen, camera, gallery, and SMS, and only sends commands and the
         // terminal, when its hello listed that cap.
-        if (!fromPhone && !computerAllows(connection, envelope.type)) return
+        if (!fromPhone && !computerAllows(connection, envelope)) return
         // Files are written outside the lock so disk writes don't hold up other messages and actions.
         if (envelope.type.startsWith("file.")) {
             if (synchronized(lock) { records.containsKey(connection.peerId) }) {

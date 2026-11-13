@@ -93,7 +93,31 @@ object DyskIcons {
     val Pencil = line("pencil", "M17 3l4 4L7 21H3v-4z")
     val Trash = line("trash", "M3 6h18 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6")
     val Undo = line("undo", "M9 14L4 9l5-5 M4 9h11a5 5 0 0 1 0 10h-1")
+    /** A cable's plug, for USB. */
+    val Usb = line("usb", "M9 2h6v5H9z M7 7h10v5a5 5 0 0 1-10 0z M12 17v5 M10.5 4v1 M13.5 4v1")
+    val Search = line("search", "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.35-4.35")
+    val Battery = line("battery", "M3 7h15a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z M22 11v2")
     val Skip = line("skip", "M5 4l10 8-10 8z M19 5v14")
+    val Gamepad = line(
+        "gamepad",
+        "M7 7h10a5 5 0 0 1 4.9 6l-.8 4a2.5 2.5 0 0 1-4.3 1.2L14.5 16h-5l-2.3 2.2A2.5 2.5 0 0 1 2.9 17l-.8-4A5 5 0 0 1 7 7z M7 10v4 M5 12h4 M15.5 11h0 M17.5 13h0",
+    )
+
+    // PC care.
+    val Sparkles = line("sparkles", "M12 3l1.8 4.7 4.7 1.8-4.7 1.8L12 16l-1.8-4.7-4.7-1.8 4.7-1.8z M19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2-2.2-.8 2.2-.8z")
+    val Box = line("box", "M21 8l-9-5-9 5v8l9 5 9-5z M3 8l9 5 9-5 M12 13v8")
+    val Tool = line(
+        "tool",
+        "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z",
+    )
+    val Drive = line("drive", "M22 12H2 M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z M6 16h0 M10 16h0")
+    val FileText = line("file-text", "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8")
+    val AppWindow = line("app-window", "M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M2 9h20 M6 6.5h0 M9 6.5h0")
+    val Gear = line(
+        "gear",
+        "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
+        width = 1.8f,
+    )
 
     /** The DyskLink logo, the same coordinates as ic_logo_glyph.xml and the Mac's LogoGlyph. */
     val Logo: ImageVector = ImageVector.Builder("logo", 24.dp, 24.dp, 24f, 24f)

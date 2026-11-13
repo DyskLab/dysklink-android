@@ -440,4 +440,80 @@ class PcFeaturesTest {
         waitUntil("No refusal") { pc.hub.sms.value[phoneId]?.sent?.firstOrNull { it.id == refused }?.ok == false }
         assertFalse("+6281100:lagi" in phone.sent)
     }
+
+    // Game keys: several fingers at once
+
+    @Test
+    fun severalFingersNeedTheGameKeysCap() {
+        val screenOnly = PhoneLinkProtocol.PC_CAPS - PhoneLinkProtocol.CAP_PC_GAMEKEYS
+        assertTrue(PhoneLinkProtocol.CAP_PC_GAMEKEYS in PhoneLinkProtocol.PHONE_CAPS, "The phone says it takes them")
+        for (kind in listOf("tdown", "tmove", "tup")) {
+            assertTrue(PcRules.allowsControl("macos", PhoneLinkProtocol.CAPS, kind), "A Mac keeps $kind")
+            assertTrue(PcRules.allowsControl("macos", null, kind))
+            assertFalse(PcRules.allowsControl("windows", screenOnly, kind), "A PC with only pc-screen doesn't get $kind")
+            assertTrue(PcRules.allowsControl("linux", PhoneLinkProtocol.PC_CAPS, kind))
+        }
+        // Plain taps, keys, and text stay as they were.
+        for (kind in listOf("down", "drag", "up", "key", "text")) assertTrue(PcRules.allowsControl("windows", screenOnly, kind))
+    }
+
+    /** Makes [phoneId]'s screen live on [pc], as the phone does after Android's dialog. */
+    private fun liveScreen(pc: Pc, phone: Phone, phoneId: String) {
+        val pcId = pc.hub.deviceId
+        pc.hub.requestScreen(phoneId)
+        waitUntil("The request didn't reach the phone") { pcId in phone.screenAsks }
+        phone.manager.sendDirect(pcId, Envelope(MessageType.SCREEN_STARTED, screen = ScreenInfo(576, 1280), format = JpegFrames.FORMAT))
+        phone.manager.sendDirect(pcId, Envelope(MessageType.SCREEN_FRAME, format = JpegFrames.FORMAT, raw = jpeg()))
+        waitUntil("The picture didn't show") { pc.hub.screens.value[phoneId]?.live == true }
+    }
+
+    private fun fingers(pc: Pc, phone: Phone, phoneId: String) {
+        phone.controls.clear()
+        pc.hub.control(phoneId, ControlEvent("tdown", 0.2f, 0.7f, key = "0"))
+        pc.hub.control(phoneId, ControlEvent("tmove", 0.25f, 0.7f, key = "0"))
+        pc.hub.control(phoneId, ControlEvent("tdown", 0.8f, 0.6f, key = "9"))
+        pc.hub.control(phoneId, ControlEvent("tup", 0.25f, 0.7f, key = "0"))
+        pc.hub.control(phoneId, ControlEvent("tup", 0.8f, 0.6f, key = "9"))
+        // A plain tap after them, which every PC with pc-screen may send: it marks the end.
+        pc.hub.control(phoneId, ControlEvent("down", 0.5f, 0.5f))
+        waitUntil("The plain tap didn't arrive") { phone.controls.any { it.kind == "down" } }
+    }
+
+    @Test
+    fun aPcWithoutTheGameKeysCapCantSendSeveralFingers() {
+        val pc = Pc(PhoneLinkProtocol.PC_CAPS - PhoneLinkProtocol.CAP_PC_GAMEKEYS)
+        val phone = Phone()
+        val phoneId = paired(pc, phone)
+        assertTrue(pc.hub.phones.value.first().servesGameKeys, "The phone serves game keys")
+        liveScreen(pc, phone, phoneId)
+        fingers(pc, phone, phoneId)
+        assertEquals(listOf("down"), phone.controls.map { it.kind }, "Only the plain tap got through")
+    }
+
+    @Test
+    fun aPcWithTheGameKeysCapSendsSeveralFingers() {
+        val pc = Pc(PhoneLinkProtocol.PC_CAPS)
+        val phone = Phone()
+        val phoneId = paired(pc, phone)
+        liveScreen(pc, phone, phoneId)
+        fingers(pc, phone, phoneId)
+        assertEquals(listOf("tdown", "tmove", "tdown", "tup", "tup", "down"), phone.controls.map { it.kind })
+        assertEquals(listOf("0", "0", "9", "0", "9"), phone.controls.take(5).map { it.key })
+        // A finger number out of range is dropped on both sides.
+        phone.controls.clear()
+        pc.hub.control(phoneId, ControlEvent("tdown", 0.5f, 0.5f, key = "12"))
+        pc.hub.control(phoneId, ControlEvent("up", 0.5f, 0.5f))
+        waitUntil("The plain lift didn't arrive") { phone.controls.any { it.kind == "up" } }
+        assertEquals(listOf("up"), phone.controls.map { it.kind })
+    }
+
+    @Test
+    fun aMacSendsSeveralFingersAsBefore() {
+        val mac = Pc(PhoneLinkProtocol.CAPS, platform = "macos")
+        val phone = Phone()
+        val phoneId = paired(mac, phone)
+        liveScreen(mac, phone, phoneId)
+        fingers(mac, phone, phoneId)
+        assertEquals(listOf("tdown", "tmove", "tdown", "tup", "tup", "down"), phone.controls.map { it.kind })
+    }
 }

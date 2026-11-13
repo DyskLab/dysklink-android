@@ -1,6 +1,10 @@
 package id.dysklink.desktop.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -22,6 +26,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import id.dysklink.desktop.TrayHint
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -57,20 +63,37 @@ fun SettingsPage(model: DeskModel) {
     val themeMode by model.themeMode.collectAsState()
     val soundOutOn by model.soundOutOn.collectAsState()
     val screenOutOn by model.screenOutOn.collectAsState()
+    val host by model.host.collectAsState()
     Page {
         PageHeader("Settings", "How DyskLink works on ${model.deviceName}.")
 
         SectionLabel("General")
         GlassCard {
             var atLogin by remember { mutableStateOf(model.autostartOn()) }
+            var atLoginFailed by remember { mutableStateOf(false) }
             SettingRow(
                 "Start at login",
-                if (model.autostartAvailable) "DyskLink starts hidden in the tray, so phones can connect right away." else "Available in the installed app.",
+                when {
+                    !model.autostartAvailable -> "Available in the installed app."
+                    model.hasTray -> "DyskLink starts hidden in the tray, so phones can connect right away."
+                    else -> "DyskLink opens at login, so phones can connect right away."
+                },
                 atLogin, enabled = model.autostartAvailable,
-            ) { on -> if (model.setAutostart(on)) atLogin = on }
+            ) { on -> atLoginFailed = !model.setAutostart(on); if (!atLoginFailed) atLogin = on }
+            if (atLoginFailed) {
+                Spacer(Modifier.height(Space.xs))
+                Text(
+                    if (model.systemName.startsWith("Windows")) "Couldn't change it: Windows didn't let DyskLink write its Run entry in the registry."
+                    else "Couldn't change it. Check that ~/.config/autostart exists and belongs to you: ls -ld ~/.config/autostart",
+                    color = colors.coral, fontSize = 12.sp,
+                )
+            }
             if (model.hasTray) {
                 Divider()
                 SettingRow("Keep running in the tray", "Closing the window leaves DyskLink in the tray. Quit from the tray menu.", closeToTray, onChange = model::setCloseToTray)
+            } else model.trayHint?.let { hint ->
+                Divider()
+                TrayHintRow(hint, model::openTrayHelp)
             }
             Divider()
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -85,30 +108,40 @@ fun SettingsPage(model: DeskModel) {
             }
         }
 
+        if (model.trayMenu != null) {
+            SectionLabel("Tray menu")
+            TrayMenuCard(model)
+        }
+
         SectionLabel("Phones")
         GlassCard {
             SettingRow("Share the clipboard", "Text and pictures copied here can be pasted on your devices, and the other way round.", clipboardOn, onChange = model::setClipboardOn)
             Divider()
             SettingRow("Show phone notifications", "Notifications from the phone pop up on this PC.", notifyOn, onChange = model::setNotifyOn)
+            HintList(host.popups, model)
             Divider()
             SettingRow("Phones can control this PC", "The touchpad, keyboard, shortcuts and media remote on paired phones.", controlOn, onChange = model::setControlOn)
-            if (controlOn) model.controlNotes().forEach { note ->
-                Spacer(Modifier.height(Space.sm))
-                Banner(note, colors.amber, DyskIcons.Info)
-            }
+            if (controlOn) HintList(host.control, model)
             Divider()
             SettingRow("Let phones hear this PC", "A paired phone can ask for what plays on this PC, from Sound in DyskLink on the phone.", soundOutOn, onChange = model::setSoundOutOn)
+            if (soundOutOn) HintList(host.soundOut, model)
             Divider()
             SettingRow(
                 "Let phones see this screen",
                 "A paired phone can view this PC's screen from PC screen in DyskLink, and tap and type on it while phones can control this PC. A notice shows while it's viewed. Off stops it at once.",
                 screenOutOn, onChange = model::setScreenOutOn,
             )
-            if (screenOutOn) model.screenNotes().forEach { note ->
-                Spacer(Modifier.height(Space.sm))
-                Banner(note, colors.amber, DyskIcons.Info)
+            if (screenOutOn) HintList(host.screenOut, model)
+            // Windows: DyskLink Camera stays registered after an uninstall, so it's removed from here.
+            model.webcam?.collectAsState()?.value?.settings?.takeIf { it.isNotEmpty() }?.let { hints ->
+                Divider()
+                Text("Phone camera as webcam", color = colors.textPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                HintList(hints, model)
             }
         }
+
+        val phones by model.phones.collectAsState()
+        UsbCard(model, viaUsb = phones.any { it.isConnected && it.viaUsb })
 
         SectionLabel("Commands")
         CommandsSettings(model)
@@ -160,6 +193,28 @@ fun SettingsPage(model: DeskModel) {
             Divider()
             UpdateCard(model)
         }
+    }
+}
+
+/** Linux without a tray: why closing the window quits, and on GNOME the extension that adds one. */
+@Composable
+private fun TrayHintRow(hint: TrayHint, open: (String) -> Unit) {
+    val colors = Dysk.colors
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(colors.amber.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+            DyskIcon(DyskIcons.Tray, colors.amber, 17.dp)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f).padding(end = Space.sm)) {
+            Text("Tray icon", color = colors.textPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(2.dp))
+            Text(hint.text, color = colors.textSecondary, fontSize = 12.sp, lineHeight = 16.sp)
+            hint.note?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(it, color = colors.amber, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        hint.link?.let { url -> SecondaryButton("Get the extension", icon = DyskIcons.PopOut) { open(url) } }
     }
 }
 

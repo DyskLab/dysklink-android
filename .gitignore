@@ -12,3 +12,4 @@ local.properties
 .claude/
 CLAUDE.md
 dist/
+desktop/resources/windows-x64/

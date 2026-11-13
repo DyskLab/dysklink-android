@@ -3,6 +3,8 @@ package id.phonelink.android.ui
 import android.Manifest
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -372,12 +374,21 @@ fun PhoneRemoteSwitches(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -
         refresh++
         onPauseOrDispose {}
     }
-    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh++ }
+    // Once Android stops showing the prompt, the next tap opens App info, where the permission still can be given.
+    var locationAsked by remember { mutableStateOf(false) }
+    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        refresh++
+        locationAsked = true
+    }
     fun missing(kind: PeerAsk) = refresh >= 0 && RemoteAsks.missing(context, kind)
     var askSmsPermission: (() -> Unit)? = null
     fun grant(kind: PeerAsk) {
         if (kind == PeerAsk.Sms) {
             askSmsPermission?.invoke()
+        } else if (kind == PeerAsk.Locate && locationAsked) {
+            runCatching {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+            }
         } else if (kind == PeerAsk.Locate) {
             askLocation.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
         } else {
@@ -446,8 +457,18 @@ fun PhoneRemoteSwitches(peer: Peer, access: PeerAccess, onChange: (PeerAccess) -
                 Modifier.fillMaxWidth(),
             ) { grant(kind) }
         }
+        if (kind == PeerAsk.Locate && on && !missing(kind) && refresh >= 0 && !locationServicesOn(context)) {
+            Spacer(Modifier.height(8.dp))
+            HintBox("Location is turned off on this phone, so $name can't find it.", "Turn on location") {
+                runCatching { context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+            }
+        }
     }
 }
+
+private fun locationServicesOn(context: android.content.Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+        context.getSystemService(android.location.LocationManager::class.java)?.isLocationEnabled != false
 
 private const val POLL_MS = 3_000L
 private const val TOP_APPS = 5

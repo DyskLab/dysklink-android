@@ -26,6 +26,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,10 +48,11 @@ import java.io.File
 
 /**
  * The whole window: the sidebar with this PC and its devices, and the page for what's selected.
- * [radarProgress] stops the radar on one frame, for snapshots.
+ * [radarProgress] stops the radar on one frame, for snapshots. [firewallAfterMs] is how long the waiting screen waits
+ * for a phone before it suggests the firewall.
  */
 @Composable
-fun MainScreen(model: DeskModel, ui: UiState, pickFiles: () -> List<File>, radarProgress: Float? = null) {
+fun MainScreen(model: DeskModel, ui: UiState, pickFiles: () -> List<File>, radarProgress: Float? = null, firewallAfterMs: Long = 120_000) {
     val colors = Dysk.colors
     val phones by model.phones.collectAsState()
     val pairing by model.pairing.collectAsState()
@@ -75,12 +80,12 @@ fun MainScreen(model: DeskModel, ui: UiState, pickFiles: () -> List<File>, radar
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     when {
-                        ui.page == Page.Tools -> ToolsPage(model)
+                        ui.page == Page.Tools -> ToolsPage(model, ui = ui)
                         ui.page == Page.History -> HistoryPage(model)
                         ui.page == Page.Settings -> SettingsPage(model)
                         selected != null && selected.isPaired -> DevicePage(model, ui, selected, pickFiles)
                         selected != null -> NewDeviceState(model, selected)
-                        else -> EmptyState(model, phones, radarProgress)
+                        else -> EmptyState(model, phones, radarProgress, firewallAfterMs)
                     }
                 }
             }
@@ -214,6 +219,13 @@ private fun DeviceRow(device: HubPhone, selected: Boolean, alerts: Int, onClick:
                 }
             }
         }
+        if (device.isConnected && device.viaUsb) {
+            Text(
+                "USB", Modifier.padding(start = 6.dp).background(colors.mint.copy(alpha = 0.15f), CircleShape).padding(horizontal = 7.dp, vertical = 2.dp),
+                color = colors.mint, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+            )
+            if (alerts > 0) Spacer(Modifier.width(4.dp))
+        }
         if (alerts > 0) AlertBadge(alerts)
     }
 }
@@ -237,8 +249,13 @@ fun deviceIcon(device: HubPhone): ImageVector = when {
 
 /** Nothing paired yet: the radar, and how to get the phone to find this PC. */
 @Composable
-private fun EmptyState(model: DeskModel, phones: List<HubPhone>, radarProgress: Float?) {
+private fun EmptyState(model: DeskModel, phones: List<HubPhone>, radarProgress: Float?, firewallAfterMs: Long) {
     val colors = Dysk.colors
+    val host by model.host.collectAsState()
+    // No phone at all for a while: something between them may block it.
+    var waited by remember { mutableStateOf(firewallAfterMs <= 0) }
+    LaunchedEffect(Unit) { if (!waited) { kotlinx.coroutines.delay(firewallAfterMs); waited = true } }
+    val anyPhone = phones.any { it.isConnected && !it.isComputer }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(30.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -276,6 +293,11 @@ private fun EmptyState(model: DeskModel, phones: List<HubPhone>, radarProgress: 
         if (Platform.isWindows) {
             Spacer(Modifier.height(Space.md))
             Text("If Windows asks whether DyskLink may use the network, allow private networks.", color = colors.textFaint, fontSize = 12.sp)
+        }
+        val hints = host.connectNow + if (waited && !anyPhone) host.connectLater else emptyList()
+        if (hints.isNotEmpty()) {
+            Spacer(Modifier.height(Space.sm))
+            Column(Modifier.widthIn(max = 600.dp)) { HintList(hints, model) }
         }
     }
 }

@@ -69,7 +69,13 @@ object PhoneLinkProtocol {
     const val CAP_PC_CONTACTS = "pc-contacts"
     /** A Windows or Linux computer that browses the phone's files and downloads them (`fs.list`, `fs.get`). */
     const val CAP_PC_FILES = "pc-files"
-    val PC_FEATURE_CAPS: List<String> = listOf(CAP_PC_SCREEN, CAP_PC_CAMERA, CAP_PC_GALLERY, CAP_PC_SMS, CAP_PC_CONTACTS, CAP_PC_FILES)
+    /**
+     * A Windows or Linux computer that plays games on the phone's screen with its keyboard and mouse: several fingers
+     * at once (`control` with `tdown`, `tmove`, `tup`), as a Mac's game keys. Needs [CAP_PC_SCREEN] as well. The phone
+     * lists it too, meaning it takes them from a PC; it drops them from a PC that didn't list it.
+     */
+    const val CAP_PC_GAMEKEYS = "pc-gamekeys"
+    val PC_FEATURE_CAPS: List<String> = listOf(CAP_PC_SCREEN, CAP_PC_CAMERA, CAP_PC_GALLERY, CAP_PC_SMS, CAP_PC_CONTACTS, CAP_PC_FILES, CAP_PC_GAMEKEYS)
     /** A Windows or Linux computer that sends its own sound to a phone that asks (`audio.listen`). */
     const val CAP_PC_SOUND_OUT = "pc-sound-out"
     /** A Windows or Linux computer that lists commands a phone may run (`commands.list`, `command.*`). */

@@ -3,9 +3,7 @@ package id.dysklink.desktop
 import id.phonelink.android.core.CoreLog
 import id.phonelink.android.core.InputEvent
 import java.awt.GraphicsEnvironment
-import java.awt.MouseInfo
 import java.awt.Robot
-import java.awt.event.InputEvent as AwtInput
 import java.awt.event.KeyEvent
 import java.io.OutputStreamWriter
 import javax.sound.sampled.AudioFormat
@@ -16,51 +14,55 @@ import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
 /**
- * The touchpad, keyboard, and shortcuts from the phone. Pointer, special keys, and shortcuts go through
- * java.awt.Robot by virtual key; text goes the way [Typing] picks, so it's right on any keyboard layout.
- * [pasteText] pastes text and puts the clipboard back, and is false when it couldn't.
+ * The touchpad, keyboard, and shortcuts from the phone. Pointer, special keys, and shortcuts go by virtual key through
+ * java.awt.Robot on Windows and X11, and through [wayland] (the desktop's RemoteDesktop portal, or /dev/uinput) on
+ * Wayland; text goes the way [Typing] picks, so it's right on any keyboard layout. [pasteText] pastes text and puts
+ * the clipboard back, and is false when it couldn't.
  */
-class PcInput(private val pasteText: (String) -> Boolean) {
+class PcInput(private val pasteText: (String) -> Boolean, val wayland: WaylandInput? = null) {
     private val desktop = Typing.desktop()
 
-    /** Wayland doesn't let apps move the pointer or type into other apps, so Robot only reaches X11 windows there. */
+    /** Wayland doesn't let apps reach other apps' windows by themselves; [wayland] asks the desktop instead. */
     val isWayland = desktop == Desktop.WAYLAND
 
     private val robot: Robot? by lazy {
-        if (GraphicsEnvironment.isHeadless()) null
+        if (GraphicsEnvironment.isHeadless() || isWayland) null
         else runCatching { Robot().apply { autoDelay = 0 } }.onFailure { CoreLog.w("DyskLink", "No Robot", it) }.getOrNull()
     }
 
-    val isAvailable: Boolean get() = !isWayland && robot != null
+    /** Where the pointer and keys go: Robot, or the Wayland way. Null when there's none. */
+    val injector: InputInjector? by lazy { if (isWayland) wayland?.injector else robot?.let(::RobotInjector) }
+
+    /** How input reaches this PC now. On Wayland it's [InputRoute.NONE] until [WaylandInput.probe] has run. */
+    val route: InputRoute get() = if (isWayland) wayland?.route?.value ?: InputRoute.NONE else if (robot != null) InputRoute.ROBOT else InputRoute.NONE
+
+    val isAvailable: Boolean get() = route != InputRoute.NONE
 
     private val windowsTyper by lazy { WindowsUnicodeTyper() }
     private val xdotool by lazy { XdotoolTyper() }
     private val x11Typer by lazy { X11RemapTyper() }
 
     /** What text is typed with; a way that fails is dropped, and the next one is used from then on. */
-    private val tools: TypingTools by lazy {
-        TypingTools(
-            desktop = desktop,
-            unicodeInput = desktop == Desktop.WINDOWS && windowsTyper.isAvailable,
-            xdotool = desktop == Desktop.X11 && xdotool.isAvailable,
-            // Also with xdotool, as the way to go when xdotool fails.
-            x11Remap = desktop == Desktop.X11 && x11Typer.isAvailable,
-            clipboard = true,
-            robot = robot != null,
-        ).also {
-            CoreLog.i("DyskLink", "Typing with $it")
-            if (desktop == Desktop.WAYLAND) CoreLog.w("DyskLink", "Wayland: text from the phone can't be typed into other apps")
-        }
-    }
-    /** Drops a way that fails, so the next one is used from then on. Guarded by [type]'s lock. */
-    private val run by lazy { TypingRun(tools) }
+    private fun currentTools(): TypingTools = TypingTools(
+        desktop = desktop,
+        unicodeInput = desktop == Desktop.WINDOWS && windowsTyper.isAvailable,
+        xdotool = desktop == Desktop.X11 && xdotool.isAvailable,
+        // Also with xdotool, as the way to go when xdotool fails.
+        x11Remap = desktop == Desktop.X11 && x11Typer.isAvailable,
+        keysyms = isWayland && wayland?.injector?.keysyms == true,
+        clipboard = true,
+        robot = injector != null && isAvailable,
+    ).also { CoreLog.i("DyskLink", "Typing with $it") }
 
-    /** Shown under the switch when text can only be pasted here, which some apps (terminals) don't take with Ctrl+V. */
-    val typingNote: String? get() = when {
-        desktop != Desktop.X11 || robot == null -> null
-        tools.xdotool || tools.x11Remap -> null
-        else -> "Text from the phone is pasted here. Install xdotool to have it typed instead."
-    }
+    /** Drops a way that fails, so the next one is used from then on. Made again when the way in changes. Guarded by [type]'s lock. */
+    private var run: TypingRun? = null
+    private var runRoute: InputRoute? = null
+
+    /** Whether java.awt.Robot could be made: false with no display, or an X server without XTEST. */
+    val hasRobot: Boolean get() = robot != null
+
+    /** Whether text can be typed on X11 without xdotool, through spare key codes. */
+    val canRemap: Boolean get() = desktop == Desktop.X11 && x11Typer.isAvailable
 
     private var scrollRest = 0f
     private var moveRestX = 0f
@@ -68,12 +70,12 @@ class PcInput(private val pasteText: (String) -> Boolean) {
 
     /** Presses Ctrl+V by virtual key, so it's Paste on any layout, for text just put on the clipboard. */
     fun pasteNow() {
-        val robot = robot ?: return
-        tap(robot, KeyEvent.VK_V, listOf(KeyEvent.VK_CONTROL))
+        val out = injector ?: return
+        tap(out, KeyEvent.VK_V, listOf(KeyEvent.VK_CONTROL))
     }
 
     fun handle(event: InputEvent) {
-        val robot = robot ?: return
+        val out = injector ?: return
         runCatching {
             when (event.kind) {
                 "move" -> {
@@ -84,22 +86,22 @@ class PcInput(private val pasteText: (String) -> Boolean) {
                     val stepY = moveRestY.roundToInt()
                     moveRestX -= stepX
                     moveRestY -= stepY
-                    if (stepX != 0 || stepY != 0) MouseInfo.getPointerInfo()?.location?.let { robot.mouseMove(it.x + stepX, it.y + stepY) }
+                    if (stepX != 0 || stepY != 0) out.moveBy(stepX, stepY)
                 }
                 "click" -> {
-                    val mask = if (event.button == "right") AwtInput.BUTTON3_DOWN_MASK else AwtInput.BUTTON1_DOWN_MASK
-                    robot.mousePress(mask); robot.mouseRelease(mask)
+                    val button = if (event.button == "right") 1 else 0
+                    out.button(button, true); out.button(button, false)
                 }
                 "scroll" -> {
                     // The phone sends pixels with up as positive, as macOS does; a wheel notch is about 40 of them.
                     scrollRest -= event.dy ?: 0f
                     val notches = (scrollRest / 40f).toInt()
-                    if (notches != 0) { robot.mouseWheel(notches); scrollRest -= notches * 40f }
+                    if (notches != 0) { out.wheel(notches); scrollRest -= notches * 40f }
                 }
-                "text" -> type(robot, event.text.orEmpty())
-                "key" -> Keys.named[event.key]?.let { tap(robot, it, emptyList()) }
+                "text" -> type(out, event.text.orEmpty())
+                "key" -> Keys.named[event.key]?.let { tap(out, it, emptyList()) }
                 // The phone speaks Mac shortcuts (the Stream Deck's Spotlight, Lock screen...): those become this PC's own.
-                "shortcut" -> MacShortcuts.forPc(event.key.orEmpty(), Platform.isWindows)?.let(Keys::parse)?.let { (key, mods) -> tap(robot, key, mods) }
+                "shortcut" -> MacShortcuts.forPc(event.key.orEmpty(), Platform.isWindows)?.let(Keys::parse)?.let { (key, mods) -> tap(out, key, mods) }
             }
         }.onFailure { CoreLog.w("DyskLink", "Input failed", it) }
     }
@@ -109,32 +111,35 @@ class PcInput(private val pasteText: (String) -> Boolean) {
      * `macscreen.pointer`: `down`, `drag`, and `up` hold the left button; `double` is the second click of a double-click.
      */
     fun pointerAt(kind: String, x: Int, y: Int) {
-        val robot = robot ?: return
-        runCatching { PointerSteps.of(kind).forEach { step -> step.apply(robot, x, y) } }
+        val out = injector ?: return
+        runCatching { PointerSteps.of(kind).forEach { step -> step.apply(out, x, y) } }
             .onFailure { CoreLog.w("DyskLink", "Pointer failed", it) }
     }
 
-    private fun tap(robot: Robot, key: Int, modifiers: List<Int>) {
-        modifiers.forEach(robot::keyPress)
-        robot.keyPress(key); robot.keyRelease(key)
-        modifiers.asReversed().forEach(robot::keyRelease)
+    private fun tap(out: InputInjector, key: Int, modifiers: List<Int>) {
+        modifiers.forEach { out.key(it, true) }
+        out.key(key, true); out.key(key, false)
+        modifiers.asReversed().forEach { out.key(it, false) }
     }
 
     @Synchronized
-    private fun type(robot: Robot, text: String) {
+    private fun type(out: InputInjector, text: String) {
+        if (run == null || runRoute != route) { run = TypingRun(currentTools()); runRoute = route }
+        val run = run!!
         val before = run.tools
-        val ok = run.type(text, key = { name -> Keys.named[name]?.let { tap(robot, it, emptyList()) } }) { typeWith(robot, it) }
+        val ok = run.type(text, key = { name -> Keys.named[name]?.let { tap(out, it, emptyList()) } }) { typeWith(out, it) }
         if (!ok) CoreLog.w("DyskLink", "Typing partly failed; now ${run.tools}" + if (run.tools != before) " (was $before)" else "")
     }
 
-    private fun typeWith(robot: Robot, step: TypeStep.Text): Typed = when (step.method) {
+    private fun typeWith(out: InputInjector, step: TypeStep.Text): Typed = when (step.method) {
         TypeMethod.UNICODE_INPUT -> windowsTyper.type(step.text)
         TypeMethod.XDOTOOL -> xdotool.type(step.text)
         TypeMethod.X11_REMAP -> x11Typer.type(step.text)
+        TypeMethod.KEYSYM -> (out as? WaylandInjector)?.typeKeysyms(step.text) ?: Typed.Nothing
         TypeMethod.PASTE -> if (pasteText(step.text)) Typed.Done else Typed.Nothing
         TypeMethod.US_KEYS -> {
             step.text.forEach { c ->
-                Keys.forChar(c)?.let { (key, shift) -> tap(robot, key, if (shift) listOf(KeyEvent.VK_SHIFT) else emptyList()) }
+                Keys.forChar(c)?.let { (key, shift) -> tap(out, key, if (shift) listOf(KeyEvent.VK_SHIFT) else emptyList()) }
             }
             Typed.Done
         }
@@ -145,12 +150,12 @@ class PcInput(private val pasteText: (String) -> Boolean) {
 enum class PointerStep {
     MOVE, LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP;
 
-    fun apply(robot: Robot, x: Int, y: Int) = when (this) {
-        MOVE -> robot.mouseMove(x, y)
-        LEFT_DOWN -> robot.mousePress(AwtInput.BUTTON1_DOWN_MASK)
-        LEFT_UP -> robot.mouseRelease(AwtInput.BUTTON1_DOWN_MASK)
-        RIGHT_DOWN -> robot.mousePress(AwtInput.BUTTON3_DOWN_MASK)
-        RIGHT_UP -> robot.mouseRelease(AwtInput.BUTTON3_DOWN_MASK)
+    fun apply(out: InputInjector, x: Int, y: Int) = when (this) {
+        MOVE -> out.moveTo(x, y)
+        LEFT_DOWN -> out.button(0, true)
+        LEFT_UP -> out.button(0, false)
+        RIGHT_DOWN -> out.button(1, true)
+        RIGHT_UP -> out.button(1, false)
     }
 }
 

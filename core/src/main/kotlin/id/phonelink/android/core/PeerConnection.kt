@@ -29,6 +29,9 @@ class PeerConnection private constructor(
 
     @Volatile var hello: Hello? = null
 
+    /** The other side is this computer itself. A phone that dials in this way comes through `adb reverse`, over USB. */
+    val isLoopback: Boolean = runCatching { socket.inetAddress?.isLoopbackAddress == true }.getOrDefault(false)
+
     /**
      * Waits like a direct write: a live message until it's written, a file message until the file window has room.
      * Returns false if the connection is closed or closing, or if the message was too big to send, in which case the

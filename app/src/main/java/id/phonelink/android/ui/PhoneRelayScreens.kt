@@ -131,6 +131,7 @@ internal fun HoldToTalk(peer: Peer, height: androidx.compose.ui.unit.Dp = 112.dp
     var note by remember { mutableStateOf<String?>(null) }
     val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         note = if (granted) "Ready. Hold the button to talk." else "DyskLink needs the microphone to talk to ${peer.name}."
+        if (!granted) openAppInfoIfBlocked(context, Manifest.permission.RECORD_AUDIO)
     }
     val active = to == peer.id
     // Leaving the page while holding ends the talk.

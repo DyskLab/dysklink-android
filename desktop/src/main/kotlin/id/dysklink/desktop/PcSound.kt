@@ -25,7 +25,10 @@ object PcSound {
     fun capture(): PcSoundCapture? = when {
         Platform.isWindows -> WasapiLoopback()
         Platform.isMac -> null
-        else -> ProcessCapture(ProcessCapture.LINUX_COMMANDS)
+        else -> ProcessCapture(
+            ProcessCapture.LINUX_COMMANDS,
+            missing = HostChecks.soundMissing(HostChecks.distro(runCatching { java.io.File("/etc/os-release").readText() }.getOrDefault(""))),
+        )
     }
 }
 
@@ -288,12 +291,17 @@ class WasapiLoopback : PcSoundCapture {
  * monitor (PulseAudio, and PipeWire's pipewire-pulse), else `pw-record` on the default output. The tool is stopped
  * with the recording, and when DyskLink quits.
  */
-class ProcessCapture(private val commands: List<List<String>>, private val readBytes: Int = PcSoundSender.CHUNK_BYTES) : PcSoundCapture {
+class ProcessCapture(
+    private val commands: List<List<String>>,
+    private val readBytes: Int = PcSoundSender.CHUNK_BYTES,
+    /** What the phone is told when none of the tools is installed. */
+    private val missing: String = "Install pulseaudio-utils (parec) or pipewire (pw-record) so phones can hear this PC.",
+) : PcSoundCapture {
     @Volatile private var process: Process? = null
     @Volatile private var running = false
 
     override fun start(onPcm: (ByteArray, Int) -> Unit, onEnded: (String) -> Unit): String? {
-        var last = "Install pulseaudio-utils (parec) or pipewire (pw-record) so phones can hear this PC."
+        var last = missing
         for (command in commands) {
             val started = runCatching { ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.PIPE).start() }.getOrNull() ?: continue
             // A tool that can't find the device ends at once.

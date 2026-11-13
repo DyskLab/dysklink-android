@@ -77,7 +77,16 @@ class MainActivity : ComponentActivity() {
     private val featurePermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
             PhoneLinkService.connectionManager.value?.phone?.refresh()
-            if (results.values.any { !it }) toast("Permission denied. You can change it in the app settings.")
+            val denied = results.filterValues { !it }.keys
+            when {
+                denied.isEmpty() -> Unit
+                // Android stops asking after a second "Don't allow"; the switch is in App info › Permissions then.
+                denied.none(::shouldShowRequestPermissionRationale) -> {
+                    toast("Turn it on in Permissions, then come back.")
+                    openAppSettings()
+                }
+                else -> toast("Permission denied. You can change it in the app settings.")
+            }
         }
 
     private var screenPeer: String? = null
@@ -476,7 +485,8 @@ class MainActivity : ComponentActivity() {
 
     private val soundPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) askForSound() else toast("DyskLink needs the microphone permission to record the phone's sound. Android uses it for app sound too; the microphone itself isn't recorded.")
+            if (granted) askForSound()
+            else if (!id.phonelink.android.ui.openAppInfoIfBlocked(this, Manifest.permission.RECORD_AUDIO)) toast("DyskLink needs the microphone permission to record the phone's sound. Android uses it for app sound too; the microphone itself isn't recorded.")
         }
 
     /** Android needs the audio permission and its recording dialog. Only called after a tap on the phone. */
@@ -494,7 +504,7 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             val peerId = cameraPeer ?: return@registerForActivityResult
             if (granted) id.phonelink.android.service.CameraStreamService.start(this, peerId, cameraFront)
-            else toast("DyskLink needs the camera permission to share the camera")
+            else if (!id.phonelink.android.ui.openAppInfoIfBlocked(this, Manifest.permission.CAMERA)) toast("DyskLink needs the camera permission to share the camera")
         }
 
     /** Starts the camera for a Mac, asking for the permission first if needed. Only called after a tap on the phone. */

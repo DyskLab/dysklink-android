@@ -70,6 +70,9 @@ class Clipboard(
     /** What the clipboard held before a run of pastes, put back once they're done. Guarded by [pasteLock]. */
     private var beforePaste: Snapshot? = null
     private var pasted: String? = null
+    /** Text on the clipboard only for a paste of typed text, until it's put back; the history doesn't keep it. */
+    @Volatile var passingThrough: String? = null
+        private set
     private var pastedAt = 0L
     private var restore: java.util.concurrent.ScheduledFuture<*>? = null
     private val restorer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
@@ -88,6 +91,7 @@ class Clipboard(
             // The paste before may still be being read by the app: don't change the clipboard under it.
             val wait = pastedAt + PASTE_GAP_MS - System.currentTimeMillis()
             if (wait > 0) Thread.sleep(wait)
+            passingThrough = text
             if (!set(text)) return false
             pressPaste()
             pasted = text
@@ -103,6 +107,7 @@ class Clipboard(
     private fun restoreAfterPaste(): Unit = synchronized(pasteLock) {
         val saved = beforePaste ?: return
         beforePaste = null
+        passingThrough = null
         // Something copied meanwhile, by the person or a phone, stays.
         if (read() != pasted) return
         runCatching {

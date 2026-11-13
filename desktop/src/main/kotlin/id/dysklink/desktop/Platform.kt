@@ -8,6 +8,7 @@ object Platform {
     private val osName = System.getProperty("os.name").orEmpty()
     val isWindows = osName.startsWith("Windows", ignoreCase = true)
     val isMac = osName.startsWith("Mac", ignoreCase = true)
+    val isLinux = osName.startsWith("Linux", ignoreCase = true)
     private val home = File(System.getProperty("user.home"))
 
     /**
@@ -67,6 +68,19 @@ object Platform {
                 java.awt.Desktop.getDesktop().open(file)
             } else if (!isWindows) {
                 ProcessBuilder("xdg-open", file.path).start()
+            }
+        }
+    }
+
+    /** Opens a web page in the browser. */
+    fun browse(url: String) {
+        runCatching {
+            if (java.awt.Desktop.isDesktopSupported() && java.awt.Desktop.getDesktop().isSupported(java.awt.Desktop.Action.BROWSE)) {
+                java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+            } else if (isWindows) {
+                ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start()
+            } else {
+                ProcessBuilder("xdg-open", url).start()
             }
         }
     }

@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -90,11 +92,11 @@ private fun OfflineCard(device: HubPhone) = EmptyCard("${device.name} isn't conn
 
 /** Returns true when the tab can go on: connected, new enough, and (for [feature]) turned on at the phone. */
 @Composable
-internal fun ready(device: HubPhone, what: String, serves: Boolean, feature: String?): Boolean {
+internal fun ready(device: HubPhone, what: String, serves: Boolean, feature: String?, model: DeskModel): Boolean {
     when {
         !device.isConnected -> OfflineCard(device)
         !serves -> UpdateCard(what, device)
-        feature != null && feature !in device.features -> FeatureOffCard(what)
+        feature != null && feature !in device.features -> FeatureOffCard(feature, what, device, model)
         else -> return true
     }
     return false
@@ -120,6 +122,7 @@ private fun StartCard(icon: androidx.compose.ui.graphics.vector.ImageVector, tit
 
 // Screen
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ColumnScope.ScreenTab(context: TabContext) {
     val colors = Dysk.colors
@@ -128,9 +131,9 @@ fun ColumnScope.ScreenTab(context: TabContext) {
     val ui = context.ui
     // Leaving the tab ends the sharing, unless it moved to its own window.
     DisposableEffect(device.id) {
-        onDispose { if (ui.screenWindow != device.id) model.stopScreen(device.id) }
+        onDispose { if (ui.screenWindow != device.id) ui.stopScreen(model, device.id) }
     }
-    if (!ready(device, "Screen sharing", device.servesScreen, "screen")) return
+    if (!ready(device, "Screen sharing", device.servesScreen, "screen", model)) return
     val screens by model.screens.collectAsState()
     val video = screens[device.id]
     when {
@@ -140,7 +143,7 @@ fun ColumnScope.ScreenTab(context: TabContext) {
             "Show phone screen",
         ) { model.requestScreen(device.id) }
         video.error != null -> {
-            Banner(video.error!!, colors.coral, DyskIcons.Warning, "Try again" to { model.requestScreen(device.id) })
+            PhoneRefusal(video.error!!, device, "Try again" to { model.requestScreen(device.id) })
         }
         video.waiting -> GlassCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -151,7 +154,7 @@ fun ColumnScope.ScreenTab(context: TabContext) {
                     Spacer(Modifier.height(2.dp))
                     Body("Tap the notification on the phone, then Start now in Android's dialog.")
                 }
-                SecondaryButton("Cancel") { model.stopScreen(device.id) }
+                SecondaryButton("Cancel") { ui.stopScreen(model, device.id) }
             }
         }
         ui.screenWindow == device.id -> GlassCard {
@@ -159,38 +162,63 @@ fun ColumnScope.ScreenTab(context: TabContext) {
                 Body("The screen shows in its own window.", modifier = Modifier.weight(1f))
                 SecondaryButton("Show here") { ui.screenWindow = null }
                 Spacer(Modifier.width(Space.xs))
-                SecondaryButton("Stop", colors.coral) { ui.screenWindow = null; model.stopScreen(device.id) }
+                SecondaryButton("Stop", colors.coral) { ui.screenWindow = null; ui.stopScreen(model, device.id) }
             }
         }
         else -> {
             if ("control" !in device.features) {
-                Banner("Taps and typing are off on the phone. Turn on Control under Phone data on ${device.name}, and DyskLink's Accessibility service.", colors.amber)
+                HintCard(id.dysklink.desktop.PhoneHints.featureOff("control", "Taps and typing", device.name, model.deviceName), model)
             }
             val picture = rememberFrame(video)
             val shape = RoundedCornerShape(18.dp)
             val turned = ui.screenRotation % 180 == 90
             val w = (if (turned) video.height else video.width).coerceAtLeast(1)
             val h = (if (turned) video.width else video.height).coerceAtLeast(1)
+            val game = ui.gameKeys(device.id, model)
             Row(horizontalArrangement = Arrangement.spacedBy(Space.md)) {
-                VideoSurface(
-                    picture, ui.screenRotation,
-                    Modifier.weight(1.4f, fill = false).height(560.dp).aspectRatio(w.toFloat() / h, matchHeightConstraintsFirst = true)
-                        .clip(shape).border(1.dp, colors.stroke, shape),
-                    onControl = { model.control(device.id, it) },
-                )
+                val surface = Modifier.weight(1.4f, fill = false).height(560.dp).aspectRatio(w.toFloat() / h, matchHeightConstraintsFirst = true)
+                    .clip(shape).border(1.dp, colors.stroke, shape)
+                val unsupported = gameKeysUnsupported(device)
+                if (game.enabled) {
+                    // An older phone drops several fingers, so the picture stays plain taps there.
+                    if (unsupported == null) GameScreen(picture, ui.screenRotation, game, model.gamePointerLock, surface) { model.control(device.id, it) }
+                    else VideoSurface(picture, ui.screenRotation, surface, onControl = { model.control(device.id, it) })
+                    GameKeysPanel(
+                        game, model.gamePointerLock, Modifier.height(560.dp), unsupported = unsupported,
+                        onImport = { GameKeyFiles.import(game) }, onExport = { GameKeyFiles.export(game) },
+                    )
+                } else {
+                    VideoSurface(picture, ui.screenRotation, surface, onControl = { model.control(device.id, it) })
+                }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Space.sm)) {
                     StatusPill("Live from ${device.name}", colors.mint)
-                    Body("Click to tap, drag to swipe, scroll to scroll, right-click for Back. Click the picture once, then type: letters, Backspace, Enter and the arrow keys go to the phone. Esc is Back.")
-                    PhoneKeys(model, ui, device.id)
-                    TypeOnPhone { text -> model.control(device.id, ControlEvent("text", text = text)) }
-                    Row(horizontalArrangement = Arrangement.spacedBy(Space.xs)) {
+                    if (!game.enabled) {
+                        Body("Click to tap, drag to swipe, scroll to scroll, right-click for Back. Click the picture once, then type: letters, Backspace, Enter and the arrow keys go to the phone. Esc is Back.")
+                    }
+                    PhoneKeys(model, ui, device.id) { GameKeysButton(game) }
+                    if (!game.enabled) TypeOnPhone { text -> model.control(device.id, ControlEvent("text", text = text)) }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.xs), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
                         SecondaryButton("Pop out", icon = DyskIcons.PopOut) { ui.screenWindow = device.id }
-                        SecondaryButton("Stop", colors.coral) { model.stopScreen(device.id) }
+                        SecondaryButton("Stop", colors.coral) { ui.stopScreen(model, device.id) }
                     }
                 }
             }
         }
     }
+}
+
+/** Why game keys can't be used with this phone yet, or null when they can. */
+fun gameKeysUnsupported(device: HubPhone?): String? = when {
+    device == null -> null
+    !device.servesGameKeys -> "Game keys need a newer DyskLink on ${device.name}. Update it on the phone, then open it once so it connects again."
+    else -> null
+}
+
+/** Turns game keys on and off for the picture. */
+@Composable
+fun GameKeysButton(game: id.dysklink.desktop.GameKeysController) {
+    val colors = Dysk.colors
+    SecondaryButton("Game keys", if (game.enabled) colors.mint else colors.textPrimary, icon = DyskIcons.Gamepad) { game.enable(!game.enabled); game.refocus() }
 }
 
 /** For text the keyboard can't send key by key, such as an IME or a paste. */
@@ -214,16 +242,23 @@ fun ColumnScope.CameraTab(context: TabContext) {
     val device = context.device
     val model = context.model
     val ui = context.ui
-    if (!ready(device, "The phone camera", device.servesCamera, null)) return
+    if (!ready(device, "The phone camera", device.servesCamera, null, model)) return
     val cameras by model.cameras.collectAsState()
+    val host by model.host.collectAsState()
     val video = cameras[device.id]
+    // How to get the window into OBS, before it starts and while it shows; not while something's wrong.
+    val obs = id.dysklink.desktop.HostChecks.obsHint(host.obs, cameraWindowTitle(device.name))
     when {
-        video == null -> StartCard(
-            DyskIcons.Camera, "Use the phone as a camera",
-            "${device.name} shows a notification, and the camera starts when you tap it. The picture opens in a window you can capture in OBS or a video call app.",
-            "Use phone camera",
-        ) { ui.cameraWindow = device.id; model.requestCamera(device.id) }
-        video.error != null -> Banner(video.error!!, colors.coral, DyskIcons.Warning, "Try again" to { ui.cameraWindow = device.id; model.requestCamera(device.id) })
+        video == null -> {
+            StartCard(
+                DyskIcons.Camera, "Use the phone as a camera",
+                "${device.name} shows a notification, and the camera starts when you tap it. The picture opens in a window you can capture in OBS.",
+                "Use phone camera",
+            ) { ui.cameraWindow = device.id; model.requestCamera(device.id) }
+            WebcamCard(model)
+            HintCard(obs, model, colors.sky)
+        }
+        video.error != null -> PhoneRefusal(video.error!!, device, "Try again" to { ui.cameraWindow = device.id; model.requestCamera(device.id) })
         video.waiting -> GlassCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconWell(DyskIcons.Phone, colors.amber, 40.dp)
@@ -256,6 +291,8 @@ fun ColumnScope.CameraTab(context: TabContext) {
                 ).joinToString(" · "),
                 colors.textFaint,
             )
+            WebcamCard(model)
+            HintCard(obs, model, colors.sky)
         }
     }
 }
@@ -268,7 +305,7 @@ fun ColumnScope.GalleryTab(context: TabContext) {
     val colors = Dysk.colors
     val device = context.device
     val model = context.model
-    if (!ready(device, "The gallery", device.servesGallery, "gallery")) return
+    if (!ready(device, "The gallery", device.servesGallery, "gallery", model)) return
     val galleries by model.galleries.collectAsState()
     val gallery = galleries[device.id]
     LaunchedEffect(device.id) { if (gallery == null) model.loadGallery(device.id, true) }
@@ -303,7 +340,7 @@ fun ColumnScope.GalleryTab(context: TabContext) {
             }
         }
     }
-    gallery?.error?.let { Banner(it, colors.coral, DyskIcons.Warning) }
+    gallery?.error?.let { PhoneRefusal(it, device) }
     if (items.isEmpty()) {
         EmptyCard(if (gallery?.loading != false) "Loading the gallery..." else "No photos or videos on the phone.", DyskIcons.Image)
         return
@@ -406,7 +443,7 @@ fun ColumnScope.MessagesTab(context: TabContext) {
     val colors = Dysk.colors
     val device = context.device
     val model = context.model
-    if (!ready(device, "Messages", device.servesSms, "sms")) return
+    if (!ready(device, "Messages", device.servesSms, "sms", model)) return
     val all by model.sms.collectAsState()
     val sms = all[device.id]
     LaunchedEffect(device.id) { if (sms?.loaded != true && sms?.loading != true) model.loadSms(device.id) }

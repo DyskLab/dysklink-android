@@ -173,6 +173,10 @@ interface InputInjector {
     val displays: List<Rectangle>
     val pointer: Point?
     fun moveTo(x: Int, y: Int)
+    /** Moves by [dx], [dy] from where the pointer is. */
+    fun moveBy(dx: Int, dy: Int) { pointer?.let { moveTo(it.x + dx, it.y + dy) } }
+    /** Called before control starts, where the pointer's place isn't known (Wayland). */
+    fun sync() {}
     /** 0 left, 1 right, 2 middle, 3 and 4 back and forward. */
     fun button(button: Int, down: Boolean)
     /** Wheel notches; positive scrolls down, as a wheel turned toward you. */
@@ -213,6 +217,7 @@ class SharedInputTarget(
         controller = peer
         homeEdge = edge
         pushes = 0
+        injector.sync()
         val display = EdgeMath.outermost(edge, injector.displays)
         if (display != null) {
             val point = EdgeMath.point(edge, display, RemoteLimits.fraction(at))
@@ -346,7 +351,7 @@ class SharedInputTarget(
     }
 }
 
-/** Robot for the pointer and keys, with the side wheel through SendInput on Windows and XTest on X11. */
+/** Robot for the pointer and keys, with the side wheel through SendInput on Windows and XTest on X11. Wayland has [WaylandInjector]. */
 class RobotInjector(private val robot: Robot) : InputInjector {
     override val displays: List<Rectangle>
         get() = runCatching {

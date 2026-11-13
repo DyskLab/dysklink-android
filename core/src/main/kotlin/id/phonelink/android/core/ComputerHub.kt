@@ -30,6 +30,8 @@ data class HubPhone(
     val platform: String = "android",
     /** What its hello listed in `caps`, while connected. */
     val caps: List<String> = emptyList(),
+    /** Connected through a USB cable (`adb reverse`, so it came from this computer's loopback address) instead of Wi-Fi. */
+    val viaUsb: Boolean = false,
 ) {
     /** A Mac, or another Windows or Linux PC. They share the clipboard, files, and ringing, and nothing more. */
     val isComputer: Boolean get() = platform in PhoneLinkProtocol.COMPUTERS
@@ -40,6 +42,8 @@ data class HubPhone(
     val servesSms: Boolean get() = !isComputer && PhoneLinkProtocol.CAP_PC_SMS in caps
     val servesContacts: Boolean get() = !isComputer && PhoneLinkProtocol.CAP_PC_CONTACTS in caps
     val servesFiles: Boolean get() = !isComputer && PhoneLinkProtocol.CAP_PC_FILES in caps
+    /** A phone that takes several fingers at once from a PC, for game keys ([PhoneLinkProtocol.CAP_PC_GAMEKEYS]). */
+    val servesGameKeys: Boolean get() = !isComputer && PhoneLinkProtocol.CAP_PC_GAMEKEYS in caps
 }
 
 enum class VideoKind { Screen, Camera }
@@ -136,7 +140,7 @@ interface HubEvents {
     fun clipboardImage(png: ByteArray, from: String) {}
     /** SMS that just arrived on the phone (incoming only), for a notification here. */
     fun sms(items: List<SmsItem>, from: String) {}
-    /** Whether this computer can move the pointer and type. False on Linux under Wayland, which forbids it. */
+    /** Whether this computer can move the pointer and type. On Wayland only through the desktop portal or /dev/uinput. */
     val canControl: Boolean get() = false
 
     // What this PC serves phones: its sound, commands, and a terminal. All off unless the app says otherwise.
@@ -841,6 +845,8 @@ class ComputerHub(
     fun control(phoneId: String, event: ControlEvent) {
         if (_screens.value[phoneId]?.live != true) return
         val clean = ControlRules.sanitize(event) ?: return
+        // Several fingers at once only go to a phone that takes them from a PC; an older one would drop them anyway.
+        if (clean.kind in PcRules.MULTI_TOUCH && _phones.value.none { it.id == phoneId && it.servesGameKeys }) return
         // Queued in order on the connection, so a swipe's points arrive as they were made.
         post(phoneId, Envelope(MessageType.CONTROL, control = clean))
     }
@@ -1002,7 +1008,8 @@ class ComputerHub(
             close(connection)
             return@locked null
         }
-        // The newest connection from a phone replaces the old one, as on the Mac.
+        // The newest connection from a phone replaces the old one, as on the Mac. That is how USB takes over from Wi-Fi.
+        if (connection.isUsb && (stored ?: hello.platform) !in PhoneLinkProtocol.COMPUTERS) CoreLog.i(TAG, "USB_SESSION ${hello.name}")
         val replaced = connections.put(id, connection)?.takeIf { it !== connection }
         replaced?.let { close(it) }
         if (record != null && !hello.paired) removeRecord(id)
@@ -1035,6 +1042,14 @@ class ComputerHub(
         val out = Outgoing()
         synchronized(lock) { out.block() }
         if (!out.isEmpty) scope.launch(Dispatchers.IO) { out.flush() }
+    }
+
+    /** Came in from this computer itself, which only `adb reverse` does: a phone on the USB cable. */
+    private val PeerConnection.isUsb: Boolean get() = inbound && isLoopback
+
+    /** Hangs up on phones connected over USB, so they go back to Wi-Fi, after USB was turned off here. */
+    fun closeUsbConnections() {
+        synchronized(lock) { connections.values.filter { it.isUsb && !isComputer(it) } }.forEach { it.close() }
     }
 
     // Other computers: Macs and other PCs. Only the clipboard, files, and ringing, as between Macs.
@@ -1512,6 +1527,7 @@ class ComputerHub(
         _phones.value = ids.map { id ->
             val record = records[id]
             val hello = connections[id]?.hello
+            val platform = record?.platform ?: hello?.platform ?: "android"
             HubPhone(
                 id = id,
                 name = hello?.name ?: record?.name ?: "Phone",
@@ -1520,8 +1536,9 @@ class ComputerHub(
                 isConnected = connections[id]?.hello != null,
                 info = infos[id],
                 features = features[id].orEmpty(),
-                platform = record?.platform ?: hello?.platform ?: "android",
+                platform = platform,
                 caps = hello?.caps.orEmpty(),
+                viaUsb = platform !in PhoneLinkProtocol.COMPUTERS && connections[id]?.let { it.hello != null && it.isUsb } == true,
             )
         }.sortedWith(compareByDescending<HubPhone> { it.isPaired }.thenBy { it.name })
     }

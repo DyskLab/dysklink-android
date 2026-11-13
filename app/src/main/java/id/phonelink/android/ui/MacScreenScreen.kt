@@ -417,7 +417,7 @@ fun MacScreenScreen(
         if (state is ViewState.Showing && inputTrusted == false) {
             Text(
                 if (isMac) "Taps and typing need Accessibility for DyskLink on the Mac."
-                else "Taps and typing need \"Phones can control this PC\" in DyskLink on the PC. On Linux they need an X11 session.",
+                else "Taps and typing need \"Phones can control this PC\" in DyskLink on the PC. On Linux, also allow remote control when the PC asks, or follow the steps DyskLink shows there.",
                 color = Palette.Amber, fontSize = 12.sp, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(6.dp),
             )

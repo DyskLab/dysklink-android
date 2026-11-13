@@ -36,13 +36,24 @@ interface PcScreenSource {
     fun displays(): List<PcDisplay>
     /** A picture of [display], long side at most [maxLong]. Null when it couldn't be taken this time. */
     fun grab(display: PcDisplay, maxLong: Int): ScreenGrab?
+    /** Why grabbing keeps failing, for the phone, such as the user not allowing it; null for the usual words. */
+    fun failure(): String? = null
+    /** Nobody is viewing any more: anything kept running for the pictures can stop. */
+    fun release() {}
 }
 
 object PcScreen {
     /** The picture's long side, as the Mac's H.264 for this screen. */
     const val MAX_LONG_SIDE = 1600
+    /** Wayland without a screen sharing portal: the last resort is an X11 session. */
     const val WAYLAND_REFUSAL =
-        "Viewing this PC's screen isn't supported on Wayland yet. Log in with an X11 (Xorg) session on the PC to use it."
+        "This PC uses Wayland and has no screen sharing portal (xdg-desktop-portal), so its screen can't be captured. " +
+            "DyskLink on the PC shows what to install, or log in with an X11 session there."
+    /** Wayland with the portal, but without the GStreamer pieces that turn its stream into pictures. */
+    fun waylandMissing(what: String): String =
+        "This PC uses Wayland and needs $what to show its screen. DyskLink on the PC shows the command to install it."
+    const val WAYLAND_DENIED = "Sharing this PC's screen wasn't allowed on the PC. Allow it there, then try again."
+    const val WAYLAND_NO_ANSWER = "Nobody allowed sharing the screen on the PC in time. Allow it there, then try again."
     const val TURNED_OFF = "Turn on \"Let phones see this screen\" in DyskLink on the PC first."
     const val NO_EXTEND = "This PC can't use the phone as an extra display. Windows and Linux need a display driver for that."
     const val ANOTHER_PHONE = "Another phone is viewing this PC now."
@@ -140,7 +151,7 @@ class PcScreenSender(
             val grab = runCatching { source.grab(target, maxLong) }.onFailure { CoreLog.w(TAG, "Screen capture failed", it) }.getOrNull()
             if (!running.get()) break
             if (grab == null || grab.width <= 0 || grab.height <= 0) {
-                if (++failures >= MAX_FAILURES) return end("This PC's screen couldn't be captured.")
+                if (++failures >= MAX_FAILURES) return end(runCatching { source.failure() }.getOrNull() ?: "This PC's screen couldn't be captured.")
                 pacer.taken(clock())
                 pause(RETRY_MS)
                 continue
@@ -198,6 +209,7 @@ class PcScreenSender(
     private fun halt(): Boolean {
         val was = running.getAndSet(false)
         streamer.close(notify = false)
+        if (was) runCatching { source.release() }
         return was
     }
 

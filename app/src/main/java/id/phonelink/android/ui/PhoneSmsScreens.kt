@@ -267,7 +267,7 @@ private fun SmsComposer(peer: Peer, link: PhoneMoreLink, view: SmsView, address:
                 }
             }
         }
-        Text("Uses ${peer.name}'s SIM and number. ${peer.name} shows a notification for each SMS, at most 10 a minute.", color = Palette.TextFaint, fontSize = 11.sp, lineHeight = 15.sp)
+        Text("Uses ${peer.name}'s SIM and number, its default SIM for SMS if it has two. ${peer.name} shows a notification for each SMS, at most 10 a minute.", color = Palette.TextFaint, fontSize = 11.sp, lineHeight = 15.sp)
     }
 }
 

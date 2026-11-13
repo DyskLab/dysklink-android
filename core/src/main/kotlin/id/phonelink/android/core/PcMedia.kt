@@ -51,6 +51,16 @@ object PcRules {
         return receives(platform, caps, cap)
     }
 
+    /** `control` kinds for several fingers at once (game keys). */
+    val MULTI_TOUCH = setOf("tdown", "tmove", "tup")
+
+    /**
+     * Whether a computer may send a `control` of [kind]. Several fingers ([MULTI_TOUCH]) need `pc-gamekeys` from a PC on
+     * top of `pc-screen`; older desktop builds never sent them. A Mac always may, as before.
+     */
+    fun allowsControl(platform: String?, caps: List<String>?, kind: String?): Boolean =
+        kind !in MULTI_TOUCH || receives(platform, caps, PhoneLinkProtocol.CAP_PC_GAMEKEYS)
+
     /** Whether a computer gets what [cap] covers: always a Mac, and a PC that listed it. */
     fun receives(platform: String?, caps: List<String>?, cap: String): Boolean =
         platform == "macos" || (platform in PhoneLinkProtocol.COMPUTERS && caps?.contains(cap) == true)

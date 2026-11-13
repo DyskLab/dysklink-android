@@ -5,6 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.jvm")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.compose")
+    // Only the compiler plugin, for the clipboard history's and battery history's JSON; the library comes with :core.
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 kotlin { jvmToolchain(17) }
@@ -24,6 +26,10 @@ dependencies {
     // The terminal from the phone: a real pseudo terminal (ConPTY on Windows, a pty on Linux), so colors, Ctrl-C,
     // and full-screen programs work. About 2.8 MB with natives for every OS; brings jna-platform (1.4 MB) and slf4j-api.
     implementation("org.jetbrains.pty4j:pty4j:0.13.13")
+    // The tray icon on Linux desktops that only show StatusNotifierItem icons (KDE Plasma, GNOME with AppIndicator):
+    // D-Bus in plain Java over the JDK's own unix sockets, so no libdbus or JNI. Used on Linux only.
+    implementation("com.github.hypfvieh:dbus-java-core:5.2.2")
+    implementation("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.2")
 
     testImplementation(kotlin("test-junit"))
 }
@@ -39,7 +45,11 @@ compose.desktop {
             description = "Your Android phone and your PC, working together"
             vendor = "DyskLab"
             copyright = "DyskLab"
-            modules("java.instrument", "java.naming", "java.sql", "jdk.unsupported", "jdk.crypto.ec")
+            // jdk.security.auth: dbus-java reads the user id from it to log in to the session bus (the Linux tray).
+            modules("java.instrument", "java.naming", "java.sql", "jdk.unsupported", "jdk.crypto.ec", "jdk.security.auth")
+            // Files beside the app, found through compose.application.resources.dir: CI puts softcam.dll (DyskLink
+            // Camera, the webcam on Windows) in resources/windows-x64. Nothing there in a local build.
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
             windows {
                 iconFile.set(project.file("packaging/icon.ico"))
                 menuGroup = "DyskLink"

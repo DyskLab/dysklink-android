@@ -149,15 +149,23 @@ internal fun rememberNotificationAccess(): NotificationAccess {
 @Composable
 internal fun NotificationHint(access: NotificationAccess, text: String) {
     if (access.allowed) return
+    HintBox(text, "Allow notifications", onClick = access.ask)
+}
+
+/** Something outside DyskLink is in the way: what it is and what to do, with a link to where it's fixed. */
+@Composable
+internal fun HintBox(text: String, action: String?, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
     Column(
-        Modifier
+        modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(Palette.Amber.copy(alpha = 0.12f))
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Text(text, color = Palette.Amber, fontSize = 13.sp, lineHeight = 18.sp)
-        Spacer(Modifier.height(2.dp))
-        ToolLink("Allow notifications", Palette.Amber, access.ask)
+        if (action != null) {
+            Spacer(Modifier.height(2.dp))
+            ToolLink(action, Palette.Amber, onClick)
+        }
     }
 }

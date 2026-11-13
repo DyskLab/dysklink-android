@@ -155,7 +155,10 @@ fun DictationScreen(macName: String, connected: Boolean, onBack: () -> Unit, kin
 
     val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasMic = granted
-        if (granted) start() else problem = "DyskLink needs the microphone to hear you. Allow it in the app's settings."
+        if (granted) start() else {
+            problem = "DyskLink needs the microphone to hear you. Allow it in the app's settings."
+            openAppInfoIfBlocked(context, Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     FeatureScaffold("Voice typing to $kind", onBack) {

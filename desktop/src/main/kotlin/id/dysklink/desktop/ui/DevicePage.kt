@@ -185,7 +185,11 @@ private fun HeaderCard(context: TabContext, full: Boolean) {
             }
             Spacer(Modifier.width(if (full) 22.dp else Space.md))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (device.isConnected) StatusPill("Connected", colors.mint) else StatusPill("Offline", colors.textFaint)
+                when {
+                    device.isConnected && device.viaUsb -> StatusPill("Connected over USB", colors.mint)
+                    device.isConnected -> StatusPill("Connected", colors.mint)
+                    else -> StatusPill("Offline", colors.textFaint)
+                }
                 Title(device.name, if (full) 26.sp else 20.sp)
                 val details = listOfNotNull(device.info?.model ?: device.model, device.info?.osVersion?.takeIf { it != device.info?.model }).distinct()
                 Text(details.joinToString(" · "), color = colors.textSecondary, fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -258,6 +262,9 @@ private fun ColumnScope.OverviewTab(context: TabContext) {
             if (list.size > 2) TextAction("Show all ${list.size}", colors.mint) { context.ui.tab = "notifications" }
         }
     }
+    val host by context.model.host.collectAsState()
+    // Once here, rather than on every tab: what this PC's session stops phones from doing.
+    if (!device.isComputer) host.overview.forEach { HintCard(it, context.model) }
     SectionLabel("On this PC")
     GlassCard {
         val clipboardOn by context.model.clipboardOn.collectAsState()
@@ -269,6 +276,7 @@ private fun ColumnScope.OverviewTab(context: TabContext) {
             val notifyOn by context.model.notifyOn.collectAsState()
             Divider()
             SettingRow("Show phone notifications", "Notifications from the phone pop up on this PC.", notifyOn, onChange = context.model::setNotifyOn)
+            HintList(host.popups, context.model)
         }
         // A Mac's mouse and keyboard can come over to this PC; a PC's never go to a Mac.
         if (device.platform == "macos") {
@@ -280,8 +288,10 @@ private fun ColumnScope.OverviewTab(context: TabContext) {
                 "On ${device.name}, choose this PC's side in Advanced, Other computers, Mouse and keyboard. This PC's own mouse doesn't go to the Mac.",
                 remoteOn && computersOn, enabled = computersOn, onChange = context.model::setRemoteOn,
             )
+            if (remoteOn && computersOn) HintList(host.remote, context.model)
         }
     }
+    if (!device.isComputer) UsbCard(context.model, viaUsb = device.isConnected && device.viaUsb)
     Row(Modifier.padding(top = 4.dp)) {
         TextAction("Unpair ${device.name}", colors.coral) { context.model.unpair(device.id) }
     }
@@ -329,7 +339,7 @@ private fun ColumnScope.NotificationsTab(context: TabContext) {
     val notifications by context.model.notifications.collectAsState()
     val list = notifications[device.id].orEmpty()
     when {
-        "notifications" !in device.features -> FeatureOffCard("Notifications")
+        "notifications" !in device.features -> FeatureOffCard("notifications", "Notifications", device, context.model)
         list.isEmpty() -> EmptyCard("No notifications on the phone.", DyskIcons.Bell)
         else -> list.forEach { item -> NotificationCard(item, device.isConnected) { context.model.dismissNotification(device.id, item.key) } }
     }
@@ -337,16 +347,17 @@ private fun ColumnScope.NotificationsTab(context: TabContext) {
 
 /** Shown when the feature is off on the phone. This PC can't turn it on by itself. */
 @Composable
-internal fun FeatureOffCard(title: String) {
+internal fun FeatureOffCard(feature: String, title: String, device: HubPhone, model: DeskModel) {
+    HintCard(id.dysklink.desktop.PhoneHints.featureOff(feature, title, device.name, model.deviceName), model)
+}
+
+/** A reason the phone sent back, with what to do about it when the reason alone doesn't say. */
+@Composable
+internal fun PhoneRefusal(error: String, device: HubPhone, action: Pair<String, () -> Unit>? = null) {
     val colors = Dysk.colors
-    GlassCard(padding = 24.dp) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            DyskIcon(DyskIcons.Info, colors.amber, 16.dp)
-            Spacer(Modifier.width(10.dp))
-            Text("$title: turned off on the phone", color = colors.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        }
-        Spacer(Modifier.height(Space.xs))
-        Body("Open DyskLink on the phone, choose this PC, then turn it on under Phone data for Mac. It can only be turned on from the phone.")
+    Banner(error, colors.coral, DyskIcons.Warning, action)
+    id.dysklink.desktop.PhoneHints.refusalHelp(error, device.name)?.let { help ->
+        Body(help, colors.textSecondary, Modifier.padding(start = 14.dp))
     }
 }
 
@@ -527,10 +538,7 @@ private fun ColumnScope.ControlTab(context: TabContext) {
             "Paired phones can use this PC's touchpad, keyboard, shortcuts and media keys. Open Touchpad & keyboard in DyskLink on the phone.",
             controlOn, onChange = context.model::setControlOn,
         )
-        if (controlOn) context.model.controlNotes().forEach { note ->
-            Spacer(Modifier.height(Space.sm))
-            Banner(note, colors.amber, DyskIcons.Info)
-        }
+        if (controlOn) HintList(context.model.host.collectAsState().value.control, context.model)
     }
     SectionLabel("What the phone can do")
     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(10.dp)) {

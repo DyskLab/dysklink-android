@@ -86,6 +86,7 @@ fun PcSoundCard(context: TabContext) {
             "A paired phone can ask for this PC's sound: music, videos, and calls, not the microphone. Off stops it at once.",
             on, onChange = model::setSoundOutOn,
         )
+        if (on) HintList(model.host.collectAsState().value.soundOut, model)
     }
 }
 
@@ -213,9 +214,6 @@ fun RemoteSettings(model: DeskModel, computersOn: Boolean) {
             "Command-C, Command-V and the like work as Ctrl here. Off: Command is the ${if (model.systemName.startsWith("Windows")) "Windows" else "Super"} key.",
             commandAsCtrl, onChange = model::setCommandAsCtrl,
         )
-        model.remoteNotes().forEach { note ->
-            Spacer(Modifier.height(Space.sm))
-            Banner(note, colors.amber, DyskIcons.Info)
-        }
+        HintList(model.host.collectAsState().value.remote, model)
     }
 }
