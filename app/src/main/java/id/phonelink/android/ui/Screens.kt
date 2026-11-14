@@ -55,6 +55,7 @@ import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Monitor
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.Feedback
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Modifier
@@ -573,6 +574,8 @@ private fun HomeScreen(
             UpdatesCard(state.updates, state.appVersion, actions)
             Spacer(Modifier.height(12.dp))
             SupportCard()
+            Spacer(Modifier.height(12.dp))
+            ReportProblemCard(state.peers.count { it.isConnected })
             Spacer(Modifier.height(16.dp))
         } else {
         state.updates.available?.let { release ->
@@ -933,6 +936,33 @@ private fun SupportCard() {
 }
 
 private const val DONATION_URL = "https://buymeacoffee.com/fannydevz"
+
+/** Same as the Report a problem card in the Mac app's Advanced page. */
+@Composable
+private fun ReportProblemCard(connectedComputers: Int) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var failed by remember { mutableStateOf(false) }
+    GlassCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(androidx.compose.material.icons.Icons.Rounded.Feedback, contentDescription = null, tint = Palette.Sky, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(Support.REPORT_TITLE, color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(Support.REPORT_DETAIL, color = Palette.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        SecondaryButton("Open WhatsApp") { failed = !Support.report(context, connectedComputers) }
+        if (failed) {
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(Support.FAILURE_MESSAGE, color = Palette.AmberText, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(10.dp))
+                SecondaryButton("Copy") { Support.copyNumber(context) }
+            }
+        }
+    }
+}
 
 @Composable
 private fun BackgroundCard(onAllow: () -> Unit, onOpenSettings: () -> Unit) {
