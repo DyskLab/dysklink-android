@@ -258,6 +258,8 @@ class PortalScreenSource(
     private val input: () -> WaylandInput?,
     private val withControl: () -> Boolean,
     private val launch: (List<String>) -> Process = { ProcessBuilder(it).start() },
+    /** Sharing was stopped on this PC (the desktop's Stop): the phone watching is told now, not after the retries. */
+    private val onStoppedHere: () -> Unit = {},
 ) : PcScreenSource {
     private val _status = MutableStateFlow(PortalStatus())
     val status: StateFlow<PortalStatus> = _status.asStateFlow()
@@ -267,6 +269,13 @@ class PortalScreenSource(
     @Volatile private var pipe: GstJpegPipe? = null
     @Volatile private var pipeSize: Pair<Int, Int>? = null
     @Volatile private var failure: String? = null
+    /**
+     * Stopped from the desktop (its Stop button in the top bar). Sticks through [teardown]: no session is opened
+     * again, not even quietly through the restore token, until a phone asks for the screen again ([phoneAsked]) or the
+     * user picks "Ask again" ([retry]).
+     */
+    @Volatile var stoppedHere = false
+        private set
     @Volatile private var lastGrab = 0L
     @Volatile private var starting = false
     @Volatile private var releases = 0
@@ -291,7 +300,13 @@ class PortalScreenSource(
         return listOf(PcDisplay(DISPLAY_ID, "Shared screen (${size.first}×${size.second})", main = true, x = x, y = y, width = size.first, height = size.second))
     }
 
-    override fun failure(): String? = failure
+    override fun failure(): String? = failure ?: if (stoppedHere) PcScreen.STOPPED_HERE else null
+
+    /** A phone asked for the screen (`macscreen.start`): a stop on this PC no longer holds. */
+    fun phoneAsked() {
+        if (stoppedHere) CoreLog.i("DyskLink", "Screen: asked again after being stopped on the PC")
+        stoppedHere = false
+    }
 
     override fun grab(display: PcDisplay, maxLong: Int): ScreenGrab? {
         lastGrab = System.currentTimeMillis()
@@ -326,7 +341,7 @@ class PortalScreenSource(
     /** The session, started here if there's none; waits while the user is asked. Null when it was refused. */
     private fun session(): PortalSession? {
         session?.takeIf { !it.closed }?.let { return it }
-        if (failure != null) return null
+        if (failure != null || stoppedHere) return null
         synchronized(this) {
             if (!starting) {
                 starting = true
@@ -353,8 +368,9 @@ class PortalScreenSource(
             val combined = withControl() && wayland?.route?.value == InputRoute.PORTAL && wayland.remoteDesktop.version != null
             val onClosed: (PortalSession) -> Unit = { closed ->
                 if (session === closed) {
-                    failure = "Sharing the screen was stopped on the PC."
+                    stoppedHere = true
                     teardown()
+                    runCatching { onStoppedHere() }
                 }
             }
             val started = if (combined) client.startRemoteDesktop(cast, onClosed) else client.startScreenCast(cast, onClosed)
@@ -411,6 +427,7 @@ class PortalScreenSource(
     /** "Ask again" on the hint: the next viewer is asked again. */
     fun retry() {
         failure = null
+        stoppedHere = false
         _status.value = PortalStatus()
     }
 

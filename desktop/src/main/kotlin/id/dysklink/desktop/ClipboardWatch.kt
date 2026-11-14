@@ -3,9 +3,12 @@
 package id.dysklink.desktop
 
 import com.sun.jna.Library
+import com.sun.jna.Memory
 import com.sun.jna.Native
+import com.sun.jna.NativeLong
 import com.sun.jna.Pointer
 import com.sun.jna.WString
+import com.sun.jna.ptr.IntByReference
 import id.phonelink.android.core.CoreLog
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
@@ -118,6 +121,128 @@ object WinClipboard {
     fun activate(window: Pointer) { user32?.let { runCatching { it.SetForegroundWindow(window) } } }
 }
 
+/**
+ * A cheap mark of the clipboard's state, taken before reading it. [exact] when every copy moves it (Windows' sequence
+ * number, XFixes' selection events); false when a copy can leave it as it was (the X11 owner window alone, which
+ * stays the same when one app copies twice).
+ */
+data class ClipMark(val value: Long, val exact: Boolean)
+
+/** What a look at the clipboard needs to read, from [ClipGate.look]. */
+enum class ClipLook {
+    /** Nothing changed: nothing is read. */
+    Unchanged,
+    /** Something may have changed: everything is read, pictures too. */
+    Changed,
+    /** Can't be sure: the text (cheap) is read, pictures only when the mark says they changed. */
+    TextOnly,
+}
+
+/**
+ * Whether the clipboard needs reading, from a [mark] that costs a system call instead of the whole clipboard. Each
+ * watcher has its own. With no mark (macOS, no X display) everything is read every time, as before. A look whose
+ * read failed (the clipboard was held by another app) is [retry]-ed: the next look reads again.
+ */
+class ClipGate(private val mark: () -> ClipMark? = ClipMarks::current) {
+    private var last: ClipMark? = null
+
+    @Synchronized
+    fun look(): ClipLook {
+        val now = runCatching(mark).getOrNull() ?: return ClipLook.Changed
+        val before = last
+        last = now
+        return when {
+            before == null || before.value != now.value -> ClipLook.Changed
+            now.exact -> ClipLook.Unchanged
+            else -> ClipLook.TextOnly
+        }
+    }
+
+    /** The clipboard couldn't be read this time: the next look reads everything again. */
+    @Synchronized
+    fun retry() { last = null }
+}
+
+/** The system's clipboard mark: Windows' sequence number, or the X11 CLIPBOARD selection (XWayland included). */
+object ClipMarks {
+    fun current(): ClipMark? = when {
+        Platform.isWindows -> WinClipboard.sequence()?.let { ClipMark(it, exact = true) }
+        Platform.isLinux && !System.getenv("DISPLAY").isNullOrBlank() -> X11Selection.instance?.mark()
+        else -> null
+    }
+}
+
+/**
+ * The X11 CLIPBOARD selection on a connection of its own. With XFixes every SetSelectionOwner is an event, even when
+ * the same app copies again, so a count of them is an exact mark; without XFixes only the owner window is known.
+ */
+class X11Selection private constructor(private val x: XLib, private val fixes: XFixes?, private val display: Pointer, private val atom: NativeLong) {
+    @Suppress("FunctionName")
+    interface XLib : Library {
+        fun XOpenDisplay(name: String?): Pointer?
+        fun XInternAtom(display: Pointer, name: String, onlyIfExists: Boolean): NativeLong
+        fun XGetSelectionOwner(display: Pointer, selection: NativeLong): NativeLong
+        fun XDefaultRootWindow(display: Pointer): NativeLong
+        fun XPending(display: Pointer): Int
+        fun XNextEvent(display: Pointer, event: Pointer): Int
+        fun XFlush(display: Pointer): Int
+    }
+
+    @Suppress("FunctionName")
+    interface XFixes : Library {
+        fun XFixesQueryExtension(display: Pointer, eventBase: IntByReference, errorBase: IntByReference): Boolean
+        fun XFixesSelectSelectionInput(display: Pointer, window: NativeLong, selection: NativeLong, mask: NativeLong)
+    }
+
+    private var eventBase = -1
+    private var changes = 0L
+    /** An XEvent is a union of 24 longs. */
+    private val event = Memory(24L * Native.LONG_SIZE)
+
+    private fun listen(): Boolean {
+        val f = fixes ?: return false
+        val base = IntByReference()
+        val error = IntByReference()
+        if (!runCatching { f.XFixesQueryExtension(display, base, error) }.getOrDefault(false)) return false
+        runCatching {
+            f.XFixesSelectSelectionInput(display, x.XDefaultRootWindow(display), atom, NativeLong(SELECTION_EVENTS))
+            x.XFlush(display)
+        }.onFailure { return false }
+        eventBase = base.value
+        return true
+    }
+
+    @Synchronized
+    fun mark(): ClipMark = if (eventBase >= 0) {
+        // Only this connection's own events are queued, and only XFixes' are asked for.
+        while (x.XPending(display) > 0) {
+            x.XNextEvent(display, event)
+            if (event.getInt(0) == eventBase + XFIXES_SELECTION_NOTIFY) changes++
+        }
+        ClipMark(changes, exact = true)
+    } else {
+        ClipMark(x.XGetSelectionOwner(display, atom).toLong(), exact = false)
+    }
+
+    companion object {
+        const val XFIXES_SELECTION_NOTIFY = 0
+        /** SetSelectionOwner, SelectionWindowDestroy and SelectionClientClose. */
+        const val SELECTION_EVENTS = 7L
+
+        val instance: X11Selection? by lazy {
+            runCatching {
+                val x = Native.load("X11", XLib::class.java)
+                val fixes = runCatching { Native.load("Xfixes", XFixes::class.java) }.getOrNull()
+                val display = x.XOpenDisplay(null) ?: return@runCatching null
+                X11Selection(x, fixes, display, x.XInternAtom(display, "CLIPBOARD", false)).also {
+                    val events = it.listen()
+                    CoreLog.i("DyskLink", "Clipboard changes: ${if (events) "XFixes" else "owner window"}")
+                }
+            }.onFailure { CoreLog.w("DyskLink", "No X11 clipboard mark", it) }.getOrNull()
+        }
+    }
+}
+
 /** KDE's password hint as an AWT flavor on X11 and XWayland, so the clipboard can say whether it's there. */
 private object LinuxHintFlavor {
     val flavor: DataFlavor? by lazy {
@@ -143,6 +268,9 @@ class ClipboardWatch(
     private val wayland: Boolean = Typing.desktop() == Desktop.WAYLAND,
     private val hasWlPaste: () -> Boolean = { Typing.onPath("wl-paste") },
     private val hasWlCopy: () -> Boolean = { Typing.onPath("wl-copy") },
+    /** The system clipboard; tests pass their own. */
+    private val board: () -> java.awt.datatransfer.Clipboard = { Toolkit.getDefaultToolkit().systemClipboard },
+    private val gate: ClipGate = ClipGate(),
 ) {
     private val detector = ClipChangeDetector()
     private val _mode = MutableStateFlow(ClipWatchMode.Off)
@@ -150,7 +278,7 @@ class ClipboardWatch(
     @Volatile private var running = false
     private var poller: Thread? = null
     private var wlProcess: Process? = null
-    private val clipboard get() = Toolkit.getDefaultToolkit().systemClipboard
+    private val clipboard get() = board()
 
     @Synchronized
     fun start() {
@@ -183,8 +311,14 @@ class ClipboardWatch(
 
     /** One look at the AWT clipboard. */
     internal fun pollOnce() {
+        val look = gate.look()
+        if (look == ClipLook.Unchanged) return
         var read: AwtRead? = null
-        val isNew = detector.isNew(WinClipboard.sequence()) { readAwt().also { read = it }?.signature }
+        var failed = false
+        val isNew = detector.isNew(null) {
+            readAwt(images = look == ClipLook.Changed, failed = { failed = true }).also { read = it }?.signature
+        }
+        if (failed) gate.retry()
         val found = read ?: return
         if (!isNew) return
         if (found.text != null && found.text == passingThrough()) return
@@ -203,9 +337,12 @@ class ClipboardWatch(
 
     private class AwtRead(val signature: String, val text: String? = null, val files: List<String>? = null, val image: BufferedImage? = null)
 
-    private fun readAwt(): AwtRead? {
+    /** What's on the clipboard; pictures only with [images]. [failed] when the clipboard couldn't be opened. */
+    private fun readAwt(images: Boolean = true, failed: () -> Unit = {}): AwtRead? {
         val board = clipboard
-        fun has(flavor: DataFlavor) = runCatching { board.isDataFlavorAvailable(flavor) }.getOrDefault(false)
+        // Windows: another app may hold the clipboard open for a moment; that look is tried again.
+        val flavors = runCatching { board.availableDataFlavors.toSet() }.getOrElse { failed(); return null }
+        fun has(flavor: DataFlavor) = flavor in flavors
         if (has(DataFlavor.javaFileListFlavor)) {
             @Suppress("UNCHECKED_CAST")
             val files = runCatching { board.getData(DataFlavor.javaFileListFlavor) as? List<File> }.getOrNull()
@@ -221,7 +358,7 @@ class ClipboardWatch(
                 return AwtRead(ClipChangeDetector.textSignature(text), text = text)
             }
         }
-        if (has(DataFlavor.imageFlavor)) {
+        if (images && has(DataFlavor.imageFlavor)) {
             val image = runCatching { board.getData(DataFlavor.imageFlavor) as? java.awt.Image }.getOrNull()?.let(::buffered) ?: return null
             return AwtRead(ClipChangeDetector.imageSignature(Clipboard.quickFingerprint(image)), image = image)
         }

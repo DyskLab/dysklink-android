@@ -355,6 +355,42 @@ class WaylandPortalTest {
     }
 
     @Test
+    fun stopOnTheDesktopSticksUntilAskedAgain() {
+        val address = startBus() ?: return
+        val portal = startPortal(address)
+        val client = client(address)
+        val image = java.awt.image.BufferedImage(160, 90, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        val jpeg = ScreenPictures.jpeg(image, 70)!!
+        val stream = File(dir, "stream.bin").apply {
+            writeBytes("--dysk\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.size}\r\n\r\n".toByteArray() + jpeg + "\r\n".toByteArray())
+        }
+        var stopped = 0
+        val source = PortalScreenSource({ client }, { GstCheck(true, true) }, { null }, { false },
+            launch = { ProcessBuilder("cat", stream.path).start() }, onStoppedHere = { stopped++ })
+        val display = source.displays().single()
+        assertNotNull(source.grab(display, 1600))
+        val handle = portal.options.first { it.first == "sc.CreateSession" }.second.getValue("session_handle_token").value as String
+        // The desktop's Stop in the top bar ends the session.
+        portal.closeSession(PortalBits.sessionPath(connections[1].uniqueName, handle))
+        waitFor { stopped == 1 }
+        assertTrue(source.stoppedHere)
+        assertEquals(id.phonelink.android.core.PcScreen.STOPPED_HERE, source.failure(), "the phone is told it was stopped here")
+        // The release after the phone is told (and its teardown) keeps it stopped; nothing is started again.
+        source.release()
+        val calls = portal.calls.size
+        repeat(3) { assertNull(source.grab(display, 1600)) }
+        Thread.sleep(300)
+        assertEquals(calls, portal.calls.size, "no new session, not even through the restore token")
+        assertTrue(source.stoppedHere)
+        // A phone asking again starts a new session.
+        source.phoneAsked()
+        assertNull(source.failure())
+        assertNotNull(source.grab(display, 1600))
+        assertTrue(portal.calls.size > calls)
+        source.release()
+    }
+
+    @Test
     fun screenSourceDeniedTellsThePhone() {
         val address = startBus() ?: return
         val portal = startPortal(address)

@@ -347,7 +347,11 @@ class WindowsVddBackend(
 
 /** Installing and removing the driver, as administrator (Windows asks first). */
 object VddInstall {
-    private fun quote(path: String) = "'" + path.replace("'", "''") + "'"
+    /**
+     * A PowerShell single-quoted string. PowerShell also ends one at the typographic single quotes (U+2018 to U+201B),
+     * which a user name can hold, so each of them is doubled as well.
+     */
+    fun quote(text: String): String = "'" + text.replace(Regex("['\u2018\u2019\u201A\u201B]")) { it.value + it.value } + "'"
 
     /** The script run elevated: the project's own silent-install.ps1 steps, from the bundled files. */
     fun installScript(dir: String, userSid: String?): String = buildString {
@@ -388,8 +392,24 @@ object VddInstall {
 
     /** The PowerShell line that runs [script] as administrator and waits for it. */
     fun elevated(script: String): String {
-        val path = script.replace("'", "''")
-        return "\$p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"$path\"' -Verb RunAs -Wait -PassThru; exit \$p.ExitCode"
+        // The double quotes keep a path with spaces in one piece on the elevated PowerShell's command line; a Windows
+        // path can't hold a double quote itself.
+        val file = quote("\"$script\"")
+        return "\$p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$file -Verb RunAs -Wait -PassThru; exit \$p.ExitCode"
+    }
+
+    /**
+     * [command] for -EncodedCommand: Base64 of UTF-16LE, so nothing on the command line needs quoting and a non-ASCII
+     * path arrives as it is.
+     */
+    fun encoded(command: String): String = java.util.Base64.getEncoder().encodeToString(command.toByteArray(Charsets.UTF_16LE))
+
+    /**
+     * Writes [script] as UTF-8 with a byte order mark: Windows PowerShell 5.1 reads a .ps1 without one in the ANSI code
+     * page, which would garble a non-ASCII path in it.
+     */
+    fun writeScript(file: File, script: String) {
+        file.writeBytes(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + script.toByteArray(Charsets.UTF_8))
     }
 
     /** This user's SID, for the settings folder's permission. */
@@ -403,8 +423,8 @@ object VddInstall {
     fun run(dir: File, remove: Boolean): Boolean = runCatching {
         val script = File.createTempFile("dysklink-vdd-", ".ps1")
         try {
-            script.writeText(if (remove) removeScript(dir.absolutePath) else installScript(dir.absolutePath, userSid()))
-            val process = ProcessBuilder("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", elevated(script.absolutePath))
+            writeScript(script, if (remove) removeScript(dir.absolutePath) else installScript(dir.absolutePath, userSid()))
+            val process = ProcessBuilder("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded(elevated(script.absolutePath)))
                 .redirectErrorStream(true).start()
             val out = process.inputStream.bufferedReader().readText()
             val done = process.waitFor(180, TimeUnit.SECONDS)

@@ -75,6 +75,11 @@ object PrayerWeatherStore {
     private const val EXTRA_PRAYER = "prayer"
     private const val EXTRA_TIME = "time"
     private const val EXTRA_EARLY = "early"
+    private const val HTTP_TIMEOUT_MS = 20_000
+    /** Each request from an alarm or widget update; [BACKGROUND_LIMIT_MS] caps them all together. */
+    private const val BACKGROUND_HTTP_TIMEOUT_MS = 4_000
+    /** A receiver has 10 seconds in the foreground and 60 in the background; this stays inside both. */
+    internal const val BACKGROUND_LIMIT_MS = 8_000L
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -132,14 +137,14 @@ object PrayerWeatherStore {
 
     // Network
 
-    private fun get(url: String): String = request(url, null)
+    private fun get(url: String, timeoutMs: Int = HTTP_TIMEOUT_MS): String = request(url, null, timeoutMs)
 
-    private fun post(url: String, body: String): String = request(url, body)
+    private fun post(url: String, body: String, timeoutMs: Int = HTTP_TIMEOUT_MS): String = request(url, body, timeoutMs)
 
-    private fun request(url: String, body: String?): String {
+    private fun request(url: String, body: String?, timeoutMs: Int): String {
         val connection = URL(url).openConnection() as HttpURLConnection
-        connection.connectTimeout = 20_000
-        connection.readTimeout = 20_000
+        connection.connectTimeout = timeoutMs
+        connection.readTimeout = timeoutMs
         connection.setRequestProperty("User-Agent", "DyskLink-Android")
         try {
             if (body != null) {
@@ -194,8 +199,25 @@ object PrayerWeatherStore {
         scope.launch { refreshNow(context.applicationContext, force) }
     }
 
+    /**
+     * For a receiver's `goAsync`: refreshes with short HTTP timeouts and finishes the broadcast after at most
+     * [BACKGROUND_LIMIT_MS], well inside Android's limit, even while a request still hangs. A request that hangs
+     * keeps going and saves when it ends; the next alarm or widget update tries again.
+     */
+    fun refreshForBroadcast(context: Context, pending: BroadcastReceiver.PendingResult) {
+        val app = context.applicationContext
+        val job = scope.launch { refreshNow(app, httpTimeoutMs = BACKGROUND_HTTP_TIMEOUT_MS) }
+        scope.launch {
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(BACKGROUND_LIMIT_MS) { job.join() }
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
     /** Loads missing months and weather older than 30 minutes. Safe to call often. */
-    suspend fun refreshNow(context: Context, force: Boolean = false) = lock.withLock {
+    suspend fun refreshNow(context: Context, force: Boolean = false, httpTimeoutMs: Int = HTTP_TIMEOUT_MS) = lock.withLock {
         load(context)
         _state.update { it.copy(loading = true) }
         var problem: String? = null
@@ -211,7 +233,7 @@ object PrayerWeatherStore {
                     put("bulan", month)
                     put("tahun", year)
                 }.toString()
-                runCatching { PrayerWeatherApi.month(post(PrayerWeatherApi.PRAYER_BASE, body), location) }
+                runCatching { PrayerWeatherApi.month(post(PrayerWeatherApi.PRAYER_BASE, body, httpTimeoutMs), location) }
                     .onSuccess { loadedMonth ->
                         _state.update { state ->
                             // The city may have changed while this was loading.
@@ -227,7 +249,7 @@ object PrayerWeatherStore {
         _state.value.saved.place?.let { place ->
             val report = _state.value.saved.report
             if (force || report == null || System.currentTimeMillis() - report.fetchedAt > PrayerWeatherApi.WEATHER_MAX_AGE_MS) {
-                runCatching { PrayerWeatherApi.report(get(PrayerWeatherApi.forecastUrl(place)), System.currentTimeMillis()) }
+                runCatching { PrayerWeatherApi.report(get(PrayerWeatherApi.forecastUrl(place), httpTimeoutMs), System.currentTimeMillis()) }
                     .onSuccess { loadedReport ->
                         _state.update {
                             if (it.saved.place != place) it else it.copy(saved = it.saved.copy(report = loadedReport))
@@ -316,13 +338,7 @@ class PrayerAlarmReceiver : BroadcastReceiver() {
         val pending = goAsync()
         val app = context.applicationContext
         PrayerWeatherStore.fired(app, intent)
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                PrayerWeatherStore.refreshNow(app)
-            } finally {
-                pending.finish()
-            }
-        }
+        PrayerWeatherStore.refreshForBroadcast(app, pending)
     }
 }
 
@@ -332,13 +348,7 @@ class PrayerWidget : AppWidgetProvider() {
         val pending = goAsync()
         val app = context.applicationContext
         render(app)
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                PrayerWeatherStore.refreshNow(app)
-            } finally {
-                pending.finish()
-            }
-        }
+        PrayerWeatherStore.refreshForBroadcast(app, pending)
     }
 
     companion object {

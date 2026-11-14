@@ -34,6 +34,7 @@ class WindowsCapture : CaptureBackend {
         fun SendInput(count: Int, inputs: Pointer, size: Int): Int
         fun GetAsyncKeyState(vk: Int): Short
         fun EnumDisplayMonitors(hdc: Pointer?, clip: Pointer?, proc: MonitorProc, data: Pointer?): Boolean
+        fun GetLastInputInfo(info: Pointer): Boolean
     }
 
     @Suppress("FunctionName")
@@ -188,6 +189,21 @@ class WindowsCapture : CaptureBackend {
                 runCatching { lib.SendInput(1, memory, WinInput.inputSize(Native.POINTER_SIZE)) }
             }
         }
+    }
+
+    /**
+     * GetLastInputInfo's tick. Whether SendInput moves it isn't documented: the probe is marked (dwExtraInfo
+     * [PROBE_MAGIC], and LLMHF_INJECTED / LLKHF_INJECTED as all injected input) and swallowed by the hooks, but the
+     * system may count it as input all the same. SharedInputSource doesn't rely on either: it reads this tick after
+     * each probe's echo and probes again only when the tick moved since (or the hooks saw real input), so a PC left
+     * alone locks its screen on time either way.
+     */
+    override fun lastInputTick(): Long? {
+        val lib = user32 ?: return null
+        // LASTINPUTINFO { UINT cbSize; DWORD dwTime; }
+        val info = Memory(8).apply { setInt(0, 8); setInt(4, 0) }
+        if (!runCatching { lib.GetLastInputInfo(info) }.getOrDefault(false)) return null
+        return info.getInt(4).toLong() and 0xFFFFFFFFL
     }
 
     override fun probe() {

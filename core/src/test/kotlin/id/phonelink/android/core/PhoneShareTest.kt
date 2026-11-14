@@ -213,7 +213,8 @@ class PhoneShareTest {
     /** Every Mac-facing feature on, to show they don't open anything to a phone. */
     private enum class Control(val feature: PhoneFeature) { Screen(PhoneFeature.Screen), Touch(PhoneFeature.Control), Sms(PhoneFeature.Sms) }
 
-    private fun waitUntil(message: String, seconds: Int = 10, check: () -> Boolean) {
+    // Generous: the suite also runs while the integration script loads this machine.
+    private fun waitUntil(message: String, seconds: Int = 25, check: () -> Boolean) {
         val until = System.currentTimeMillis() + seconds * 1000L
         while (!check()) {
             if (System.currentTimeMillis() > until) throw AssertionError(message)

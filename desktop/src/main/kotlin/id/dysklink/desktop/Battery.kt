@@ -11,6 +11,8 @@ import java.util.concurrent.TimeUnit
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
@@ -401,11 +403,22 @@ object WindowsBattery {
         )
     }
 
-    private fun run(command: List<String>, timeoutSeconds: Long): String? = runCatching {
+    /**
+     * Runs [command] and gives its output, or null after [timeoutSeconds]. The output is read on a thread of its own:
+     * read here, a hung PowerShell would block the read and the timeout would never be reached.
+     */
+    fun run(command: List<String>, timeoutSeconds: Long): String? = runCatching {
         val process = ProcessBuilder(command).redirectErrorStream(true).start()
-        val out = process.inputStream.bufferedReader().readText()
-        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) { process.destroy(); return null }
-        out
+        val out = StringBuilder()
+        val reader = Thread({
+            runCatching { process.inputStream.bufferedReader().use { r -> out.append(r.readText()) } }
+        }, "dysk-battery-out").apply { isDaemon = true; start() }
+        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            return null
+        }
+        reader.join(2_000)
+        synchronized(out) { out.toString() }
     }.getOrNull()
 
     fun report(): PowercfgReport? {
@@ -419,6 +432,83 @@ object WindowsBattery {
     }
 
     fun wmi(): String? = run(listOf("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WMI_SCRIPT), 20)
+
+    /** GetSystemPowerStatus's SYSTEM_POWER_STATUS, as it comes. */
+    data class PowerStatus(val acLine: Int, val flags: Int, val percent: Int, val secondsLeft: Long)
+
+    @Suppress("FunctionName")
+    private interface Kernel32 : com.sun.jna.Library {
+        fun GetSystemPowerStatus(status: com.sun.jna.Pointer): Boolean
+    }
+
+    private val kernel32: Kernel32? by lazy {
+        if (!Platform.isWindows) null else runCatching { com.sun.jna.Native.load("kernel32", Kernel32::class.java) }.getOrNull()
+    }
+
+    /** The level and the charger from Windows itself: a call, not a PowerShell. Null when it can't be asked. */
+    fun powerStatus(): PowerStatus? {
+        val k = kernel32 ?: return null
+        val memory = com.sun.jna.Memory(12)
+        if (!runCatching { k.GetSystemPowerStatus(memory) }.getOrDefault(false)) return null
+        // BYTE ACLineStatus, BatteryFlag, BatteryLifePercent, SystemStatusFlag; DWORD BatteryLifeTime, BatteryFullLifeTime.
+        fun byte(at: Long) = memory.getByte(at).toInt() and 0xFF
+        return PowerStatus(byte(0), byte(1), byte(2), memory.getInt(4).toLong() and 0xFFFFFFFFL)
+    }
+
+    /**
+     * The reading from [status], with what only WMI and the battery report know (capacity, cycles, the maker) from
+     * [details], read rarely. The rate and the charge in Wh change by the minute, so they're only taken from [details]
+     * while [detailsFresh]. Null when there's no battery.
+     */
+    fun fromPowerStatus(status: PowerStatus, details: BatteryReading?, detailsFresh: Boolean, report: PowercfgReport?): BatteryReading? {
+        // 128: no system battery; 255: unknown status.
+        if (status.flags != 255 && status.flags and 128 != 0) return null
+        val percent = status.percent.takeIf { it in 0..100 } ?: details?.percent ?: return null
+        val online = when (status.acLine) { 0 -> false; 1 -> true; else -> null }
+        val charging = status.flags != 255 && status.flags and 8 != 0
+        val state = when {
+            charging -> ChargeState.Charging
+            online == true && percent >= 99 -> ChargeState.Full
+            online == true -> ChargeState.NotCharging
+            online == false -> ChargeState.Discharging
+            else -> ChargeState.Unknown
+        }
+        val minutes = status.secondsLeft.takeIf { it != 0xFFFFFFFFL && it > 0 && state == ChargeState.Discharging }
+            ?.let { (it / 60).toInt() }?.takeIf { it in 1..(48 * 60) }
+        val fresh = details?.takeIf { detailsFresh && it.state == state }
+        return BatteryReading(
+            percent = percent,
+            state = state,
+            pluggedIn = online ?: (state != ChargeState.Discharging),
+            designWh = details?.designWh ?: report?.designMwh?.div(1000.0),
+            fullWh = details?.fullWh ?: report?.fullMwh?.div(1000.0),
+            nowWh = fresh?.nowWh,
+            cycles = details?.cycles ?: report?.cycles,
+            watts = fresh?.watts,
+            voltage = fresh?.voltage,
+            temperatureC = fresh?.temperatureC,
+            minutesToEmpty = minutes,
+            source = "Windows",
+            vendor = details?.vendor ?: report?.vendor, model = details?.model ?: report?.model, chemistry = details?.chemistry ?: report?.chemistry,
+            recent = report?.recent ?: details?.recent.orEmpty(),
+        )
+    }
+}
+
+/**
+ * When WMI (a PowerShell, slow and heavy) is asked on Windows: every look when GetSystemPowerStatus can't be used;
+ * otherwise only for the rare details, while the Battery card is on screen, at most every [DETAILS_MS].
+ */
+object BatteryDetailsPolicy {
+    const val DETAILS_MS = 600_000L
+    /** Details this old still give the rate and the charge in Wh. */
+    const val FRESH_MS = 60_000L
+
+    fun wmiDue(hasPowerStatus: Boolean, visible: Boolean, now: Long, lastWmiAt: Long?): Boolean = when {
+        !hasPowerStatus -> true
+        !visible -> false
+        else -> lastWmiAt == null || now - lastWmiAt >= DETAILS_MS
+    }
 }
 
 // The daily history, as the Mac's: one point a day, kept two years.
@@ -479,6 +569,10 @@ class BatteryMonitor(
     private var job: kotlinx.coroutines.Job? = null
     private val levels = ArrayDeque<Int>()
     private var lastLevelAt = 0L
+    private val viewers = kotlinx.coroutines.flow.MutableStateFlow(0)
+
+    /** The Battery card coming on screen (true) and going (false): WMI's details are only read while it's shown. */
+    fun watch(on: Boolean) = viewers.update { (it + if (on) 1 else -1).coerceAtLeast(0) }
 
     fun start() {
         if (job != null || Platform.isMac) return
@@ -487,6 +581,8 @@ class BatteryMonitor(
             var report: PowercfgReport? = null
             var reportAt = 0L
             var misses = 0
+            var details: BatteryReading? = null
+            var wmiAt: Long? = null
             while (true) {
                 val now = System.currentTimeMillis()
                 if (Platform.isWindows && now - reportAt > 3_600_000) {
@@ -496,7 +592,15 @@ class BatteryMonitor(
                     if (seeded != days) { days = seeded; BatteryHistory.save(days, dataDir) }
                 }
                 val reading = when {
-                    Platform.isWindows -> WindowsBattery.wmi()?.let { WindowsBattery.parseWmi(it, report) }
+                    Platform.isWindows -> {
+                        val status = WindowsBattery.powerStatus()
+                        if (BatteryDetailsPolicy.wmiDue(status != null, viewers.value > 0, now, wmiAt)) {
+                            wmiAt = now
+                            WindowsBattery.wmi()?.let { WindowsBattery.parseWmi(it, report) }?.let { details = it }
+                        }
+                        val fresh = wmiAt?.let { now - it < BatteryDetailsPolicy.FRESH_MS } == true
+                        if (status != null) WindowsBattery.fromPowerStatus(status, details, fresh, report) else details.takeIf { fresh }
+                    }
                     else -> SysfsBattery.read() ?: UPowerBattery.read()
                 }
                 if (reading == null) {
@@ -515,7 +619,14 @@ class BatteryMonitor(
                     while (levels.size > 240) levels.removeFirst()
                 }
                 _view.value = BatteryView(reading, days, levels.toList(), BatteryNotes.forReading(reading, Platform.isWindows))
-                kotlinx.coroutines.delay(if (Platform.isWindows) 30_000 else 10_000)
+                // Windows: every 30 seconds, sooner when the Battery card opens and its details are due.
+                if (Platform.isWindows) {
+                    kotlinx.coroutines.withTimeoutOrNull(30_000) {
+                        viewers.first { it > 0 && BatteryDetailsPolicy.wmiDue(true, true, System.currentTimeMillis(), wmiAt) }
+                    }
+                } else {
+                    kotlinx.coroutines.delay(10_000)
+                }
             }
         }
     }

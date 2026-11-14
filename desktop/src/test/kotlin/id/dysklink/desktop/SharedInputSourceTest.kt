@@ -29,6 +29,10 @@ class SharedInputSourceTest {
         /** Hooks that answer probes; one Windows took away doesn't. */
         var answering: Set<String> = setOf("mouse", "keyboard")
         var probes = 0
+        /** GetLastInputInfo's tick; null as on X11. [probeMovesTick] plays a Windows where SendInput counts as input. */
+        var tick: Long? = null
+        var probeMovesTick = false
+        override fun lastInputTick(): Long? = tick
 
         override fun install(gate: InputGate, sink: (HookEvent) -> Unit): Boolean {
             installs++
@@ -42,7 +46,11 @@ class SharedInputSourceTest {
         override fun uninstall() { uninstalls++; installed = false; gate?.crossed = false }
         override fun capture(park: Point): Boolean { if (captureWorks) parked = park; return captureWorks }
         override fun release(to: Point?) { parked = null; released += to }
-        override fun probe() { probes++; answering.forEach { sink?.invoke(HookEvent.Probe(it)) } }
+        override fun probe() {
+            probes++
+            if (probeMovesTick) tick = (tick ?: 0) + 1
+            answering.forEach { sink?.invoke(HookEvent.Probe(it)) }
+        }
 
         /** What a hook does: the gate decides first, then the event is queued. Returns whether it was swallowed. */
         fun move(x: Int, y: Int, dx: Int, dy: Int): Boolean {
@@ -608,6 +616,34 @@ class SharedInputSourceTest {
         assertTrue(rig.backend.installed)
         assertEquals(2, rig.backend.installs)
         assertFalse(rig.backend.gate!!.crossed)
+    }
+
+    @Test
+    fun probesAreRareAndStopWhileThePcIsLeftAlone() {
+        for (moves in listOf(false, true)) {
+            val rig = Rig()
+            rig.backend.tick = 500
+            rig.backend.probeMovesTick = moves
+            rig.advance(100)
+            val first = rig.backend.probes
+            assertEquals(1, first, "a probe once the hooks are in")
+            // Not crossed: every 10 s at most, not every second.
+            repeat(30) { rig.advance(100) }
+            assertEquals(first, rig.backend.probes, "no probe within 10 s while the pointer is here")
+            // Left alone (no input but the probe's own): no more probes, so the screen can lock.
+            repeat(300) { rig.advance(100) }
+            assertEquals(first, rig.backend.probes, "probeMovesTick=$moves: nobody used the PC, nothing is sent")
+            // Someone types (the tick moves, the hooks see nothing): the next probe goes out.
+            rig.backend.tick = rig.backend.tick!! + 1_000
+            rig.advance(100)
+            assertEquals(first + 1, rig.backend.probes)
+            // Moving the mouse is seen by the hooks, and counts too.
+            repeat(100) { rig.advance(100) }
+            assertEquals(first + 1, rig.backend.probes)
+            rig.backend.move(500, 500, 3, 0)
+            rig.advance(100)
+            assertEquals(first + 2, rig.backend.probes)
+        }
     }
 
     @Test

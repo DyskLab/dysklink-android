@@ -505,7 +505,11 @@ private class AppModel(private val app: DesktopApp, override val hasTray: Boolea
     }
     override val battery = app.battery.view
     override val energy = app.energy.view
-    override fun watchEnergy(on: Boolean) = app.energy.watch(on)
+    override fun watchEnergy(on: Boolean) {
+        app.energy.watch(on)
+        // The Battery card on screen: Windows reads WMI's rare details only then.
+        app.battery.watch(on)
+    }
     override val pcCare: PcCareModel? by lazy {
         PcCareModel(RealCareSystem(), kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default), Platform.dataDir)
     }

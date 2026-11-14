@@ -72,6 +72,10 @@ class ScreenCaptureService : Service() {
     private var reader: ImageReader? = null
     private var jpegStream: JpegStreamer? = null
     private var bitmap: Bitmap? = null
+    /** Kept between pictures: the visible part when rows are padded, the padded copy, and the JPEG buffer. */
+    private var cropped: Bitmap? = null
+    private var padded: ByteArray? = null
+    private val jpegOut = java.io.ByteArrayOutputStream(128 * 1024)
     private var drainPosted = false
     private val drainLater = Runnable { drainPosted = false; drain() }
 
@@ -237,15 +241,22 @@ class ScreenCaptureService : Service() {
             picture.copyPixelsFromBuffer(buffer)
         } else {
             // Some phones leave out the padding after the last row.
-            val padded = ByteArray(needed)
-            buffer.get(padded, 0, buffer.remaining())
-            picture.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(padded))
+            val copy = padded?.takeIf { it.size == needed } ?: ByteArray(needed).also { padded = it }
+            val count = buffer.remaining()
+            buffer.get(copy, 0, count)
+            java.util.Arrays.fill(copy, count, needed, 0)
+            picture.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(copy))
         }
-        val visible = if (rowPixels == width) picture else Bitmap.createBitmap(picture, 0, 0, width, height)
-        val out = java.io.ByteArrayOutputStream(128 * 1024)
-        visible.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        if (visible !== picture) visible.recycle()
-        return out.toByteArray()
+        val visible = if (rowPixels == width) picture else {
+            // The padding at the end of each row is cut off into one bitmap kept for every picture of this size.
+            val target = cropped?.takeIf { it.width == width && it.height == height }
+                ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { cropped?.recycle(); cropped = it }
+            android.graphics.Canvas(target).drawBitmap(picture, android.graphics.Rect(0, 0, width, height), android.graphics.Rect(0, 0, width, height), null)
+            target
+        }
+        jpegOut.reset()
+        visible.compress(Bitmap.CompressFormat.JPEG, quality, jpegOut)
+        return jpegOut.toByteArray()
     }
 
     private fun releaseJpeg() {
@@ -258,6 +269,9 @@ class ScreenCaptureService : Service() {
         reader = null
         bitmap?.recycle()
         bitmap = null
+        cropped?.recycle()
+        cropped = null
+        padded = null
     }
 
     private inner class EncoderOutput(private val stream: ScreenStreamer) : MediaCodec.Callback() {

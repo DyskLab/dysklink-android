@@ -222,7 +222,9 @@ class DesktopApp(private val scope: CoroutineScope) {
     val screenOutOn: StateFlow<Boolean> = _screenOutOn.asStateFlow()
     private val robotScreen by lazy { RobotScreenSource(wayland = input.isWayland) }
     /** This screen on Wayland: the ScreenCast portal and GStreamer. */
-    private val waylandScreen by lazy { PortalScreenSource({ portal }, { gstCheck() }, { wayland }, { _controlOn.value }) }
+    private val waylandScreen by lazy {
+        PortalScreenSource({ portal }, { gstCheck() }, { wayland }, { _controlOn.value }, onStoppedHere = { hub.stopScreenOut(PcScreen.STOPPED_HERE) })
+    }
     @Volatile private var gst: GstCheck? = null
 
     /** GStreamer as found, checked again only while it's missing. */
@@ -600,7 +602,11 @@ class DesktopApp(private val scope: CoroutineScope) {
 
             override fun screenRefusal(from: String): String? = when {
                 // Said first: turning the switch on wouldn't help. On Wayland, only when a piece is missing.
-                input.isWayland -> waylandScreen.refusal().also { if (it != null) recheckHost() } ?: if (!_screenOutOn.value) PcScreen.TURNED_OFF else null
+                input.isWayland -> waylandScreen.refusal().also { if (it != null) recheckHost() } ?: if (!_screenOutOn.value) PcScreen.TURNED_OFF else {
+                    // The phone asking is what may share again after a Stop on this PC.
+                    waylandScreen.phoneAsked()
+                    null
+                }
                 !_screenOutOn.value -> PcScreen.TURNED_OFF
                 else -> null
             }
@@ -632,7 +638,14 @@ class DesktopApp(private val scope: CoroutineScope) {
             // Not while this PC's own pointer is on a Mac, which would pass input round in a loop.
             override fun remoteAllowed(from: String): Boolean =
                 _remoteOn.value && _computersOn.value && remoteTarget != null && inputSource?.crossedTo == null
-            override fun heard(from: String) { inputSource?.heard(from) }
+            override fun heard(from: String) {
+                inputSource?.heard(from)
+                remoteTarget?.heard(from)
+            }
+
+            override fun pinged(from: String) {
+                remoteTarget?.pinged(from)
+            }
             override fun remote(type: String, event: RemoteEvent?, from: String) {
                 // This PC's own pointer coming back from the Mac, or the Mac ending it.
                 if (type == MessageType.REMOTE_LEAVE || type == MessageType.REMOTE_EXIT) inputSource?.remote(type, event, from)

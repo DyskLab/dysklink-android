@@ -204,9 +204,16 @@ class SharedInputTarget(
     private val send: (String, Envelope) -> Unit,
     private val commandAsCtrl: () -> Boolean = { true },
     private val onChange: (String?) -> Unit = {},
+    /** Milliseconds, for the stale-input watchdog; a fake clock in tests. */
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** Runs the watchdog while a Mac is in control; off in tests, which call [checkStale] themselves. */
+    private val watchdog: Boolean = true,
 ) {
     @Volatile var controller: String? = null
         private set
+    /** When anything last came from the Mac in control: input, or any other message ([heard]). */
+    private var lastHeard = 0L
+    private var watchThread: Thread? = null
     private var homeEdge = ScreenEdge.LEFT
     private val buttons = HashSet<Int>()
     private val keysDown = HashSet<Int>()
@@ -222,8 +229,11 @@ class SharedInputTarget(
         controller?.takeIf { it != peer }?.let { send(it, Envelope(MessageType.REMOTE_EXIT)) }
         releaseHeld()
         controller = peer
+        pinging = false
         homeEdge = edge
         pushes = 0
+        lastHeard = clock()
+        startWatchdog()
         injector.sync()
         val display = EdgeMath.outermost(edge, injector.displays)
         if (display != null) {
@@ -237,6 +247,7 @@ class SharedInputTarget(
     @Synchronized
     fun handle(event: RemoteEvent, peer: String) {
         if (controller != peer) return
+        lastHeard = clock()
         val clean = RemoteLimits.sanitize(event) ?: return
         when (clean.kind) {
             "move" -> move(clean.dx ?: 0.0, clean.dy ?: 0.0)
@@ -262,6 +273,55 @@ class SharedInputTarget(
     /** [peer] disconnected or was unpaired. */
     fun gone(peer: String) {
         if (controller == peer) release()
+    }
+
+    /** Anything else from [peer] (a ping, a pong, any message): the Mac is still there. */
+    @Synchronized
+    fun heard(peer: String) {
+        if (controller == peer) lastHeard = clock()
+    }
+
+    /** Set once the Mac in control pings; an older Mac that never does isn't timed out (a still, held drag stays held). */
+    private var pinging = false
+
+    @Synchronized
+    fun pinged(peer: String) {
+        if (controller == peer) { pinging = true; lastHeard = clock() }
+    }
+
+    /** Whether a key, a modifier or a button is held down here for the Mac. */
+    @get:Synchronized
+    val holding: Boolean get() = buttons.isNotEmpty() || keysDown.isNotEmpty() || modifiers.isNotEmpty()
+
+    /**
+     * Lets go of what's held when nothing came from the Mac for [STALE_MS]: its Wi-Fi went away mid-press, and the
+     * connection itself may take a minute to time out. Control stays with the Mac; the next input carries on.
+     * True when something was let go.
+     */
+    @Synchronized
+    fun checkStale(): Boolean {
+        if (controller == null || !pinging || !holding || clock() - lastHeard < STALE_MS) return false
+        CoreLog.i("DyskLink", "REMOTE_STALE released held input")
+        releaseHeld()
+        return true
+    }
+
+    /** Called holding the lock, from [enter]. */
+    private fun startWatchdog() {
+        if (!watchdog || watchThread != null) return
+        watchThread = Thread({
+            // Ends by itself once control ends (checked under the lock, so a quick re-enter keeps this one).
+            while (true) {
+                try { Thread.sleep(WATCH_MS) } catch (_: InterruptedException) { break }
+                synchronized(this) {
+                    if (controller == null) {
+                        watchThread = null
+                        return@Thread
+                    }
+                    runCatching { checkStale() }
+                }
+            }
+        }, "dysklink-remote-watchdog").apply { isDaemon = true; start() }
     }
 
     private fun releaseHeld() {
@@ -355,6 +415,9 @@ class SharedInputTarget(
 
     companion object {
         const val PIXELS_PER_NOTCH = 24.0
+        /** Held keys and buttons go up after this long with nothing from the Mac. */
+        const val STALE_MS = 2_000L
+        const val WATCH_MS = 500L
     }
 }
 

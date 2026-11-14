@@ -138,7 +138,8 @@ class DownloadSinks(private val context: Context) : FileSinkFactory {
 
     private inner class LegacySink(private val name: String, subfolder: String?) : FileSink {
         private val folder = File(context.getExternalFilesDir(null) ?: context.filesDir, subfolder ?: "DyskLink").apply { mkdirs() }
-        private val partial = File(folder, "$name.part")
+        // Its own temp name per transfer: two files of the same name coming in at once don't share one.
+        private val partial = File(folder, partialName(java.util.UUID.randomUUID().toString()))
         private val output = partial.outputStream()
         private var saved: File? = null
         override val openUri: String?
@@ -160,5 +161,10 @@ class DownloadSinks(private val context: Context) : FileSinkFactory {
             runCatching { output.close() }
             partial.delete()
         }
+    }
+
+    companion object {
+        /** The temp file a transfer writes to before it gets its real name. Hidden, and never the same twice. */
+        internal fun partialName(transferId: String): String = ".dysklink-${transferId.filter { it.isLetterOrDigit() || it == '-' }.take(40)}.part"
     }
 }

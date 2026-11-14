@@ -49,6 +49,7 @@ class X11Capture : CaptureBackend {
         fun XCreatePixmapCursor(display: Pointer, source: NativeLong, mask: NativeLong, fg: Pointer, bg: Pointer, x: Int, y: Int): NativeLong
         fun XFreePixmap(display: Pointer, pixmap: NativeLong): Int
         fun XFlush(display: Pointer): Int
+        fun XConnectionNumber(display: Pointer): Int
     }
 
     @Suppress("FunctionName")
@@ -76,8 +77,10 @@ class X11Capture : CaptureBackend {
     private var opcode = -1
     private var park: Point? = null
     private var grabbed = false
-    private var lastX = Int.MIN_VALUE
-    private var lastY = Int.MIN_VALUE
+    /** Where the pointer is, asked of the X server at most [PointerThrottle.QUERY_MS] apart. */
+    private val pointerAt = PointerThrottle()
+    /** Blocks the X thread while there's nothing to do; work handed over wakes it. */
+    @Volatile private var idle: IdleWait? = null
 
     override val installed: Boolean get() = running && loop?.isAlive == true
 
@@ -136,6 +139,9 @@ class X11Capture : CaptureBackend {
                 ok = true
                 ready.countDown()
                 val event = Memory(24L * NativeLong.SIZE)
+                val wait = IdleWait.open()
+                idle = wait
+                val fd = x.XConnectionNumber(d)
                 while (running) {
                     var busy = false
                     while (true) { val job = work.poll() ?: break; busy = true; job() }
@@ -144,7 +150,9 @@ class X11Capture : CaptureBackend {
                         x.XNextEvent(d, event)
                         handle(x, d, event)
                     }
-                    if (!busy) Thread.sleep(2)
+                    // XPending just read the socket and found nothing queued: sleep in poll() until the X server
+                    // writes, work is handed over, or 100 ms pass. Without libc, the old short sleep.
+                    if (!busy) { if (wait == null) Thread.sleep(2) else wait.await(fd, IdleWait.TIMEOUT_MS) }
                 }
             } catch (_: InterruptedException) {
             } catch (error: Throwable) {
@@ -159,6 +167,8 @@ class X11Capture : CaptureBackend {
                 }
                 display = null
                 running = false
+                idle?.close()
+                idle = null
             }
         }
         ready.await(2, TimeUnit.SECONDS)
@@ -168,6 +178,7 @@ class X11Capture : CaptureBackend {
     override fun uninstall() {
         gate?.crossed = false
         running = false
+        idle?.wake()
         runCatching { loop?.join(1_000) }
         loop = null
     }
@@ -179,6 +190,7 @@ class X11Capture : CaptureBackend {
         var result = fallback
         val done = CountDownLatch(1)
         work += { try { result = job() } finally { done.countDown() } }
+        idle?.wake()
         done.await(500, TimeUnit.MILLISECONDS)
         return result
     }
@@ -228,7 +240,7 @@ class X11Capture : CaptureBackend {
             grabbed = false
         }
         to?.let { x.XWarpPointer(d, NativeLong(0), root, 0, 0, 0, 0, it.x, it.y) }
-        lastX = Int.MIN_VALUE
+        pointerAt.forget()
         x.XFlush(d)
     }
 
@@ -249,6 +261,9 @@ class X11Capture : CaptureBackend {
     }
     // The mask must outlive the call only for the call, but keeping it costs nothing.
     private var keep: Memory? = null
+    /** XQueryPointer's root and child windows, which aren't used; made once. */
+    private val rootOut = Memory(8)
+    private val childOut = Memory(8)
 
     private fun blankCursor(x: X11, d: Pointer): NativeLong {
         val data = Memory(1).apply { setByte(0, 0) }
@@ -322,13 +337,13 @@ class X11Capture : CaptureBackend {
             when (evtype) {
                 XI_RAW_MOTION -> {
                     val (rawDx, rawDy) = X11Input.rawDelta(data, wide)
-                    val px = IntByReference(); val py = IntByReference()
-                    val ok = x.XQueryPointer(d, root, Memory(8), Memory(8), px, py, IntByReference(), IntByReference(), IntByReference()) != 0
-                    if (!ok) return
-                    val dx = rawDx ?: if (lastX == Int.MIN_VALUE) 0.0 else (px.value - lastX).toDouble()
-                    val dy = rawDy ?: if (lastX == Int.MIN_VALUE) 0.0 else (py.value - lastY).toDouble()
-                    lastX = px.value; lastY = py.value
-                    sink(HookEvent.Motion(px.value, py.value, dx, dy, false))
+                    // The raw deltas with the last known place; the X server is asked at most at 60 Hz.
+                    val motion = pointerAt.next(rawDx, rawDy) {
+                        val px = IntByReference(); val py = IntByReference()
+                        val ok = x.XQueryPointer(d, root, rootOut, childOut, px, py, IntByReference(), IntByReference(), IntByReference()) != 0
+                        if (ok) Point(px.value, py.value) else null
+                    } ?: return
+                    sink(motion)
                 }
                 // Kept for the gate, so a key held here when the pointer crosses is let go here.
                 XI_RAW_KEY_PRESS, XI_RAW_KEY_RELEASE -> {
@@ -360,6 +375,107 @@ class X11Capture : CaptureBackend {
         const val XI_RAW_BUTTON_PRESS = 15
         const val XI_RAW_BUTTON_RELEASE = 16
         const val XI_RAW_MOTION = 17
+    }
+}
+
+/**
+ * Where the pointer is for raw moves while it's on this PC. XQueryPointer is a round trip to the X server; a gaming
+ * mouse sends a thousand raw events a second, so the place is asked at most every [QUERY_MS], and moves in between
+ * carry the raw deltas with the place last asked. A move with no deltas (scroll valuators only) is measured from the
+ * places asked, as before, and dropped when it isn't time to ask.
+ */
+class PointerThrottle(private val clock: () -> Long = { System.nanoTime() / 1_000_000 }) {
+    private var last: Point? = null
+    private var askedAt = Long.MIN_VALUE / 2
+
+    fun next(rawDx: Double?, rawDy: Double?, query: () -> Point?): HookEvent.Motion? {
+        val now = clock()
+        val due = last == null || now - askedAt >= QUERY_MS
+        if (!due) {
+            val at = last ?: return null
+            if (rawDx == null && rawDy == null) return null
+            return HookEvent.Motion(at.x, at.y, rawDx ?: 0.0, rawDy ?: 0.0, false)
+        }
+        val before = last
+        val at = query() ?: return null
+        askedAt = now
+        last = at
+        val dx = rawDx ?: if (before == null) 0.0 else (at.x - before.x).toDouble()
+        val dy = rawDy ?: if (before == null) 0.0 else (at.y - before.y).toDouble()
+        return HookEvent.Motion(at.x, at.y, dx, dy, false)
+    }
+
+    /** The pointer was put somewhere else (warped back from the Mac): asked again on the next move. */
+    fun forget() { last = null }
+
+    companion object {
+        const val QUERY_MS = 16L
+    }
+}
+
+/**
+ * The X thread's idle wait: poll() on the X connection and a wake pipe, so the thread sleeps instead of waking 500
+ * times a second, and [wake] (work handed over, or stopping) ends the wait at once. Linux and macOS share the poll()
+ * and pipe() used here.
+ */
+class IdleWait private constructor(private val libc: Libc, private val readFd: Int, private val writeFd: Int) {
+    @Suppress("FunctionName")
+    interface Libc : Library {
+        fun pipe(fds: IntArray): Int
+        fun poll(fds: Pointer, count: NativeLong, timeoutMs: Int): Int
+        fun read(fd: Int, buffer: ByteArray, count: NativeLong): NativeLong
+        fun write(fd: Int, buffer: ByteArray, count: NativeLong): NativeLong
+        fun close(fd: Int): Int
+    }
+
+    /** A byte is in the pipe already: more wakes don't write, so the pipe never fills. */
+    private val pending = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var closed = false
+    private val fds = Memory(16)
+    private val drain = ByteArray(64)
+
+    /** Waits until [fd] can be read, [wake] is called, or [timeoutMs] pass. True when [fd] has data. */
+    fun await(fd: Int, timeoutMs: Int): Boolean {
+        if (closed) return false
+        // struct pollfd { int fd; short events; short revents; }, twice.
+        fds.setInt(0, fd); fds.setShort(4, POLLIN); fds.setShort(6, 0)
+        fds.setInt(8, readFd); fds.setShort(12, POLLIN); fds.setShort(14, 0)
+        val ready = libc.poll(fds, NativeLong(2), timeoutMs)
+        // An error (a signal, or a bad descriptor) mustn't turn this into a busy loop.
+        if (ready < 0) Thread.sleep(2)
+        if (ready <= 0) return false
+        if (fds.getShort(14).toInt() and POLLIN.toInt() != 0) {
+            // Read first, then allow the next write: a wake in between leaves a byte, which only wakes once more.
+            libc.read(readFd, drain, NativeLong(drain.size.toLong()))
+            pending.set(false)
+        }
+        return fds.getShort(6).toInt() != 0
+    }
+
+    fun wake() {
+        if (closed || !pending.compareAndSet(false, true)) return
+        runCatching { libc.write(writeFd, byteArrayOf(1), NativeLong(1)) }
+    }
+
+    fun close() {
+        if (closed) return
+        closed = true
+        runCatching { libc.close(readFd); libc.close(writeFd) }
+    }
+
+    companion object {
+        const val TIMEOUT_MS = 100
+        private const val POLLIN: Short = 1
+
+        private val libc: Libc? by lazy { runCatching { Native.load("c", Libc::class.java) }.getOrNull() }
+
+        /** Null where libc can't be loaded or the pipe can't be made: the X thread then sleeps briefly instead. */
+        fun open(): IdleWait? = runCatching {
+            val c = libc ?: return null
+            val pair = IntArray(2)
+            if (c.pipe(pair) != 0) return null
+            IdleWait(c, pair[0], pair[1])
+        }.getOrNull()
     }
 }
 

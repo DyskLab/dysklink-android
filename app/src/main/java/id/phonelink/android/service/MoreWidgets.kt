@@ -23,6 +23,11 @@ import id.phonelink.android.core.ConnectionManager
 import id.phonelink.android.core.NotchAction
 import id.phonelink.android.core.NotchSnapshot
 import id.phonelink.android.core.Peer
+import id.phonelink.android.core.WakeFlow
+import id.phonelink.android.core.WakeOnLan
+import id.phonelink.android.core.WakeState
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 
 /** Widgets fed by the Mac notch and the connected devices. They redraw when either changes. */
 object Widgets {
@@ -220,6 +225,68 @@ object Widgets {
         }
     }
 
+    private val wakeScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main)
+
+    private fun toast(context: Context, text: String) =
+        android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_LONG).show()
+
+    /**
+     * The Wake Mac button. Starts the service when it isn't running and sends either way; [pending] is finished
+     * within about 8 seconds. Says what really happened: sent first, then whether the Mac woke within 45 seconds.
+     */
+    fun wake(context: Context, pending: android.content.BroadcastReceiver.PendingResult) {
+        val app = context.applicationContext
+        wakeScope.launch {
+            try {
+                val connections = if (PhoneLinkService.start(app)) {
+                    kotlinx.coroutines.withTimeoutOrNull(SERVICE_WAIT_MS) {
+                        PhoneLinkService.connectionManager.first { it != null }
+                    }
+                } else {
+                    null
+                }
+                if (connections == null) return@launch toast(app, wakeWithoutService(app))
+                val target = connections.peers.value.firstOrNull { it.isMac && it.isPaired && it.canWake }
+                when {
+                    target == null -> toast(app, "No Mac to wake yet. Connect once so DyskLink learns its address.")
+                    target.isAwake -> toast(app, "${target.name} is already awake")
+                    else -> {
+                        val sent = connections.wakeMac(target.id)
+                        val state = connections.peers.value.firstOrNull { it.id == target.id }?.wake ?: WakeState.NotSent
+                        toast(app, WakeFlow.summary(if (sent) state else WakeState.NotSent, target.name))
+                        if (sent) followWake(app, connections, target)
+                    }
+                }
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
+    /** The second toast, once the Mac connected or the wait ran out. The running service keeps the app alive. */
+    private fun followWake(context: Context, connections: ConnectionManager, target: Peer) {
+        wakeScope.launch {
+            val result = kotlinx.coroutines.withTimeoutOrNull(WakeFlow.WAIT_MS + 15_000) {
+                connections.peers.map { list -> list.firstOrNull { it.id == target.id }?.wake }
+                    .first { it is WakeState.Woke || it is WakeState.DidntWake }
+            } ?: return@launch
+            toast(context, WakeFlow.summary(result, target.name))
+        }
+    }
+
+    /** Android refused to start the service: the packet is sent from the saved address, without waiting for the Mac. */
+    private suspend fun wakeWithoutService(context: Context): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val record = ConnectionManager.storedRecords(context.filesDir).values
+            .firstOrNull { it.platform == "macos" && it.wakeMacs.isNotEmpty() }
+            ?: return@withContext "No Mac to wake yet. Open DyskLink and connect once so it learns the Mac's address."
+        val route = runCatching { WifiWake.route(context) }.getOrNull()
+        val sent = WakeOnLan.send(record.wakeMacs, listOf(route?.broadcast, record.wakeBroadcast), route?.bind)
+        if (sent) "Wake signal sent to ${record.name}. Open DyskLink to see whether it connects."
+        else "Couldn't send the wake signal. Check that this phone is on Wi-Fi."
+    }
+
+    private const val SERVICE_WAIT_MS = 6_000L
+
     /** Runs a widget button. True when it was one of these. */
     fun handle(context: Context, kind: String?, value: String?): Boolean {
         val connections: ConnectionManager = PhoneLinkService.connectionManager.value ?: return false
@@ -232,19 +299,6 @@ object Widgets {
                 connections.sendMacAction(if (mac?.info?.keepAwake == "active") "awake.stop" else "awake.start")
             WidgetShortcut.RingMac.name -> mac?.let { connections.ringMac(it.id, true) }
             WidgetShortcut.PlayPause.name -> mac?.let { connections.sendMedia(it.id, "play_pause") }
-            WidgetShortcut.WakeMac.name -> {
-                val target = connections.peers.value.firstOrNull { it.isMac && it.isPaired && it.canWake }
-                val message = when {
-                    target == null -> "No Mac to wake yet. Connect once so DyskLink learns its address."
-                    target.isConnected -> "${target.name} is already awake"
-                    else -> {
-                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { connections.wakeMac(target.id) }
-                        "Waking ${target.name}…"
-                    }
-                }
-                android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
-                return true
-            }
             else -> return false
         }
         if (mac == null) android.widget.Toast.makeText(context, "Not connected to a Mac", android.widget.Toast.LENGTH_SHORT).show()

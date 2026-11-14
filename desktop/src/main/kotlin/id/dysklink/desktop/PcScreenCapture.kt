@@ -20,6 +20,8 @@ import java.io.ByteArrayOutputStream
 import javax.imageio.IIOImage
 import javax.imageio.ImageIO
 import javax.imageio.ImageWriteParam
+import javax.imageio.ImageWriter
+import javax.imageio.stream.MemoryCacheImageOutputStream
 
 /**
  * This PC's screen for a phone, through java.awt.Robot: GDI on Windows, XGetImage on X11. Portable and needs nothing
@@ -117,24 +119,37 @@ object ScreenPictures {
     /** The usual pointer arrow, 16 units tall, tip at 0, 0. */
     private val ARROW = listOf(0.0 to 0.0, 0.0 to 15.0, 4.0 to 11.5, 6.5 to 17.0, 9.0 to 16.0, 6.6 to 10.6, 11.5 to 10.6)
 
-    /** [image] as a JPEG at [quality] (1 to 100). */
-    fun jpeg(image: BufferedImage, quality: Int): ByteArray? {
+    /**
+     * One JPEG writer and its settings per thread (each screen sender has its own), made once rather than per frame.
+     * A writer that threw is thrown away, since its state is unknown after that.
+     */
+    private val writers = ThreadLocal<Pair<ImageWriter, ImageWriteParam>?>()
+
+    private fun writer(): Pair<ImageWriter, ImageWriteParam>? = writers.get() ?: run {
         val writer = ImageIO.getImageWritersByFormatName("jpeg").asSequence().firstOrNull() ?: return null
+        val param = writer.defaultWriteParam.apply { compressionMode = ImageWriteParam.MODE_EXPLICIT }
+        (writer to param).also { writers.set(it) }
+    }
+
+    /**
+     * [image] as a JPEG at [quality] (1 to 100). Written through a memory-cached stream: ImageIO's default stream
+     * would cache each frame in a temp file on disk.
+     */
+    fun jpeg(image: BufferedImage, quality: Int): ByteArray? {
+        val (writer, param) = writer() ?: return null
         val out = ByteArrayOutputStream(64 * 1024)
         return try {
-            ImageIO.createImageOutputStream(out).use { stream ->
+            MemoryCacheImageOutputStream(out).use { stream ->
                 writer.output = stream
-                val param = writer.defaultWriteParam.apply {
-                    compressionMode = ImageWriteParam.MODE_EXPLICIT
-                    compressionQuality = quality.coerceIn(1, 100) / 100f
-                }
+                param.compressionQuality = quality.coerceIn(1, 100) / 100f
                 writer.write(null, IIOImage(image, null, null), param)
+                writer.output = null
             }
             out.toByteArray()
         } catch (_: Exception) {
+            writers.remove()
+            runCatching { writer.dispose() }
             null
-        } finally {
-            writer.dispose()
         }
     }
 }

@@ -258,6 +258,12 @@ interface CaptureBackend {
     val probeHooks: Set<String> get() = emptySet()
     /** Sends an input only the hooks see; each hook swallows it and reports it. */
     fun probe() {}
+    /**
+     * When the system last saw input (Windows' GetLastInputInfo tick), or null where it isn't known. A probe is
+     * injected input, and may or may not move this tick; it's read after a probe's echo, so the next look can tell
+     * real input since then from the probe's own.
+     */
+    fun lastInputTick(): Long? = null
 }
 
 /** The Mac this PC's mouse and keyboard can go to, past [edge] of this PC. Null while it can't (switch off, Mac away). */
@@ -303,6 +309,9 @@ class SharedInputSource(
     private var lastInstallTry = Long.MIN_VALUE / 2
     private var probeSent: Long? = null
     private val probeEchoes = HashSet<String>()
+    /** The system's input tick right after the last probe came back, and whether the hooks saw real input since. */
+    private var probeTick: Long? = null
+    private var activeSinceProbe = true
     // What the Mac holds down because of this PC, released when control ends.
     private val keysDown = HashSet<Int>()
     private val modifiers = HashSet<Int>()
@@ -329,13 +338,18 @@ class SharedInputSource(
     @Synchronized
     fun process(event: HookEvent) {
         try {
+            if (event !is HookEvent.Probe) activeSinceProbe = true
             when (event) {
                 is HookEvent.Motion -> if (crossedTo == null) watch(event) else if (event.forward) move(event.dx, event.dy)
                 is HookEvent.Button -> if (event.forward) button(event.button, event.down)
                 is HookEvent.Wheel -> if (event.forward) wheel(event.dx, event.dy)
                 is HookEvent.Key -> if (event.forward) key(event.mac, event.down)
                 HookEvent.Escape -> end(EndReason.ESCAPE)
-                is HookEvent.Probe -> probeEchoes += event.hook
+                is HookEvent.Probe -> {
+                    probeEchoes += event.hook
+                    // Read after the probe went through, so its own effect on the tick (if any) is in it.
+                    probeTick = runCatching { backend.lastInputTick() }.getOrNull()
+                }
                 is HookEvent.Failed -> {
                     CoreLog.w(TAG, "Input hook failed", event.error)
                     end(EndReason.HOOK_FAILED)
@@ -533,16 +547,31 @@ class SharedInputSource(
             install()
             return
         }
-        if (sent == null || now - sent >= PROBE_EVERY_MS) {
+        // Every second while the pointer is on the Mac, every 10 s otherwise; and only after real input since the
+        // last probe, so a PC left alone sends nothing that could keep its screen from locking.
+        val every = if (crossedTo != null) PROBE_EVERY_MS else IDLE_PROBE_EVERY_MS
+        if (sent == null || now - sent >= every) {
+            if (sent != null && !usedSinceProbe()) return
             probeEchoes.clear()
             probeSent = now
+            activeSinceProbe = false
             runCatching { backend.probe() }
         }
+    }
+
+    /** Real input since the last probe: seen by the hooks, or a system input tick other than the probe's. */
+    private fun usedSinceProbe(): Boolean {
+        if (activeSinceProbe) return true
+        val before = probeTick ?: return true
+        val tick = runCatching { backend.lastInputTick() }.getOrNull() ?: return true
+        return tick != before
     }
 
     private fun install() {
         probeSent = null
         probeEchoes.clear()
+        probeTick = null
+        activeSinceProbe = true
         val ok = runCatching { backend.install(gate, ::sink) }.onFailure { CoreLog.w(TAG, "Install", it) }.getOrDefault(false)
         CoreLog.i(TAG, if (ok) "REMOTE_SOURCE_WATCHING" else "REMOTE_SOURCE_INSTALL_FAILED")
     }
@@ -572,6 +601,8 @@ class SharedInputSource(
         /** No answer from the Mac for this long and this PC takes its input back. */
         const val HEARTBEAT_MS = 2_000L
         const val PROBE_EVERY_MS = 1_000L
+        /** While the pointer is on this PC: a lost hook only matters once the pointer goes to the edge. */
+        const val IDLE_PROBE_EVERY_MS = 10_000L
         const val PROBE_TIMEOUT_MS = 1_000L
         const val REINSTALL_MS = 2_000L
         /** A wheel notch on Windows scrolls 3 lines; about this many pixels on a Mac. */

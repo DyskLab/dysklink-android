@@ -160,10 +160,15 @@ private fun MusicRemoteCard(peer: Peer, link: PhoneRemoteLink, reply: Envelope?)
         CardTitle("Music on ${peer.name}")
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            val art = remember(playing?.art) {
-                playing?.art?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
-                    ?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+            // Decoded off the main thread, and small: it only shows at 52 dp.
+            val artText = playing?.art
+            val artState = androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, artText) {
+                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    artText?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() }
+                        ?.let { id.phonelink.android.core.ImageBounds.decode(it, id.phonelink.android.core.ImageBounds.THUMB_SIDE)?.asImageBitmap() }
+                }
             }
+            val art = artState.value
             if (art != null) {
                 Image(art, null, Modifier.size(52.dp).clip(RoundedCornerShape(10.dp)))
                 Spacer(Modifier.width(12.dp))

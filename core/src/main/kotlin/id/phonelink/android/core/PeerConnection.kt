@@ -29,6 +29,10 @@ class PeerConnection private constructor(
 
     @Volatile var hello: Hello? = null
 
+    /** When the other side last sent anything, its `pong` included. Set by [readLoop]. */
+    @Volatile var lastHeardAt: Long = System.currentTimeMillis()
+        private set
+
     /** The other side is this computer itself. A phone that dials in this way comes through `adb reverse`, over USB. */
     val isLoopback: Boolean = runCatching { socket.inetAddress?.isLoopbackAddress == true }.getOrDefault(false)
 
@@ -57,6 +61,7 @@ class PeerConnection private constructor(
         try {
             while (true) {
                 val envelope = reader.read()
+                lastHeardAt = System.currentTimeMillis()
                 // Closed here: what still arrives isn't handled, as if the socket had closed at once.
                 if (writer.isClosing) throw java.io.IOException("Connection closed")
                 // Only the first hello counts, as everywhere else.

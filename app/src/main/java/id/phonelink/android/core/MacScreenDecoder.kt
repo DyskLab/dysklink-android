@@ -163,7 +163,8 @@ class JpegScreenDecoder(private val onPicture: (android.graphics.Bitmap) -> Unit
             while (running.get()) {
                 val envelope = runCatching { waiting.poll(200, TimeUnit.MILLISECONDS) }.getOrNull() ?: continue
                 val jpeg = JpegFrames.pictureOf(envelope) ?: continue
-                val bitmap = runCatching { android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) }.getOrNull() ?: continue
+                // Checked first: a picture over 4096 on a side is decoded smaller, an absurd one is skipped.
+                val bitmap = ImageBounds.decode(jpeg) ?: continue
                 if (!running.get()) break
                 framesShown++
                 onPicture(bitmap)

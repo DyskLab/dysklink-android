@@ -23,6 +23,8 @@ class Clipboard(
     /** The system clipboard; tests pass their own. */
     private val system: () -> java.awt.datatransfer.Clipboard = { Toolkit.getDefaultToolkit().systemClipboard },
     private val restoreAfterMs: Long = RESTORE_AFTER_MS,
+    /** Whether the clipboard changed, asked before reading it; tests pass their own. */
+    private val gate: ClipGate = ClipGate(),
 ) {
     /** Guarded by [changes]: what this side last saw or set, so it isn't sent back. */
     private var last: String? = read()
@@ -154,12 +156,19 @@ class Clipboard(
             while (!Thread.currentThread().isInterrupted) {
                 runCatching { Thread.sleep(700) }.onFailure { return@thread }
                 if (!enabled) continue
+                // A system call first (Windows' sequence number, X11's selection): an unchanged clipboard isn't read.
+                val look = gate.look()
+                if (look == ClipLook.Unchanged) continue
+                // Held open by another app for a moment (Windows): looked at again next time.
+                if (runCatching { system().availableDataFlavors }.isFailure) { gate.retry(); continue }
                 // Anything set here while reading makes the read stale: it's dropped, and the next look sees the new value.
                 val seen = changes.current()
                 val now = read()
                 if (now == null) {
-                    // Pictures are only checked while there's no text. A cheap look at a sample of pixels comes first;
-                    // only when that changed is every pixel hashed, and only new pixels are encoded and sent.
+                    // Pictures are only checked while there's no text, and only when the clipboard surely changed. A
+                    // cheap look at a sample of pixels comes first; only when that changed is every pixel hashed, and
+                    // only new pixels are encoded and sent.
+                    if (look != ClipLook.Changed) continue
                     val image = readImage() ?: continue
                     val quick = quickFingerprint(image)
                     val unchanged = changes.ifUnchanged(seen) { quick == lastQuick } ?: continue
@@ -384,9 +393,13 @@ class Ringer(private val onStopped: () -> Unit = {}) {
     }
 }
 
-/** A few switches, kept in settings.properties next to the pairing keys. */
+/**
+ * A few switches, kept in settings.properties next to the pairing keys. Written to a temp file in the same folder and
+ * moved over the old one, so a power cut mid-write leaves the old file, not half a new one; the one before that is
+ * kept as settings.properties.bak, read when the file itself is missing or broken.
+ */
 class Settings(private val file: File) {
-    private val values = Properties().apply { runCatching { file.inputStream().use { load(it) } } }
+    private val values = load(file)
 
     fun bool(key: String, default: Boolean) = values.getProperty(key)?.toBooleanStrictOrNull() ?: default
     fun set(key: String, value: Boolean) = set(key, value.toString())
@@ -396,6 +409,39 @@ class Settings(private val file: File) {
     @Synchronized
     fun set(key: String, value: String) {
         values.setProperty(key, value)
-        runCatching { file.outputStream().use { values.store(it, "DyskLink") } }
+        runCatching { save(file, values) }.onFailure { id.phonelink.android.core.CoreLog.w("DyskLink", "Couldn't save the settings", it) }
+    }
+
+    companion object {
+        fun backup(file: File) = File(file.parentFile, file.name + ".bak")
+
+        /** The settings in [file], or in its backup when [file] is missing, empty or garbled. */
+        fun load(file: File): Properties = read(file) ?: read(backup(file)) ?: Properties()
+
+        private fun read(file: File): Properties? = runCatching {
+            if (!file.isFile || file.length() == 0L) return null
+            val bytes = file.readBytes()
+            // A file cut short by a power cut can come back as zeros.
+            if (bytes.any { it == 0.toByte() }) return null
+            Properties().apply { bytes.inputStream().use { load(it) } }
+        }.getOrNull()
+
+        fun save(file: File, values: Properties) {
+            val bytes = java.io.ByteArrayOutputStream().also { values.store(it, "DyskLink") }.toByteArray()
+            val dir = file.absoluteFile.parentFile.also { it.mkdirs() }
+            val temp = File(dir, file.name + ".tmp")
+            FileOutputStream(temp).use { out ->
+                out.write(bytes)
+                out.fd.sync()
+            }
+            // The last good file is the backup, in case this one is lost after all.
+            if (read(file) != null) runCatching { java.nio.file.Files.copy(file.toPath(), backup(file).toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING) }
+            try {
+                java.nio.file.Files.move(temp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: Exception) {
+                // Not atomic here (another file system, or Windows refusing the replace): still a whole file.
+                java.nio.file.Files.move(temp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
     }
 }

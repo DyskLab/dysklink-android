@@ -199,6 +199,9 @@ interface HubEvents {
     fun remote(type: String, event: RemoteEvent?, from: String) {}
     /** Anything at all arrived from the computer [from] (a `pong` included): it's still there. Called often; keep it cheap. */
     fun heard(from: String) {}
+
+    /** A ping from a paired computer: one in control that pings can be timed out when it goes quiet. */
+    fun pinged(from: String) {}
     /** [from] disconnected or was unpaired: anything it held goes. */
     fun remoteGone(from: String) {}
 
@@ -450,6 +453,8 @@ class ComputerHub(
             }
             MessageType.PING -> {
                 connection.post(Envelope(MessageType.PONG))
+                // A Mac in control here pings while crossed; that keeps held keys from being let go.
+                if (paired && isComputer(connection)) runCatching { events.heard(id); events.pinged(id) }
                 return
             }
             MessageType.PONG -> {

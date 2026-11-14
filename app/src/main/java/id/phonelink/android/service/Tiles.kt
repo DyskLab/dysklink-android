@@ -20,13 +20,15 @@ import kotlinx.coroutines.launch
 abstract class DyskTile : TileService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var watching: Job? = null
+    private var serviceRefused = false
 
     protected val connections get() = PhoneLinkService.connectionManager.value
     protected val connectedMacs get() = connections?.peers?.value.orEmpty().filter { it.isMac && it.isPaired && it.isConnected }
 
     override fun onStartListening() {
         super.onStartListening()
-        PhoneLinkService.start(this)
+        // Android may refuse to start it from here; the subtitle then says to open DyskLink.
+        serviceRefused = !PhoneLinkService.start(this)
         refresh()
         watching?.cancel()
         @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -45,6 +47,7 @@ abstract class DyskTile : TileService() {
         val tile = qsTile ?: return
         tile.icon = Icon.createWithResource(this, R.drawable.ic_logo_glyph)
         update(tile)
+        if (serviceRefused && connections == null) setSubtitle(tile, "Open DyskLink to connect")
         tile.updateTile()
     }
 

@@ -47,7 +47,17 @@ data class Peer(
     val wakeEnabled: Boolean? = null,
     /** What its hello listed in `caps`, while connected. */
     val caps: List<String> = emptyList(),
+    /**
+     * Connected, but nothing came from it for two heartbeats: a Mac that went to sleep without closing the
+     * connection. The connection stays until the read timeout; the page offers Wake Mac meanwhile.
+     */
+    val maybeAsleep: Boolean = false,
+    /** The latest Wake Mac try for this device, while it matters. */
+    val wake: WakeState? = null,
 ) {
+    /** Connected and answering. */
+    val isAwake: Boolean get() = isConnected && !maybeAsleep
+
     /** Another phone, paired for files, clipboard, ringing, and battery only. */
     val isPhone: Boolean get() = platform !in PhoneLinkProtocol.COMPUTERS
     /** A Mac, Windows, or Linux computer. */
@@ -178,6 +188,19 @@ class ConnectionManager(
     private var typer: Pake.Typer? = null
     /** A code typed before the other side's `pair.pake` arrived. */
     private var pendingCode: String? = null
+    /** Connections that went quiet for [QUIET_MS]: see [Peer.maybeAsleep]. Replaced whole, never changed in place. */
+    @Volatile private var quiet: Set<String> = emptySet()
+    /** The latest wake try of each Mac, and what watches it. */
+    private val wakes = HashMap<String, WakeState>()
+    private val wakeWatchers = HashMap<String, Job>()
+    private val redial = RedialKicks()
+
+    /** The phone's Wi-Fi for Wake-on-LAN, set by the app. Null, or returning null, sends without binding. */
+    @Volatile var wakeRoute: (() -> WakeRoute?)? = null
+
+    /** Asks the app to look for devices on the network again now, from its shortest wait. */
+    @Volatile var onRescanWanted: (() -> Unit)? = null
+
     /** Devices connected over the USB cable now. Their Wi-Fi dialing waits until the cable is pulled. */
     private val usbPeers = MutableStateFlow<Set<String>>(emptySet())
 
@@ -386,6 +409,8 @@ class ConnectionManager(
             var backoffMs = MIN_BACKOFF_MS
             var peerId: String? = null
             while (isActive) {
+                // A wake signal sent from here to this device while it dials counts too.
+                val kickedAfter = redial.latest
                 // While the cable carries this device, dialing it over Wi-Fi only gets refused. Wait for the cable to go.
                 val known = peerId
                 if (known != null && known in usbPeers.value) {
@@ -411,8 +436,9 @@ class ConnectionManager(
                 }
                 if (peerId?.let { it in usbPeers.value } == true) continue
                 backoffMs = backoffAfter(backoffMs, connectedFor)
-                delay(backoffMs)
-                backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+                // A wake signal to this device ends the wait, and the next ones start again from the shortest.
+                val kicked = redial.wait(backoffMs, kickedAfter, peerId)
+                backoffMs = nextBackoff(backoffMs, kicked)
             }
         }
     }
@@ -585,6 +611,10 @@ class ConnectionManager(
         // Phones only share files, clipboard, ringing, and status with each other. SMS, notifications,
         // control, and the terminal are for Macs.
         // Screen and camera between phones only pass the per-phone switches (see PhoneRules).
+        if (connection.peerId in quiet) locked {
+            quiet = quiet - connection.peerId
+            publishPeers()
+        }
         val fromPhone = isPhone(connection)
         if (fromPhone && !PHONE_MESSAGES.contains(envelope.type) && !envelope.type.startsWith("file.") && envelope.type !in PhoneRules.ALL) return
         if (fromPhone && !_phonesEnabled.value) return connection.close()
@@ -1358,10 +1388,15 @@ class ConnectionManager(
 
     // Status
 
-    fun broadcastInfo() = onIo {
-        val info = localInfo()
-        val paired = synchronized(lock) { connections.filterKeys { it in records }.values.toList() }
-        paired.forEach { it.post(Envelope(MessageType.INFO, info = info)) }
+    fun broadcastInfo() {
+        // Nothing connected: nothing to tell, and reading the battery and the rest isn't needed.
+        if (synchronized(lock) { connections.keys.none { it in records } }) return
+        onIo {
+            val paired = synchronized(lock) { connections.filterKeys { it in records }.values.toList() }
+            if (paired.isEmpty()) return@onIo
+            val info = localInfo()
+            paired.forEach { it.post(Envelope(MessageType.INFO, info = info)) }
+        }
     }
 
     // Features
@@ -1438,11 +1473,58 @@ class ConnectionManager(
         targets.forEach { postTo(it, Envelope(MessageType.MAC_ACTION, macAction = action)) }
     }
 
-    /** Sends Wake-on-LAN to a paired Mac. False when its address isn't known or nothing could be sent. */
+    /**
+     * Sends Wake-on-LAN to a paired Mac over the phone's Wi-Fi, then follows it in [Peer.wake] for [WakeFlow.WAIT_MS]:
+     * that device is dialed again at once and from the shortest wait, and the network is scanned again. False when
+     * its address isn't known or nothing could be sent. Sent doesn't mean woken: [Peer.wake] says that.
+     */
     suspend fun wakeMac(peerId: String): Boolean {
         val record = synchronized(lock) { records[peerId] } ?: return false
         if (record.wakeMacs.isEmpty()) return false
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { WakeOnLan.send(record.wakeMacs, record.wakeBroadcast) }
+        val route = runCatching { wakeRoute?.invoke() }.getOrNull()
+        val sent = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            WakeOnLan.send(record.wakeMacs, listOf(route?.broadcast, record.wakeBroadcast), route?.bind)
+        }
+        val state = WakeFlow.sent(sent, System.currentTimeMillis(), viaWifi = route != null)
+        val stale = locked {
+            wakes[peerId] = state
+            publishPeers()
+            // A connection that went quiet is most likely the Mac asleep. It's dropped, so the new connection of the
+            // woken Mac isn't refused as a duplicate of it.
+            if (sent && peerId in quiet) connections[peerId] else null
+        }
+        stale?.close()
+        if (sent) watchWake(peerId)
+        return sent
+    }
+
+    private fun watchWake(peerId: String) {
+        val job = scope.launch(Dispatchers.IO) {
+            onRescanWanted?.invoke()
+            var lastKick = 0L
+            while (isActive) {
+                val now = System.currentTimeMillis()
+                if (now - lastKick >= WAKE_REDIAL_MS) {
+                    redial.kick(peerId)
+                    lastKick = now
+                }
+                val done = locked {
+                    val current = wakes[peerId] ?: return@locked true
+                    // Something heard from it after the signal: a new connection's hello, or a pong on the old one.
+                    val sentAt = (current as? WakeState.Waiting)?.sentAt ?: 0L
+                    val awake = connections[peerId]?.let { it.lastHeardAt >= sentAt && peerId !in quiet } == true
+                    val next = WakeFlow.step(current, awake, now, records[peerId]?.wakeEnabled, infos[peerId]?.isCharging?.not())
+                    if (next != current) {
+                        wakes[peerId] = next
+                        publishPeers()
+                    }
+                    next !is WakeState.Waiting
+                }
+                if (done) break
+                delay(WAKE_CHECK_MS)
+            }
+        }
+        synchronized(lock) { wakeWatchers.put(peerId, job) }?.cancel()
     }
 
     fun sendNotchAction(peerId: String, action: NotchAction) {
@@ -1519,7 +1601,16 @@ class ConnectionManager(
 
     /** Heartbeat: without a reply, the read timeout closes the dead connection. */
     fun ping() = onIo {
-        val all = synchronized(lock) { connections.values.toList() }
+        val all = locked {
+            // Before this ping: two heartbeats without an answer mark the device as maybe asleep.
+            val now = System.currentTimeMillis()
+            val silent = connections.filterValues { now - it.lastHeardAt > QUIET_MS }.keys.toSet()
+            if (silent != quiet) {
+                quiet = silent
+                publishPeers()
+            }
+            connections.values.toList()
+        }
         all.forEach { it.post(Envelope(MessageType.PING)) }
     }
 
@@ -1575,6 +1666,9 @@ class ConnectionManager(
                 viaUsb = connections.containsKey(id) && connectionHosts[id] == PhoneLinkProtocol.USB_HOST,
                 wakeEnabled = record?.wakeEnabled,
                 caps = hello?.caps.orEmpty(),
+                maybeAsleep = connections.containsKey(id) && id in quiet,
+                // A try that failed stops mattering once the Mac is back.
+                wake = wakes[id]?.takeUnless { it is WakeState.DidntWake && connections.containsKey(id) && id !in quiet },
             )
         }.sortedWith(compareBy({ !it.isConnected }, { it.name.lowercase() }))
     }
@@ -1643,6 +1737,24 @@ class ConnectionManager(
         private const val STABLE_CONNECTION_MS = 30_000L
         /** After the cable is pulled, Wi-Fi is tried again this soon. */
         private const val USB_HANDBACK_MS = 300L
+
+        /** Two heartbeats (25 s each) without anything from a device: it's probably asleep. */
+        const val QUIET_MS = 45_000L
+        /** While a wake try is followed: how often it's checked, and how often the Mac is dialed again at once. */
+        private const val WAKE_CHECK_MS = 1_000L
+        private const val WAKE_REDIAL_MS = 10_000L
+
+        /** The wait after this one: the shortest after a wake signal (a kick), otherwise twice as long, up to 30 s. */
+        fun nextBackoff(currentMs: Long, kicked: Boolean): Long =
+            if (kicked) MIN_BACKOFF_MS else (currentMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+
+        /**
+         * The paired devices kept in [directory], read without starting a manager: the widget can wake a Mac this way
+         * when the service can't be started.
+         */
+        fun storedRecords(directory: File): Map<String, PairedRecord> = runCatching {
+            protocolJson.decodeFromString(recordsSerializer, File(directory, "paired.json").readText())
+        }.getOrDefault(emptyMap())
 
         /** The wait before the next dial: back to the shortest only after a connection that held for a while. */
         fun backoffAfter(currentMs: Long, connectedForMs: Long?): Long =

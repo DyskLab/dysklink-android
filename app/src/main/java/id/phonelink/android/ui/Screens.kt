@@ -1043,29 +1043,59 @@ private fun ChargeChip(label: String, on: Boolean, modifier: Modifier, onClick: 
     }
 }
 
-/** Wakes a sleeping Mac with Wake-on-LAN, then waits for it to connect. */
+/**
+ * Wakes a sleeping Mac with Wake-on-LAN over Wi-Fi, then follows [Peer.wake]: sent, then woke or didn't within
+ * 45 seconds. When it didn't, a card says why it may not have, from what the Mac reported about itself.
+ */
 @Composable
 private fun WakeRow(peer: Peer, onWake: suspend () -> Boolean) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var status by remember(peer.id) { mutableStateOf<String?>(null) }
-    var busy by remember(peer.id) { mutableStateOf(false) }
+    var sending by remember(peer.id) { mutableStateOf(false) }
+    val wake = peer.wake
+    val waiting = wake is id.phonelink.android.core.WakeState.Waiting
     Spacer(Modifier.height(12.dp))
-    PrimaryButton(if (busy) "Waking…" else "Wake Mac", Modifier.fillMaxWidth()) {
-        if (busy) return@PrimaryButton
-        busy = true
+    PrimaryButton(
+        when {
+            sending -> "Sending…"
+            waiting -> "Waiting for the Mac…"
+            wake is id.phonelink.android.core.WakeState.DidntWake -> "Try again"
+            else -> "Wake Mac"
+        },
+        Modifier.fillMaxWidth(),
+    ) {
+        if (sending || waiting) return@PrimaryButton
+        sending = true
         scope.launch {
-            val sent = onWake()
-            status = if (sent) "Sent. A sleeping Mac usually connects within 10–30 seconds." else "Couldn't send. Check that this phone is on Wi-Fi."
-            kotlinx.coroutines.delay(4000)
-            busy = false
+            try {
+                onWake()
+            } finally {
+                sending = false
+            }
         }
     }
-    val note = status ?: when (peer.wakeEnabled) {
-        false -> "\"Wake for network access\" is off on the Mac (System Settings › Battery › Options), so it may not wake."
-        else -> "Works when the Mac is asleep on power and on the same network. A Mac that is shut down can't be woken."
+    val note = when (wake) {
+        id.phonelink.android.core.WakeState.NotSent -> "Couldn't send the wake signal. Check that this phone is on Wi-Fi."
+        is id.phonelink.android.core.WakeState.Waiting ->
+            "Wake signal sent" + (if (wake.viaWifi) " on Wi-Fi" else "") + ". A Mac that heard it usually connects within 10 to 30 seconds."
+        is id.phonelink.android.core.WakeState.DidntWake -> null
+        else -> when (peer.wakeEnabled) {
+            false -> "\"Wake for network access\" is off on the Mac (System Settings › Battery › Options), so it may not wake."
+            else -> "Works when the Mac is asleep on power and on the same network. A Mac that is shut down can't be woken."
+        }
     }
-    Spacer(Modifier.height(6.dp))
-    Text(note, color = Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp)
+    if (note != null) {
+        Spacer(Modifier.height(6.dp))
+        Text(note, color = if (wake == id.phonelink.android.core.WakeState.NotSent) Palette.AmberText else Palette.TextFaint, fontSize = 12.sp, lineHeight = 17.sp)
+    }
+    if (wake is id.phonelink.android.core.WakeState.DidntWake) {
+        Spacer(Modifier.height(10.dp))
+        Text("Your Mac didn't wake up", color = Palette.AmberText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("The signal went out, but the Mac didn't connect within 45 seconds. Usually because:", color = Palette.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+        id.phonelink.android.core.WakeFlow.reasons(wake).forEach { reason ->
+            Spacer(Modifier.height(4.dp))
+            Text("•  $reason", color = Palette.TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+    }
 }
 
 @Composable
@@ -1130,8 +1160,22 @@ private fun DetailScreen(
                     Text(peer.name, color = Palette.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(info?.model ?: peer.model, color = Palette.TextSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(8.dp))
-                    if (peer.isConnected) StatusPill(if (peer.viaUsb) "Connected over USB" else "Connected", Palette.Mint) else StatusPill("Not connected", Palette.TextFaint)
+                    when {
+                        peer.isConnected && peer.maybeAsleep && peer.isMac -> StatusPill("Not answering", Palette.AmberText)
+                        peer.isConnected -> StatusPill(if (peer.viaUsb) "Connected over USB" else "Connected", Palette.Mint)
+                        else -> StatusPill("Not connected", Palette.TextFaint)
+                    }
                 }
+            }
+            if (peer.isConnected && peer.maybeAsleep && peer.isMac) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Nothing has come from the Mac for a while. It may be asleep; wake it, or wait and it shows as not connected.",
+                    color = Palette.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+                if (peer.canWake) WakeRow(peer, onWake)
             }
             if (!peer.isConnected) {
                 Spacer(Modifier.height(12.dp))

@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import androidx.core.app.NotificationCompat
 import androidx.core.app.RemoteInput
 import id.phonelink.android.MainActivity
@@ -103,7 +102,7 @@ object MirrorNotifications {
         item.color?.let { builder.setColor(0xFF000000.toInt() or it) }
         item.avatar?.let { avatar ->
             runCatching { java.util.Base64.getDecoder().decode(avatar) }.getOrNull()
-                ?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                ?.let { id.phonelink.android.core.ImageBounds.decode(it, id.phonelink.android.core.ImageBounds.THUMB_SIDE) }
                 ?.let(builder::setLargeIcon)
         }
         if (item.reply == true) {

@@ -96,6 +96,7 @@ class PhoneLinkService : Service() {
             if (level == id.phonelink.android.core.CoreLog.Level.WARN) android.util.Log.w(tag, message, error) else android.util.Log.i(tag, message)
         }
         super.onCreate()
+        isRunning = true
         createChannels()
         ServiceCompat.startForeground(
             this,
@@ -129,6 +130,9 @@ class PhoneLinkService : Service() {
                 phoneData = PhoneDataImpl(this@PhoneLinkService),
                 keyStoreProtection = pairingKeyProtection(),
             )
+            // Wake-on-LAN goes out on Wi-Fi, and a wake signal looks for the Mac again at once.
+            connections.wakeRoute = { WifiWake.route(this@PhoneLinkService) }
+            connections.onRescanWanted = { rescan.trySend(Unit) }
             manager.value = connections
             launch(Dispatchers.Main) { connections.clipboardAuto.collect { DyskAccessibilityService.refreshCopyDetection() } }
 
@@ -384,6 +388,7 @@ class PhoneLinkService : Service() {
         manager.value?.shutdown()
         manager.value = null
         scope.cancel()
+        isRunning = false
         super.onDestroy()
     }
 
@@ -465,7 +470,7 @@ class PhoneLinkService : Service() {
 
         /** Only what the widgets show, so they redraw only when one of these changes. */
         private fun widgetFields(peer: id.phonelink.android.core.Peer) = listOf(
-            peer.id, peer.name, peer.platform, peer.isPaired, peer.isConnected, peer.canWake,
+            peer.id, peer.name, peer.platform, peer.isPaired, peer.isConnected, peer.canWake, peer.maybeAsleep,
             peer.info?.batteryPercent, peer.info?.isCharging, peer.info?.keepAwake,
         )
 
@@ -484,8 +489,28 @@ class PhoneLinkService : Service() {
             uiVisible.value = visible
         }
 
-        fun start(context: Context) {
-            ContextCompat.startForegroundService(context, Intent(context, PhoneLinkService::class.java))
+        /** The service is running now (between onCreate and onDestroy). */
+        @Volatile var isRunning = false
+            private set
+
+        /**
+         * Starts the service unless it runs already. Android 12 and newer refuse a foreground service started from the
+         * background (a widget update, a tile, boot on some phones); then it's left for the next time DyskLink opens,
+         * and false is returned instead of crashing.
+         */
+        fun start(context: Context): Boolean {
+            if (isRunning) return true
+            return try {
+                ContextCompat.startForegroundService(context, Intent(context, PhoneLinkService::class.java))
+                true
+            } catch (refused: IllegalStateException) {
+                // ForegroundServiceStartNotAllowedException is one of these.
+                android.util.Log.w("PhoneLink", "Can't start the service from the background now", refused)
+                false
+            } catch (refused: SecurityException) {
+                android.util.Log.w("PhoneLink", "Can't start the service", refused)
+                false
+            }
         }
     }
 }
