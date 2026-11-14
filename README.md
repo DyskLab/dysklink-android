@@ -18,8 +18,7 @@
 | <img src="docs/screenshots/01-home.png" width="280" alt="Looking for your Mac"> | <img src="docs/screenshots/02-pairing.png" width="280" alt="Matching the pairing code"> |
 
 **This is the phone app.** The computer apps are [DyskLink for Mac](https://github.com/DyskLab/dysklink-mac) and
-[DyskLink for Windows and Linux](https://github.com/DyskLab/dysklink-desktop), whose source is in [`desktop/`](desktop)
-here. You need one of them for the computer features. The Tools tab works on the phone alone, and two phones with
+[DyskLink for Windows and Linux](https://github.com/DyskLab/dysklink-desktop). You need one of them for the computer features. The Tools tab works on the phone alone, and two phones with
 DyskLink can work together.
 
 > DyskLink is still young, so expect rough edges.
@@ -212,30 +211,10 @@ To stay connected, allow DyskLink to run in the background from the card in the 
 turn on autostart.
 
 ## Windows and Linux
-`desktop/` is DyskLink for Windows and Linux: one Kotlin app (Compose for Desktop) on the same `core/` module as the
-phone app. It plays the computer's part for phones, much like the Mac app: clipboard, files, notifications and calls,
-the phone's screen and camera, the PC's screen and second display on the phone, sound, remotes, Stream Deck, commands
-and terminal, an island at the top of the screen, and PC tools. It also pairs with Macs under Other computers. Releases
-and the user guide are in [DyskLab/dysklink-desktop](https://github.com/DyskLab/dysklink-desktop).
-
-Build and run it with JDK 17. `DYSKLINK_DESKTOP_ONLY=1` leaves out the phone app, so no Android SDK is needed:
-
-```bash
-DYSKLINK_DESKTOP_ONLY=1 ./gradlew :desktop:run                    # on a Mac, also set DYSKLINK_PORT=47831 next to DyskLink for Mac
-DYSKLINK_DESKTOP_ONLY=1 ./gradlew :desktop:createDistributable    # desktop/build/compose/binaries/main/app/DyskLink
-DYSKLINK_DESKTOP_ONLY=1 ./gradlew :desktop:packageMsi             # on Windows; packageExe for the setup .exe
-DYSKLINK_DESKTOP_ONLY=1 ./gradlew :desktop:packageDeb             # on Linux; packageRpm for the .rpm
-```
-
-Each installer can only be made on its own system, so GitHub Actions (`.github/workflows/desktop.yml`) runs the tests
-and then builds them on Windows and Ubuntu runners: `DyskLink-windows-x64.msi`, `DyskLink-windows-x64-setup.exe`,
-`DyskLink-linux-amd64.deb`, `DyskLink-linux-x86_64.rpm`, and `DyskLink-linux-x64.tar.gz`. The Windows build also
-bundles the DyskLink Camera webcam filter (built from [softcam](https://github.com/tshino/softcam)) and the
-[Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) used for the second display. The
-installers are uploaded as workflow artifacts and published by hand to dysklink-desktop. A local build has neither
-driver.
-
-Discovery uses jmDNS with a host name of its own, so it works next to the Bonjour that Windows, macOS, and Avahi run.
+DyskLink for Windows and Linux is in [DyskLab/dysklink-desktop](https://github.com/DyskLab/dysklink-desktop): one
+Kotlin app (Compose for Desktop) on the same `core/` module as the phone app, which it takes from this repository as a
+git submodule. Its source, releases, user guide, and build steps are there. `core/` stays here, so a change to it is
+made here first and then picked up there by moving the submodule forward.
 
 ## Build and install
 You need Android 8 or later on the phone, JDK 17, and the Android SDK. Set `ANDROID_HOME` to the SDK, or put `sdk.dir`
@@ -262,14 +241,15 @@ yourself is signed with your own debug key, so it can't install over a release; 
 pairings.
 
 Then [build the Mac app](https://github.com/DyskLab/dysklink-mac#build-and-run) or the
-[desktop app](#windows-and-linux) and start it.
+[desktop app](https://github.com/DyskLab/dysklink-desktop#build-from-source) and start it.
 
 ## Tests
 ```bash
-./gradlew :core:test :desktop:test :app:testDebugUnitTest
+./gradlew :core:test :app:testDebugUnitTest
 ```
 
-Without the Android SDK, run `DYSKLINK_DESKTOP_ONLY=1 ./gradlew :core:test :desktop:test`. The tests that need a running
+`core/` has no Android code, but this build needs the Android SDK for `app/`. Without it, run the core tests from a
+clone of [dysklink-desktop](https://github.com/DyskLab/dysklink-desktop#build-from-source). The tests that need a running
 Mac app are skipped here. To run them too, use `scripts/integration-test.sh` (phone side) and `scripts/pc-sync-test.sh`
 (Windows/Linux side) in [dysklink-mac](https://github.com/DyskLab/dysklink-mac#tests), with this repository cloned
 next to it.

@@ -1,4 +1,6 @@
 // Pure Kotlin shared by the Android app and the desktop apps: protocol, TLS pairing, connections, and file transfers.
+// DyskLab/dysklink-desktop builds it too, from its android submodule, so it must stay free of Android code and take its
+// plugin versions from the root build (both repositories declare the same ones).
 plugins {
     id("org.jetbrains.kotlin.jvm")
     id("org.jetbrains.kotlin.plugin.serialization")

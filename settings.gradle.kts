@@ -15,6 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "PhoneLink"
-// CI for the desktop apps sets DYSKLINK_DESKTOP_ONLY, so it needs no Android SDK.
-if (System.getenv("DYSKLINK_DESKTOP_ONLY") == null) include(":app")
-include(":core", ":desktop")
+include(":app", ":core")
+// The Windows/Linux app is DyskLab/dysklink-desktop, which takes core/ from this repository as a submodule.
