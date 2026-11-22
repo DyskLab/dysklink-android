@@ -221,7 +221,7 @@ fun FileHistoryScreen(
                 GlassCard(Modifier.padding(top = 12.dp)) {
                     Text(
                         when {
-                            transfers.isEmpty() -> "No files yet. Files you send to your Mac or receive from it show up here."
+                            transfers.isEmpty() -> "No files yet. Files you send to your computers or receive from them show up here."
                             query.isNotBlank() -> "No file names match \"${query.trim()}\"."
                             else -> "Nothing here."
                         },

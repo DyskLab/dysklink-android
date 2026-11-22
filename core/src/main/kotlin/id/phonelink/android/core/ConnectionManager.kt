@@ -106,6 +106,10 @@ data class Peer(
     val canExtend: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_DISPLAY)
     /** A Mac, or a PC that runs the Stream Deck's shortcuts as its own (`pc-deck`). */
     val canDeck: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_DECK)
+    /** A PC that takes `pc:` shortcuts as they are, so the deck offers Ctrl, Alt, Shift, and Win. */
+    val pcKeys: Boolean get() = isComputer && !isMac && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_KEYS)
+    /** "Mac", or "PC" for a Windows or Linux computer, for text that names the other side. */
+    val kindLabel: String get() = if (isComputer && !isMac) "PC" else "Mac"
     /** A Mac, or a PC with the notch tools: Todo, water, and Pomodoro (`pc-notch`). */
     val canNotch: Boolean get() = isComputer && PcRules.serves(platform, caps, PhoneLinkProtocol.CAP_PC_NOTCH)
     /** A Mac, or a PC that types scanned codes and voice typing (`pc-type`). */

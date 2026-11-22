@@ -43,7 +43,7 @@ class DeckTest {
         assertFalse(Deck.isValid(DeckButton("a", "", "⭐", 0, DeckKind.Shortcut, "cmd+c")))
         assertFalse(Deck.isValid(DeckButton("a", "X", "⭐", 0, DeckKind.Media, "eject")))
         assertFalse(Deck.isValid(DeckButton("a", "X", "⭐", 0, DeckKind.Text, "")))
-        assertEquals("Command not on this Mac", Deck.detail(DeckButton("a", "X", "⭐", 0, DeckKind.Command, "gone"), null))
+        assertEquals("Command not on this computer", Deck.detail(DeckButton("a", "X", "⭐", 0, DeckKind.Command, "gone"), null))
         assertEquals("Types Halo dunia", Deck.detail(DeckButton("a", "X", "⭐", 0, DeckKind.Text, "Halo dunia"), null))
     }
 
@@ -59,5 +59,25 @@ class DeckTest {
         assertEquals("fn F11", Deck.describeShortcut("fn+f11"))
         assertEquals("ctrl+shift+cmd+4", Deck.joinShortcut(setOf("cmd", "shift", "ctrl"), "4"))
         assertEquals(null, Deck.joinShortcut(setOf("cmd"), ""))
+    }
+
+    @Test
+    fun pcShortcuts() {
+        assertEquals("pc:ctrl+shift+escape", Deck.normalizeShortcut("pc:Shift + Ctrl + Esc".replace("Esc", "escape")))
+        assertEquals("pc:win+d", Deck.normalizeShortcut("pc:Windows+D"))
+        assertEquals("pc:win+printscreen", Deck.normalizeShortcut("pc:win+printscreen"))
+        assertNull(Deck.normalizeShortcut("pc:cmd+c"))
+        assertNull(Deck.normalizeShortcut("cmd+printscreen"))
+        assertEquals("Ctrl+Shift+T", Deck.describeShortcut("pc:ctrl+shift+t"))
+        assertEquals("Win+PrtSc", Deck.describeShortcut("pc:win+printscreen"))
+        assertEquals("pc:ctrl+win+alt+t", Deck.joinShortcut(setOf("win", "alt", "ctrl"), "t", pc = true))
+        assertEquals(setOf("ctrl", "shift") to "t", Deck.splitShortcut("pc:ctrl+shift+t"))
+        Deck.pcShortcuts.forEach { (name, shortcut) -> assertEquals(shortcut, Deck.normalizeShortcut(shortcut), name) }
+        // To a PC that takes them: as they are. To a Mac or an older PC: the nearest Mac shortcut.
+        assertEquals("pc:win+d", Deck.forComputer("pc:win+d", pcKeys = true))
+        assertEquals("shift+cmd+t", Deck.forComputer("pc:ctrl+shift+t", pcKeys = false))
+        assertEquals("opt+f4", Deck.forComputer("pc:alt+f4", pcKeys = false))
+        assertNull(Deck.forComputer("pc:win+printscreen", pcKeys = false))
+        assertEquals("cmd+c", Deck.forComputer("cmd+c", pcKeys = true))
     }
 }

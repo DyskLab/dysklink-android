@@ -380,11 +380,11 @@ class MainActivity : ComponentActivity() {
             if (text != null && link != null && phones.isNotEmpty()) return@launch chooseLinkTarget(connections, text, phones)
             val peerId = connections.peers.value.let { all -> all.firstOrNull { it.isMac && it.isPaired && it.isConnected } ?: all.firstOrNull { it.isPaired && it.isConnected } }?.id
             when {
-                peerId == null -> toast("No Mac connected")
+                peerId == null -> toast("No computer connected")
                 uris.isNotEmpty() -> sendUris(connections, peerId, uris)
                 text != null -> {
                     connections.shareClipboard(text)
-                    toast("Text sent to the Mac clipboard")
+                    toast("Text sent to the computer's clipboard")
                 }
             }
         }

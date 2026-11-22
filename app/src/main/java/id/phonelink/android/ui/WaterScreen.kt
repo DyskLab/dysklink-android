@@ -158,7 +158,7 @@ fun WaterScreen(onBack: () -> Unit) {
                 }
             }
             Text(
-                "Kept on this phone only, for 7 days. Separate from the water page in the Mac's notch.",
+                "Kept on this phone only, for 7 days. Separate from the water page on your computer.",
                 color = Palette.TextFaint,
                 fontSize = 12.sp,
                 lineHeight = 16.sp,

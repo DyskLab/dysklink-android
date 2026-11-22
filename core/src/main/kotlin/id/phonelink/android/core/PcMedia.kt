@@ -191,10 +191,13 @@ class JpegStreamer(
 
     fun waitMs(): Long = pacer.waitMs(clock())
 
-    /** Queues an encoded picture. False when it was dropped. */
-    fun offer(jpeg: ByteArray): Boolean {
+    /**
+     * Queues an encoded picture. False when it was dropped. [takenAt]: when its capture started, so the time spent
+     * capturing and encoding counts toward the frame interval instead of being added to it.
+     */
+    fun offer(jpeg: ByteArray, takenAt: Long? = null): Boolean {
         if (closed.get()) return false
-        pacer.taken(clock())
+        pacer.taken(takenAt ?: clock())
         if (jpeg.size > JpegFrames.MAX_BYTES) { pacer.tooBig(); return false }
         if (queue.trySend(jpeg).isFailure) { pacer.dropped(); return false }
         return true

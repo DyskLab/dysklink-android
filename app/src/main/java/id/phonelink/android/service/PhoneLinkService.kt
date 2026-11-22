@@ -401,7 +401,7 @@ class PhoneLinkService : Service() {
             NotificationChannel(PAIRING_CHANNEL_ID, "Pairing requests", NotificationManager.IMPORTANCE_HIGH),
         )
         notifications.createNotificationChannel(
-            NotificationChannel(SCREEN_CHANNEL_ID, "Screen requests from Mac", NotificationManager.IMPORTANCE_HIGH),
+            NotificationChannel(SCREEN_CHANNEL_ID, "Screen requests from computers", NotificationManager.IMPORTANCE_HIGH),
         )
         notifications.createNotificationChannel(
             NotificationChannel(SHARING_CHANNEL_ID, "Screen being shared", NotificationManager.IMPORTANCE_LOW),

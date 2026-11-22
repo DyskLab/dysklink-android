@@ -28,7 +28,7 @@ private val PhoneFeature.title: String
         PhoneFeature.Contacts -> "Contacts"
         PhoneFeature.Files -> "Files"
         PhoneFeature.Screen -> "Screen requests"
-        PhoneFeature.Control -> "Control from Mac"
+        PhoneFeature.Control -> "Control from computer"
         PhoneFeature.ScreenTime -> "Screen time"
         PhoneFeature.Gallery -> "Gallery"
     }
@@ -36,20 +36,20 @@ private val PhoneFeature.title: String
 private val PhoneFeature.description: String
     get() = when (this) {
         PhoneFeature.Notifications ->
-            "Notification content appears on the Mac, including messages and verification codes if the app shows them. " +
-                "The Mac can dismiss notifications on the phone."
-        PhoneFeature.Sms -> "The Mac can read the last 300 SMS and send SMS from this phone's number. Your carrier's SMS charges apply."
-        PhoneFeature.Calls -> "The Mac is told about incoming, answered, and missed calls, with their numbers."
-        PhoneFeature.Contacts -> "The Mac can read contact names and numbers. It keeps them in memory only, unless you export them."
-        PhoneFeature.Files -> "The Mac can browse and download files in the phone's internal storage. It can't change or delete files."
+            "Notification content appears on the computer, including messages and verification codes if the app shows them. " +
+                "The computer can dismiss notifications on the phone."
+        PhoneFeature.Sms -> "The computer can read the last 300 SMS and send SMS from this phone's number. Your carrier's SMS charges apply."
+        PhoneFeature.Calls -> "The computer is told about incoming, answered, and missed calls, with their numbers."
+        PhoneFeature.Contacts -> "The computer can read contact names and numbers. It keeps them in memory only, unless you export them."
+        PhoneFeature.Files -> "The computer can browse and download files in the phone's internal storage. It can't change or delete files."
         PhoneFeature.Screen ->
-            "The Mac may request the phone screen. You still have to approve the Android dialog every time, and you can stop from the notification."
+            "The computer may request the phone screen. You still have to approve the Android dialog every time, and you can stop from the notification."
         PhoneFeature.Control ->
-            "The Mac can tap, swipe, and type on the phone. It doesn't work while the phone is locked and never types into password fields. Needs Accessibility permission."
+            "The computer can tap, swipe, and type on the phone. It doesn't work while the phone is locked and never types into password fields. Needs Accessibility permission."
         PhoneFeature.ScreenTime ->
-            "The Mac shows how long you used the phone today and which apps you used most, with their names and icons. Needs Usage access."
+            "The computer shows how long you used the phone today and which apps you used most, with their names and icons. Needs Usage access."
         PhoneFeature.Gallery ->
-            "The Mac can browse your photos and videos, newest first, and open or save them. Photos are only copied when you open or save one."
+            "The computer can browse your photos and videos, newest first, and open or save them. Photos are only copied when you open or save one."
     }
 
 @Composable
@@ -60,13 +60,13 @@ fun SharingScreen(
     onToggle: (PhoneFeature, Boolean) -> Unit,
     onGrant: (PhoneFeature) -> Unit,
 ) {
-    FeatureScaffold(Feature.Sharing.title, onBack) {
+    FeatureScaffold("Phone data for computers", onBack) {
         Column(
             Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                "What you turn on applies to every paired Mac. Data only travels over local, encrypted " +
+                "What you turn on applies to every paired Mac and PC. Data only travels over local, encrypted " +
                     "Wi-Fi, and you can turn it off at any time.",
                 color = Palette.TextSecondary,
                 fontSize = 14.sp,

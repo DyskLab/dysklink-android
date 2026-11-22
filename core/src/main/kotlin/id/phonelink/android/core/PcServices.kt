@@ -323,9 +323,10 @@ class PcTerminals(
             }
             val pty = try {
                 factory()?.open((message.cols ?: 80).coerceIn(10, 500), (message.rows ?: 24).coerceIn(2, 300))
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
+                // Throwable: a native library that fails to load throws an Error, which would end the connection.
                 CoreLog.w(TAG, "The shell couldn't start", error)
-                closed(phoneId, id, "The shell couldn't start.")
+                closed(phoneId, id, "The shell couldn't start on the PC (${error.javaClass.simpleName}: ${error.message.orEmpty().take(120)}).")
                 return
             }
             if (pty == null) {

@@ -221,10 +221,11 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
     }
     LaunchedEffect(state.featureRequest) {
         val name = state.featureRequest?.first ?: return@LaunchedEffect
+        // The deck works with a PC as well as a Mac; the other features asked for this way are the Mac's.
+        if (name == "Deck") { showDeck = true; return@LaunchedEffect }
         val mac = state.peers.firstOrNull { it.isMac && it.isPaired && it.isConnected }
             ?: state.peers.firstOrNull { it.isMac && it.isPaired }
             ?: return@LaunchedEffect
-        if (name == "Deck") { showDeck = true; return@LaunchedEffect }
         Feature.entries.firstOrNull { it.name == name }?.let {
             showPrayer = false; showNetwork = false; showHistory = false; showPhoneTools = false; showWebFiles = false
             showBarcodes = false; showDocScan = false; showTodo = false; showWater = false; showPomodoro = false
@@ -278,16 +279,20 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
             WebFilesScreen(onBack = { showWebFiles = false }, onAllowFiles = { actions.grantPhoneFeature(PhoneFeature.Files) })
         } else if (showDeck) {
             BackHandler { showDeck = false }
-            val mac = state.peers.firstOrNull { it.isMac && it.isPaired && it.isConnected }
+            // A connected Mac first, else a connected PC that runs the deck.
+            val target = state.peers.firstOrNull { it.isMac && it.isPaired && it.isConnected }
+                ?: state.peers.firstOrNull { it.canDeck && it.isPaired && it.isConnected }
             DeckScreen(
-                mac?.name,
-                mac != null,
-                mac?.info?.inputTrusted,
-                mac?.let { state.commands[it.id] }.orEmpty(),
+                target?.name,
+                target != null,
+                target?.info?.inputTrusted,
+                target?.let { state.commands[it.id] }.orEmpty(),
                 onBack = { showDeck = false },
-                sendInput = { event -> mac?.let { actions.sendInput(it.id, event) } },
-                sendMedia = { action -> mac?.let { actions.sendMedia(it.id, action) } },
-                runCommand = { id -> mac?.let { actions.runCommand(it.id, id) } },
+                sendInput = { event -> target?.let { actions.sendInput(it.id, event) } },
+                sendMedia = { action -> target?.let { actions.sendMedia(it.id, action) } },
+                runCommand = { id -> target?.let { actions.runCommand(it.id, id) } },
+                kind = target?.kindLabel ?: if (state.peers.any { it.isMac && it.isPaired }) "Mac" else "computer",
+                pcKeys = target?.pcKeys == true,
             )
         } else if (showNetwork) {
             BackHandler { showNetwork = false }
@@ -370,8 +375,8 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                         },
                     )
                 }
-                Feature.Touchpad -> TouchpadScreen(closeFeature) { actions.sendInput(selected.id, it) }
-                Feature.Media -> MediaScreen(closeFeature) { actions.sendMedia(selected.id, it) }
+                Feature.Touchpad -> TouchpadScreen(closeFeature, kind = selected.kindLabel) { actions.sendInput(selected.id, it) }
+                Feature.Media -> MediaScreen(closeFeature, kind = selected.kindLabel) { actions.sendMedia(selected.id, it) }
                 Feature.Presentation -> PresentationScreen(closeFeature) { actions.sendInput(selected.id, it) }
                 Feature.Commands -> CommandsScreen(
                     state.commands[selected.id].orEmpty(),
@@ -399,7 +404,8 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                     sendInput = { actions.sendInput(selected.id, it) },
                     sendMedia = { actions.sendMedia(selected.id, it) },
                     runCommand = { actions.runCommand(selected.id, it) },
-                    kind = if (selected.isComputer && !selected.isMac) "PC" else "Mac",
+                    kind = selected.kindLabel,
+                    pcKeys = selected.pcKeys,
                 )
                 Feature.Scan -> ScanScreen(state.peers, selected.id, closeFeature, send = actions.sendInput)
                 Feature.Terminal -> TerminalScreen(selected.id, selected.name, selected.isConnected, actions.terminalLink, closeFeature)
@@ -424,7 +430,8 @@ fun PhoneLinkApp(state: UiState, actions: UiActions) {
                 )
             }
             if (feature != null) BackHandler(onBack = closeFeature)
-            if (selected.isConnected && selected.info?.inputTrusted == false && feature != Feature.Sharing) {
+            // A PC has its own hint for this on its page ("Phones can control this PC" off).
+            if (selected.isMac && selected.isConnected && selected.info?.inputTrusted == false && feature != Feature.Sharing) {
                 Text(
                     "Accessibility permission is off on the Mac, so the touchpad, keyboard, and remotes won't work. " +
                         "Press Allow in the DyskLink app on the Mac.",
@@ -543,7 +550,7 @@ private fun HomeScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Stream Deck", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Shortcuts and media on your Mac, and scenes, streaming, and recording in OBS.",
+                            "Shortcuts and media on your computer, and scenes, streaming, and recording in OBS.",
                             color = Palette.TextSecondary,
                             fontSize = 12.sp,
                             lineHeight = 17.sp,
@@ -605,10 +612,10 @@ private fun HomeScreen(
             ) {
                 Radar()
                 Spacer(Modifier.height(10.dp))
-                Text("Looking for your Mac", color = Palette.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("Looking for your computer", color = Palette.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Open DyskLink on your Mac and make sure both are on the same Wi-Fi.",
+                    "Open DyskLink on your Mac or PC and make sure both are on the same Wi-Fi.",
                     color = Palette.TextSecondary,
                     fontSize = 14.sp,
                     textAlign = TextAlign.Center,
@@ -629,7 +636,7 @@ private fun HomeScreen(
             SettingRow(
                 "Connect with other phones",
                 "Other phones with DyskLink on this Wi-Fi can pair with this one to send files, share the clipboard, ring, and see the battery. " +
-                    "SMS, notifications, and control stay with your Macs. Pairing still needs the same code on both phones.",
+                    "SMS, notifications, and control stay with your computers. Pairing still needs the same code on both phones.",
                 state.phonesEnabled,
                 actions.setPhonesEnabled,
             )
@@ -1184,7 +1191,15 @@ private fun DetailScreen(
         // Who this Mac is, at a glance.
         GlassCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                MiniBattery(info?.batteryPercent, info?.isCharging == true)
+                // A desktop PC has no battery: its picture instead of an empty ring.
+                if (info?.batteryPercent == null && peer.isComputer && !peer.isMac) {
+                    Box(
+                        Modifier.size(76.dp).clip(CircleShape).background(Palette.Contrast.copy(alpha = 0.06f)),
+                        contentAlignment = Alignment.Center,
+                    ) { LaptopGlyph(if (peer.isConnected) Palette.Mint else Palette.TextFaint, Modifier.size(38.dp)) }
+                } else {
+                    MiniBattery(info?.batteryPercent, info?.isCharging == true)
+                }
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
                     Text(peer.name, color = Palette.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1385,7 +1400,7 @@ private fun DetailScreen(
         GlassCard(onClick = { onOpenFeature(Feature.Sharing) }) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(Feature.Sharing.title, color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(if (peer.isMac) Feature.Sharing.title else "Phone data for PC", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         "Notifications, SMS, calls, contacts, files, screen, and control. Everything stays off until you turn it on.",
                         color = Palette.TextSecondary,
@@ -1821,7 +1836,7 @@ private fun ManualSheet(onDismiss: () -> Unit, onSubmit: (String, Int) -> Unit) 
             Text("Connect manually", color = Palette.TextPrimary, fontSize = 21.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             Text(
-                "The IP address is shown in the DyskLink app on the Mac.",
+                "The IP address is shown in the DyskLink app on the computer.",
                 color = Palette.TextSecondary,
                 fontSize = 14.sp,
                 textAlign = TextAlign.Center,
@@ -1882,6 +1897,10 @@ private val Feature.pcTitle: String
         Feature.Commands -> "PC commands"
         Feature.MacScreen -> "PC screen"
         Feature.Notch -> "PC tools"
+        Feature.Scan -> "Scan barcodes to PC"
+        Feature.Dictation -> "Voice typing to PC"
+        Feature.DocScan -> "Scan documents to PC"
+        Feature.Sharing -> "Phone data for PC"
         else -> title
     }
 

@@ -93,6 +93,8 @@ fun DeckScreen(
     runCommand: (String) -> Unit,
     /** "Mac", or "PC" for a Windows or Linux PC that serves the deck (`pc-deck`): Cmd works as Ctrl there. */
     kind: String = "Mac",
+    /** A PC that takes PC shortcuts as they are (`pc-keys`): the editor offers Ctrl, Alt, Shift, and Win for it. */
+    pcKeys: Boolean = false,
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
@@ -149,7 +151,7 @@ fun DeckScreen(
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         pressed = button.id
         when (button.kind) {
-            DeckKind.Shortcut -> Deck.normalizeShortcut(button.value)?.let { sendInput(InputEvent("shortcut", key = it)) }
+            DeckKind.Shortcut -> Deck.forComputer(button.value, pcKeys)?.let { sendInput(InputEvent("shortcut", key = it)) }
             DeckKind.Media -> sendMedia(button.value)
             DeckKind.Text -> Dictation.events(button.value).forEach(sendInput)
             DeckKind.Command -> runCommand(button.value)
@@ -231,6 +233,10 @@ fun DeckScreen(
                 if (kind == "Mac") {
                     "Shortcuts and typing need Accessibility permission for DyskLink on the Mac. Mac commands are the ones " +
                         "added in DyskLink on the Mac. Buttons are saved on this phone and work with any paired Mac."
+                } else if (pcKeys) {
+                    "Shortcuts made here with Ctrl, Alt, Shift, and Win are pressed on the PC as they are. Mac shortcuts " +
+                        "run their Windows or Linux match. PC commands are the ones added in DyskLink on the PC. Buttons " +
+                        "are saved on this phone and work with any paired computer."
                 } else {
                     "On a PC, Cmd works as Ctrl and Option as Alt, and Mac shortcuts such as Spotlight or a screenshot run " +
                         "their Windows or Linux match. PC commands are the ones added in DyskLink on the PC. Buttons are saved " +
@@ -257,6 +263,7 @@ fun DeckScreen(
         ButtonEditor(
             initial = current,
             computer = kind,
+            pc = pcKeys,
             isNew = index < 0,
             commands = commands,
             obs = obs,
@@ -421,6 +428,7 @@ private fun ButtonEditor(
     onDelete: () -> Unit,
     onMove: (Int) -> Unit,
     computer: String = "Mac",
+    pc: Boolean = false,
 ) {
     var label by remember { mutableStateOf(initial.label) }
     var icon by remember { mutableStateOf(initial.icon) }
@@ -513,7 +521,7 @@ private fun ButtonEditor(
                 Text("Action", color = Palette.TextSecondary, fontSize = 12.sp)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     DeckKind.entries.forEach { option ->
-                        Chip(option.label, option == kind) {
+                        Chip(if (option == DeckKind.Command) "$computer command" else option.label, option == kind) {
                             if (option != kind) {
                                 kind = option
                                 value = ""
@@ -522,9 +530,9 @@ private fun ButtonEditor(
                     }
                 }
                 when (kind) {
-                    DeckKind.Shortcut -> ShortcutPicker(value, computer) { shortcut, name ->
+                    DeckKind.Shortcut -> ShortcutPicker(value, computer, pc) { shortcut, name ->
                         value = shortcut
-                        if (name != null && (label.isBlank() || Deck.commonShortcuts.any { it.first == label })) label = name
+                        if (name != null && (label.isBlank() || (Deck.commonShortcuts + Deck.pcShortcuts).any { it.first == label })) label = name
                         if (name != null && icon.isEmpty()) icon = shortcutIcon(name)
                     }
                     DeckKind.Media -> FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -743,7 +751,9 @@ private fun ObsCard(obs: ObsState, prefs: android.content.SharedPreferences, cli
  * except a letter or number.
  */
 @Composable
-private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: String, name: String?) -> Unit) {
+private fun ShortcutPicker(value: String, kind: String, pc: Boolean, onChange: (shortcut: String, name: String?) -> Unit) {
+    // A PC that takes PC shortcuts gets Ctrl, Alt, Shift, and Win; a Mac shortcut saved earlier still opens in Mac keys.
+    var pcMode by remember { mutableStateOf(pc && (value.isEmpty() || Deck.isPc(value))) }
     val split = Deck.splitShortcut(value)
     var modifiers by remember { mutableStateOf(split?.first ?: emptySet()) }
     var key by remember { mutableStateOf(split?.second ?: "") }
@@ -752,19 +762,32 @@ private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: Str
     fun update(newModifiers: Set<String>, newKey: String) {
         modifiers = newModifiers
         key = newKey
-        onChange(Deck.joinShortcut(newModifiers, newKey) ?: "", null)
+        onChange(Deck.joinShortcut(newModifiers, newKey, pcMode) ?: "", null)
     }
 
     val preview = Deck.normalizeShortcut(value)
+    if (pc) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Chip("PC keys", pcMode) { if (!pcMode) { pcMode = true; modifiers = emptySet(); key = ""; onChange("", null) } }
+            Chip("Mac keys", !pcMode) { if (pcMode) { pcMode = false; modifiers = emptySet(); key = ""; onChange("", null) } }
+        }
+    }
+    val common = if (pcMode) Deck.pcShortcuts else Deck.commonShortcuts
     Text(
-        preview?.let { (if (kind == "Mac") "On the Mac: " else "On a Mac: ") + Deck.describeShortcut(it) } ?: "Pick a ready-made shortcut, or tap the keys below.",
+        preview?.let {
+            when {
+                Deck.isPc(it) -> "On the PC: "
+                kind == "Mac" -> "On the Mac: "
+                else -> "On a Mac: "
+            } + Deck.describeShortcut(it)
+        } ?: "Pick a ready-made shortcut, or tap the keys below.",
         color = if (preview != null) Palette.MintText else Palette.TextSecondary,
         fontSize = if (preview != null) 16.sp else 12.sp,
         fontWeight = if (preview != null) FontWeight.Bold else FontWeight.Normal,
     )
 
     Text("Ready-made", color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-    val shown = if (showAll) Deck.commonShortcuts else Deck.commonShortcuts.take(8)
+    val shown = if (showAll) common else common.take(8)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         run {
             shown.forEach { (name, shortcut) ->
@@ -778,7 +801,7 @@ private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: Str
         }
     }
     Text(
-        if (showAll) "Show fewer" else "Show all ${Deck.commonShortcuts.size}",
+        if (showAll) "Show fewer" else "Show all ${common.size}",
         color = Palette.MintText,
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
@@ -788,8 +811,8 @@ private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: Str
     Text("Or build your own: hold", color = Palette.TextFaint, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         run {
-            listOf("ctrl", "opt", "shift", "cmd", "fn").forEach { mod ->
-                Chip(Deck.modifierLabels.getValue(mod), mod in modifiers) {
+            (if (pcMode) Deck.pcModifierOrder else listOf("ctrl", "opt", "shift", "cmd", "fn")).forEach { mod ->
+                Chip(if (pcMode) Deck.pcModifierLabels.getValue(mod) else Deck.modifierLabels.getValue(mod), mod in modifiers) {
                     update(if (mod in modifiers) modifiers - mod else modifiers + mod, key)
                 }
             }
@@ -807,7 +830,7 @@ private fun ShortcutPicker(value: String, kind: String, onChange: (shortcut: Str
         modifier = Modifier.fillMaxWidth(),
     )
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Deck.specialKeys.forEach { (id, name) -> Chip(name, key == id) { update(modifiers, id) } }
+        (if (pcMode) Deck.pcSpecialKeys else Deck.specialKeys).forEach { (id, name) -> Chip(name, key == id) { update(modifiers, id) } }
     }
 }
 

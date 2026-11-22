@@ -49,7 +49,7 @@ class IntentTokens(
         /** Far more than the requests any number of Macs can have open at once. */
         const val MAX_TOKENS = 32
         /** Shown when a tap's token is missing, used, replaced, or expired. */
-        const val EXPIRED_MESSAGE = "Request expired. Ask again on the Mac."
+        const val EXPIRED_MESSAGE = "Request expired. Ask again on the computer."
         val shared = IntentTokens()
     }
 }

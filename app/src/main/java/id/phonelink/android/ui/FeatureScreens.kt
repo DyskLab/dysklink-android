@@ -128,7 +128,7 @@ private fun PadButton(label: String, modifier: Modifier = Modifier, height: Int 
 // Touchpad and keyboard
 
 @Composable
-fun TouchpadScreen(onBack: () -> Unit, send: (InputEvent) -> Unit) {
+fun TouchpadScreen(onBack: () -> Unit, kind: String = "Mac", send: (InputEvent) -> Unit) {
     var typed by remember { mutableStateOf("") }
     FeatureScaffold(Feature.Touchpad.title, onBack) {
         Touchpad(Modifier.fillMaxWidth().weight(1f), send)
@@ -150,7 +150,7 @@ fun TouchpadScreen(onBack: () -> Unit, send: (InputEvent) -> Unit) {
                 }
                 typed = value
             },
-            label = { Text("Type to Mac") },
+            label = { Text("Type to $kind") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = {
@@ -303,10 +303,10 @@ fun MediaControls(send: (String) -> Unit) {
 }
 
 @Composable
-fun MediaScreen(onBack: () -> Unit, send: (String) -> Unit) {
+fun MediaScreen(onBack: () -> Unit, kind: String = "Mac", send: (String) -> Unit) {
     FeatureScaffold(Feature.Media.title, onBack) {
         Text(
-            "Controls the active player on the Mac, such as Spotify, YouTube, or Music.",
+            "Controls the active player on the $kind, such as Spotify, YouTube, or ${if (kind == "Mac") "Music" else "VLC"}.",
             color = Palette.TextSecondary,
             fontSize = 14.sp,
             lineHeight = 21.sp,

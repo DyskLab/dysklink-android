@@ -177,7 +177,7 @@ fun PomodoroScreen(onBack: () -> Unit, openExactAlarms: () -> Unit) {
                 )
             }
             Text(
-                "Runs on this phone, also with the screen off. Separate from the Pomodoro in the Mac's notch.",
+                "Runs on this phone, also with the screen off. Separate from the Pomodoro on your computer.",
                 color = Palette.TextFaint,
                 fontSize = 12.sp,
                 lineHeight = 16.sp,

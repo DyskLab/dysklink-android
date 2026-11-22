@@ -212,11 +212,13 @@ class PcScreenSender(
             val wait = streamer.waitMs()
             if (wait > 0) { pause(minOf(wait, 100)); continue }
             val target = display
+            // The interval runs from the start of the capture, so a slow capture and encode don't stretch it.
+            val takenAt = clock()
             val grab = runCatching { source.grab(target, maxLong) }.onFailure { CoreLog.w(TAG, "Screen capture failed", it) }.getOrNull()
             if (!running.get()) break
             if (grab == null || grab.width <= 0 || grab.height <= 0) {
                 if (++failures >= MAX_FAILURES) return end(runCatching { source.failure() }.getOrNull() ?: "This PC's screen couldn't be captured.")
-                pacer.taken(clock())
+                pacer.taken(takenAt)
                 pause(RETRY_MS)
                 continue
             }
@@ -239,7 +241,7 @@ class PcScreenSender(
             val hash = PcScreen.hash(grab.pixels)
             if (!fresh.getAndSet(false) && hash == last) {
                 unchanged++
-                pacer.taken(clock())
+                pacer.taken(takenAt)
                 // A screen that stays still is looked at less often, which saves the PC's time.
                 if (++still > STILL_FRAMES) pause(STILL_MS)
                 continue
@@ -247,11 +249,11 @@ class PcScreenSender(
             still = 0
             val jpeg = runCatching { grab.encode(streamer.quality) }.getOrNull()
             if (jpeg == null || !JpegFrames.looksLikeJpeg(jpeg)) {
-                pacer.taken(clock())
+                pacer.taken(takenAt)
                 continue
             }
             // Dropped (the network is behind, or too big): the same picture is tried again next time.
-            last = if (streamer.offer(jpeg)) { sent++; hash } else null
+            last = if (streamer.offer(jpeg, takenAt)) { sent++; hash } else null
         }
     }
 

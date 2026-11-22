@@ -100,6 +100,11 @@ object PhoneLinkProtocol {
     const val CAP_PC_DISPLAY = "pc-display"
     /** A Windows or Linux computer that runs the phone's Stream Deck: Mac shortcuts made PC ones, media, and typing. */
     const val CAP_PC_DECK = "pc-deck"
+    /**
+     * A Windows or Linux computer that also takes PC shortcuts, written `pc:ctrl+alt+shift+win+key`, as they are,
+     * without the Mac mapping. The deck then offers Ctrl, Alt, Shift, and Win for it.
+     */
+    const val CAP_PC_KEYS = "pc-keys"
     /** A Windows or Linux computer with the notch tools: Todo, water, and Pomodoro (`notch.state`, `notch.action`). */
     const val CAP_PC_NOTCH = "pc-notch"
     /** A Windows or Linux computer that types what the phone scans or hears (barcodes and voice typing, `input`). */
@@ -113,7 +118,7 @@ object PhoneLinkProtocol {
      */
     val PC_SERVICE_CAPS: List<String> = listOf(
         CAP_PC_SOUND_OUT, CAP_PC_COMMANDS, CAP_PC_TERMINAL, CAP_PC_SHARED_INPUT, CAP_PC_SCREEN_OUT,
-        CAP_PC_DECK, CAP_PC_NOTCH, CAP_PC_TYPE, CAP_PC_SCAN,
+        CAP_PC_DECK, CAP_PC_KEYS, CAP_PC_NOTCH, CAP_PC_TYPE, CAP_PC_SCAN,
     )
     /** What DyskLink for Windows and Linux advertises: [CAPS], the phone features it shows, and what it serves. */
     val PC_CAPS: List<String> = CAPS + PC_FEATURE_CAPS + PC_SERVICE_CAPS

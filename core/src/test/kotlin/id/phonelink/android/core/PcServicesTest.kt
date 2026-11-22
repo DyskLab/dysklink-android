@@ -351,7 +351,7 @@ class PcServicesTest {
         assertEquals(mapOf("phone" to 2, "other" to 1), h.terminals.open.value)
         val failing = TerminalHarness(failing = true)
         failing.open("phone", "x")
-        assertEquals("The shell couldn't start.", failing.of(MessageType.TERMINAL_CLOSED, "x").single().second.terminal?.error)
+        assertEquals("The shell couldn't start on the PC (IllegalStateException: no pty).", failing.of(MessageType.TERMINAL_CLOSED, "x").single().second.terminal?.error)
     }
 
     @Test

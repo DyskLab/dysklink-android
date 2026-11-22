@@ -378,13 +378,13 @@ class PhoneSoundService : Service() {
     /** [phone]: the other phone's name, when the sound goes to a phone instead of a computer. */
     private fun notification(phone: String? = null): Notification {
         val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Sound to Mac", NotificationManager.IMPORTANCE_LOW))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Sound to computer", NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, PhoneSoundService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_lock_silent_mode_off)
-            .setContentTitle(if (phone != null) "Playing this phone's sound on $phone" else "Playing this phone's sound on the Mac")
-            .setContentText(if (phone != null) "Music and videos on this phone are heard on $phone." else "Music and videos on this phone are heard on the Mac.")
+            .setContentTitle(if (phone != null) "Playing this phone's sound on $phone" else "Playing this phone's sound on the computer")
+            .setContentText(if (phone != null) "Music and videos on this phone are heard on $phone." else "Music and videos on this phone are heard on the computer.")
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .setOngoing(true)

@@ -75,7 +75,7 @@ fun WebFilesScreen(onBack: () -> Unit, onAllowFiles: () -> Unit) {
                 GlassCard {
                     Text("Allow access to files", color = Palette.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "DyskLink needs All files access to show the phone's folders in a browser. It's the same access Phone data for Mac uses for files.",
+                        "DyskLink needs All files access to show the phone's folders in a browser. It's the same access Phone data uses for files.",
                         color = Palette.TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 17.sp,

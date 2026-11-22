@@ -4,13 +4,13 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-/** What a Stream Deck button does on the Mac. Each maps to a message the Mac already accepts. */
+/** What a Stream Deck button does on the computer. Each maps to a message the Mac (and a PC) already accepts. */
 @Serializable
 enum class DeckKind(val label: String) {
     Shortcut("Shortcut"),
     Media("Media"),
     Text("Type text"),
-    Command("Mac command"),
+    Command("Command"),
     Obs("OBS"),
 }
 
@@ -101,16 +101,102 @@ object Deck {
         "DyskLink Launcher" to "opt+space",
     )
 
+    /**
+     * PC shortcuts, made in the editor for a Windows or Linux PC: `pc:ctrl+alt+shift+win+key`. A PC with `pc-keys`
+     * presses them as they are; for a Mac or an older PC they become the nearest Mac shortcut ([forComputer]).
+     */
+    const val PC = "pc:"
+    val pcModifierOrder = listOf("ctrl", "win", "alt", "shift")
+    private val pcModifierNames = mapOf(
+        "ctrl" to "ctrl", "control" to "ctrl", "alt" to "alt", "opt" to "alt", "option" to "alt", "shift" to "shift",
+        "win" to "win", "windows" to "win", "super" to "win", "meta" to "win",
+    )
+    val pcModifierLabels = mapOf("ctrl" to "Ctrl", "alt" to "Alt", "shift" to "Shift", "win" to "Win")
+    private val pcKeyNames = mapOf(
+        "return" to "Enter", "enter" to "Enter", "tab" to "Tab", "space" to "Space", "delete" to "Backspace", "escape" to "Esc",
+        "esc" to "Esc", "forwarddelete" to "Delete", "left" to "←", "right" to "→", "up" to "↑", "down" to "↓",
+        "pageup" to "Page Up", "pagedown" to "Page Down", "home" to "Home", "end" to "End", "printscreen" to "PrtSc",
+    )
+    val pcSpecialKeys = listOf(
+        "return" to "Enter", "tab" to "Tab", "space" to "Space", "escape" to "Esc", "delete" to "Backspace",
+        "forwarddelete" to "Delete", "printscreen" to "PrtSc", "left" to "←", "right" to "→", "up" to "↑", "down" to "↓",
+    ) + (1..12).map { "f$it" to "F$it" }
+
+    /** Ready-made shortcuts for Windows; most work the same on Linux desktops. */
+    val pcShortcuts: List<Pair<String, String>> = listOf(
+        "Copy" to "pc:ctrl+c",
+        "Paste" to "pc:ctrl+v",
+        "Cut" to "pc:ctrl+x",
+        "Undo" to "pc:ctrl+z",
+        "Redo" to "pc:ctrl+y",
+        "Select all" to "pc:ctrl+a",
+        "Save" to "pc:ctrl+s",
+        "Find" to "pc:ctrl+f",
+        "Print" to "pc:ctrl+p",
+        "New tab" to "pc:ctrl+t",
+        "Reopen tab" to "pc:ctrl+shift+t",
+        "Close tab" to "pc:ctrl+w",
+        "Next tab" to "pc:ctrl+tab",
+        "Previous tab" to "pc:ctrl+shift+tab",
+        "Reload page" to "pc:f5",
+        "New window" to "pc:ctrl+n",
+        "Switch apps" to "pc:alt+tab",
+        "Close app" to "pc:alt+f4",
+        "Full screen" to "pc:f11",
+        "Zoom in" to "pc:ctrl+=",
+        "Zoom out" to "pc:ctrl+-",
+        "Start menu" to "pc:win+s",
+        "Task view" to "pc:win+tab",
+        "Show desktop" to "pc:win+d",
+        "File Explorer" to "pc:win+e",
+        "Settings" to "pc:win+i",
+        "Run" to "pc:win+r",
+        "Minimize all" to "pc:win+m",
+        "Snap left" to "pc:win+left",
+        "Snap right" to "pc:win+right",
+        "Maximize" to "pc:win+up",
+        "Desktop left" to "pc:ctrl+win+left",
+        "Desktop right" to "pc:ctrl+win+right",
+        "Screenshot area" to "pc:win+shift+s",
+        "Screenshot screen" to "pc:win+printscreen",
+        "Emoji picker" to "pc:win+.",
+        "Clipboard history" to "pc:win+v",
+        "Task Manager" to "pc:ctrl+shift+escape",
+        "Lock screen" to "pc:win+l",
+        "DyskLink Launcher" to "pc:alt+space",
+    )
+
+    fun isPc(shortcut: String): Boolean = shortcut.startsWith(PC)
+
+    /**
+     * What to send for a saved shortcut. A PC shortcut goes as it is to a PC that takes them; to a Mac or an older PC it
+     * becomes the nearest Mac shortcut (Ctrl is Command, Alt is Option, Win is dropped), which a PC maps back.
+     */
+    fun forComputer(shortcut: String, pcKeys: Boolean): String? {
+        val normal = normalizeShortcut(shortcut) ?: return null
+        if (!isPc(normal) || pcKeys) return normal
+        val parts = normal.removePrefix(PC).split('+')
+        val mods = parts.dropLast(1).toSet()
+        val mac = buildSet {
+            if ("ctrl" in mods) add("cmd")
+            if ("alt" in mods) add("opt")
+            if ("shift" in mods) add("shift")
+        }
+        val key = parts.last().takeIf { it in keys } ?: return null
+        return (modifierOrder.filter { it in mac } + key).joinToString("+")
+    }
+
     /** Splits a saved shortcut into its modifiers and key, for the editor. */
     fun splitShortcut(shortcut: String): Pair<Set<String>, String>? {
         val normal = normalizeShortcut(shortcut) ?: return null
-        val parts = normal.split('+')
+        val parts = normal.removePrefix(PC).split('+')
         // "cmd+=" splits fine; only a trailing "+" key would be a problem, and normalizing never makes one.
         return parts.dropLast(1).toSet() to parts.last()
     }
 
-    fun joinShortcut(modifiers: Set<String>, key: String): String? =
-        normalizeShortcut((modifierOrder.filter { it in modifiers } + key.lowercase()).joinToString("+"))
+    fun joinShortcut(modifiers: Set<String>, key: String, pc: Boolean = false): String? =
+        if (pc) normalizeShortcut(PC + (pcModifierOrder.filter { it in modifiers } + key.lowercase()).joinToString("+"))
+        else normalizeShortcut((modifierOrder.filter { it in modifiers } + key.lowercase()).joinToString("+"))
 
     /** The same keys the Mac accepts, so the editor can tell before sending. */
     private val keys: Set<String> = buildSet {
@@ -126,9 +212,14 @@ object Deck {
         "home" to "Home", "end" to "End",
     )
 
-    /** "Cmd + Shift + 4" becomes "cmd+shift+4", or null if the Mac wouldn't accept it. */
+    /** PC keys: the Mac's, and PrintScreen. */
+    private val pcKeys: Set<String> = keys + "printscreen"
+
+    /** "Cmd + Shift + 4" becomes "cmd+shift+4", or null if the Mac wouldn't accept it. "pc:Win+D" becomes "pc:win+d". */
     fun normalizeShortcut(text: String): String? {
-        val raw = text.lowercase().replace(" ", "")
+        val lower = text.lowercase().replace(" ", "")
+        if (lower.startsWith(PC)) return normalizePc(lower.removePrefix(PC))
+        val raw = lower
         if (raw.isEmpty() || raw.length > 40) return null
         val plusKey = raw.endsWith("++")
         val parts = raw.split('+').filter { it.isNotEmpty() }.toMutableList()
@@ -140,8 +231,26 @@ object Deck {
         return (modifierOrder.filter { it in mods } + key).joinToString("+")
     }
 
-    /** "cmd+shift+4" as the Mac shows it: "⇧⌘4". */
+    private fun normalizePc(raw: String): String? {
+        if (raw.isEmpty() || raw.length > 40) return null
+        val plusKey = raw.endsWith("++")
+        val parts = raw.split('+').filter { it.isNotEmpty() }.toMutableList()
+        if (plusKey) parts += "="
+        val key = parts.removeLastOrNull() ?: return null
+        if (key !in pcKeys) return null
+        val mods = parts.map { pcModifierNames[it] ?: return null }.toMutableSet()
+        if (plusKey) mods += "shift"
+        return PC + (pcModifierOrder.filter { it in mods } + key).joinToString("+")
+    }
+
+    /** "cmd+shift+4" as the Mac shows it: "⇧⌘4". "pc:ctrl+shift+t" as a PC shows it: "Ctrl+Shift+T". */
     fun describeShortcut(shortcut: String): String {
+        if (isPc(shortcut)) {
+            val parts = shortcut.removePrefix(PC).split('+')
+            val key = parts.last()
+            return (pcModifierOrder.filter { it in parts.dropLast(1) }.map { pcModifierLabels.getValue(it) } +
+                (pcKeyNames[key] ?: key.uppercase())).joinToString("+")
+        }
         val parts = shortcut.split('+')
         val key = parts.last()
         val mods = parts.dropLast(1)
@@ -165,7 +274,7 @@ object Deck {
         DeckKind.Shortcut -> normalizeShortcut(button.value)?.let(::describeShortcut) ?: "Not a valid shortcut"
         DeckKind.Media -> media.firstOrNull { it.first == button.value }?.second ?: "Media"
         DeckKind.Text -> "Types " + button.value.replace('\n', ' ').let { if (it.length > 18) it.take(17) + "…" else it }
-        DeckKind.Command -> commandName ?: "Command not on this Mac"
+        DeckKind.Command -> commandName ?: "Command not on this computer"
         DeckKind.Obs -> ObsAction.decode(button.value)?.let(ObsProtocol::label) ?: "OBS"
     }
 

@@ -51,7 +51,7 @@ class ClipboardSendActivity : Activity() {
     private fun send(text: String?) {
         val connections = PhoneLinkService.connectionManager.value
         when {
-            connections == null || connections.peers.value.none { it.isPaired } -> finishWith("No paired Mac")
+            connections == null || connections.peers.value.none { it.isPaired } -> finishWith("No paired computer")
             connections.clipboardEnabled.value != true -> finishWith("Automatic clipboard is turned off")
             text == null -> finishWith("No text to send. The clipboard is empty or marked private.")
             else -> {
@@ -64,7 +64,7 @@ class ClipboardSendActivity : Activity() {
     }
 
     private fun Context.report(sent: Boolean) {
-        val message = if (sent) "Clipboard sent to Mac" else "Couldn't send the clipboard to the Mac"
+        val message = if (sent) "Clipboard sent" else "Couldn't send the clipboard"
         Handler(Looper.getMainLooper()).post { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
     }
 

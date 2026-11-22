@@ -24,6 +24,7 @@ abstract class DyskTile : TileService() {
 
     protected val connections get() = PhoneLinkService.connectionManager.value
     protected val connectedMacs get() = connections?.peers?.value.orEmpty().filter { it.isMac && it.isPaired && it.isConnected }
+    protected val connectedComputers get() = connections?.peers?.value.orEmpty().filter { it.isComputer && it.isPaired && it.isConnected }
 
     override fun onStartListening() {
         super.onStartListening()
@@ -61,8 +62,9 @@ abstract class DyskTile : TileService() {
 class ClipboardTile : DyskTile() {
     override fun update(tile: Tile) {
         tile.label = "Send clipboard"
-        tile.state = if (connectedMacs.isEmpty()) Tile.STATE_UNAVAILABLE else Tile.STATE_INACTIVE
-        setSubtitle(tile, if (connectedMacs.isEmpty()) "No Mac connected" else "To your Mac")
+        val computers = connectedComputers
+        tile.state = if (computers.isEmpty()) Tile.STATE_UNAVAILABLE else Tile.STATE_INACTIVE
+        setSubtitle(tile, computers.singleOrNull()?.name ?: if (computers.isEmpty()) "No computer connected" else "To your computers")
     }
 
     /** Android only lets an app read the clipboard while one of its screens has focus, so this opens one briefly. */

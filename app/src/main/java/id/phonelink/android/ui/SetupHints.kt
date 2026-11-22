@@ -56,12 +56,12 @@ internal fun NetworkHint(modifier: Modifier = Modifier) {
     }
     when {
         !state.onLan -> HintBox(
-            "This phone isn't on Wi-Fi. Join the same Wi-Fi as your Mac, or let the Mac join this phone's hotspot.",
+            "This phone isn't on Wi-Fi. Join the same Wi-Fi as your computer, or let the computer join this phone's hotspot.",
             "Open Wi-Fi settings",
             modifier,
         ) { open(context, Intent(Settings.ACTION_WIFI_SETTINGS)) }
         state.vpn -> HintBox(
-            "A VPN is on. Many VPNs hide devices on the same Wi-Fi, so your Mac may not show up. Turn the VPN off, or allow local network access in the VPN app.",
+            "A VPN is on. Many VPNs hide devices on the same Wi-Fi, so your computer may not show up. Turn the VPN off, or allow local network access in the VPN app.",
             "Open VPN settings",
             modifier,
         ) { open(context, Intent(Settings.ACTION_VPN_SETTINGS)) }
